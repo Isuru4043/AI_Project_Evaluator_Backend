@@ -48,6 +48,8 @@ INSTALLED_APPS = [
     # Project apps
     'core',
     'authentication',
+    'viva_evaluator',
+    
 ]
 
 MIDDLEWARE = [
@@ -170,3 +172,11 @@ SIMPLE_JWT = {
 # CORS Configuration (development — allow all origins)
 # =============================================================================
 CORS_ALLOW_ALL_ORIGINS = True
+
+# =============================================================================
+# Media Files
+# =============================================================================
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
+
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
