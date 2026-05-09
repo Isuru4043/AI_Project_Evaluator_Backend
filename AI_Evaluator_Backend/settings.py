@@ -180,3 +180,8 @@ MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# =============================================================================
+# Gemini API
+# =============================================================================
+GEMINI_API_KEY = 'AIzaSyAQjs6BEWncMCb0mfs7-99uGttGOcVlHhk'
