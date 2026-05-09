@@ -106,11 +106,7 @@ class CodeSubmissionSonarSummaryView(APIView):
 
         serializer = CodeSubmissionSonarSummarySerializer(code_submission)
         return Response(
-            {
-                "success": True,
-                "message": "Sonar summary retrieved.",
-                "data": serializer.data,
-            },
+            serializer.data,
             status=status.HTTP_200_OK,
         )
 

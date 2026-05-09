@@ -87,7 +87,6 @@ class CodeSubmissionSonarSummarySerializer(serializers.ModelSerializer):
         model = CodeSubmission
         fields = [
             "id",
-            "sonar_summary",
             "sonar_metrics",
             "sonar_dashboard",
             "sonar_report_url",
