@@ -144,7 +144,7 @@ STATIC_URL = 'static/'
 # Media uploads
 MEDIA_URL = '/uploads/'
 MEDIA_ROOT = BASE_DIR / 'uploads'
-
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 # =============================================================================
 # Custom User Model
