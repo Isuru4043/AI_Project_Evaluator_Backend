@@ -13,4 +13,5 @@ urlpatterns = [
 
     # Authentication endpoints — /api/auth/...
     path('api/auth/', include('authentication.urls')),
+    path('api/code-analysis/', include('code_analysis.urls')),
 ]

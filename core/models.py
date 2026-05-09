@@ -743,3 +743,122 @@ class ExaminerActionLog(models.Model):
 
     def __str__(self):
         return f"{self.examiner} — {self.action_type} @ {self.performed_at}"
+
+
+# =============================================================================
+# 21. CODE SUBMISSIONS (SOURCE UPLOADS)
+# =============================================================================
+
+class CodeSubmission(models.Model):
+    """Source code submitted for automated analysis."""
+
+    class SourceType(models.TextChoices):
+        GITHUB = 'github', 'GitHub Repository'
+        ZIP = 'zip', 'ZIP Upload'
+
+    class AnalysisStatus(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        FETCHING = 'fetching', 'Fetching'
+        SCANNING = 'scanning', 'Scanning'
+        SUMMARIZING = 'summarizing', 'Summarizing'
+        QUESTIONING = 'questioning', 'Generating Questions'
+        COMPLETED = 'completed', 'Completed'
+        FAILED = 'failed', 'Failed'
+
+    class QualityStatus(models.TextChoices):
+        UNKNOWN = 'unknown', 'Unknown'
+        PASSED = 'passed', 'Passed'
+        FAILED = 'failed', 'Failed'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project_submission = models.ForeignKey(
+        ProjectSubmission,
+        on_delete=models.CASCADE,
+        related_name='code_submissions',
+    )
+    source_type = models.CharField(max_length=20, choices=SourceType.choices)
+    github_url = models.TextField(null=True, blank=True)
+    zip_file = models.FileField(upload_to='code_uploads/', null=True, blank=True)
+
+    language_detected = models.CharField(max_length=100, null=True, blank=True)
+    build_system_detected = models.CharField(max_length=100, null=True, blank=True)
+    build_command = models.TextField(null=True, blank=True)
+
+    sonar_project_key = models.CharField(max_length=200, null=True, blank=True)
+    sonar_task_id = models.CharField(max_length=200, null=True, blank=True)
+    sonar_summary = models.JSONField(null=True, blank=True)
+    sonar_report_url = models.TextField(null=True, blank=True)
+
+    quality_status = models.CharField(
+        max_length=20,
+        choices=QualityStatus.choices,
+        default=QualityStatus.UNKNOWN,
+    )
+    quality_reason = models.TextField(null=True, blank=True)
+
+    code_summary = models.TextField(null=True, blank=True)
+    analysis_status = models.CharField(
+        max_length=20,
+        choices=AnalysisStatus.choices,
+        default=AnalysisStatus.PENDING,
+    )
+    analysis_error = models.TextField(null=True, blank=True)
+
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+    analyzed_at = models.DateTimeField(null=True, blank=True)
+    questions_generated_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = 'Code Submission'
+        verbose_name_plural = 'Code Submissions'
+        ordering = ['-uploaded_at']
+
+    def __str__(self):
+        return f"Code Submission {self.id} ({self.source_type})"
+
+
+# =============================================================================
+# 22. GENERATED VIVA QUESTIONS (FROM CODE ANALYSIS)
+# =============================================================================
+
+class GeneratedVivaQuestion(models.Model):
+    """Viva questions generated from code analysis."""
+
+    class SourceType(models.TextChoices):
+        CODE = 'code', 'Code Analysis'
+        SONAR = 'sonar', 'Sonar Issues'
+        COMBINED = 'combined', 'Combined'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    code_submission = models.ForeignKey(
+        CodeSubmission,
+        on_delete=models.CASCADE,
+        related_name='generated_questions',
+    )
+    evaluation_session = models.ForeignKey(
+        EvaluationSession,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='generated_code_questions',
+    )
+    question_text = models.TextField()
+    blooms_level = models.CharField(
+        max_length=20,
+        choices=VivaQuestion.BloomsLevel.choices,
+        null=True,
+        blank=True,
+    )
+    source_type = models.CharField(max_length=20, choices=SourceType.choices)
+    code_reference = models.TextField(null=True, blank=True)
+    sonar_issue_reference = models.JSONField(null=True, blank=True)
+    reasoning = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Generated Viva Question'
+        verbose_name_plural = 'Generated Viva Questions'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Generated Question {self.id}"
