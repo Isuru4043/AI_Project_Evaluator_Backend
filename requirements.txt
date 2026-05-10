@@ -7,4 +7,7 @@ gunicorn==26.0.0
 packaging==26.2
 psycopg2-binary==2.9.12
 PyJWT==2.12.1
+google-generativeai==0.8.3
+requests==2.32.3
+python-dotenv==1.0.1
 sqlparse==0.5.5

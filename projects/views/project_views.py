@@ -11,9 +11,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from core.models import (
-    EvaluationSession, ExaminerProfile, GroupMember, Project,
+    CodeSubmission, EvaluationSession, ExaminerProfile, GroupMember, Project,
     ProjectExaminer, ProjectSubmission, StudentGroup, StudentProfile, User,
 )
+from code_analysis.services.analysis_runner import enqueue_code_analysis
 from projects.permissions import IsExaminer, IsExaminerOrStudent, IsProjectLead, IsStudent
 from projects.serializers import (
     AddExaminerSerializer, AvailableProjectSerializer, MyEnrollmentSerializer,
@@ -429,11 +430,33 @@ class SubmitProjectView(APIView):
             if submission.report_file_url or submission.github_repo_url:
                 return _err('You have already submitted. Resubmission is not allowed.')
 
-            submission.report_file_url = ser.validated_data.get('report_file_url')
-            submission.github_repo_url = ser.validated_data.get('github_repo_url')
-            submission.save()
+            code_submission = None
 
-            return _ok('Submission successful.', ProjectSubmissionSerializer(submission).data)
+            with transaction.atomic():
+                submission.report_file_url = ser.validated_data.get('report_file_url')
+                submission.github_repo_url = ser.validated_data.get('github_repo_url')
+                submission.save()
+
+                github_repo_url = ser.validated_data.get('github_repo_url')
+                if github_repo_url:
+                    code_submission = CodeSubmission.objects.create(
+                        project_submission=submission,
+                        source_type=CodeSubmission.SourceType.GITHUB,
+                        github_url=github_repo_url,
+                    )
+
+                    transaction.on_commit(
+                        lambda code_submission_id=code_submission.id: enqueue_code_analysis(
+                            code_submission_id,
+                        )
+                    )
+
+            response_data = ProjectSubmissionSerializer(submission).data
+            if code_submission:
+                response_data['code_submission_id'] = str(code_submission.id)
+                response_data['code_analysis_status'] = code_submission.analysis_status
+
+            return _ok('Submission successful. Code analysis has been started.', response_data)
         except Exception as e:
             return _500(e)
 

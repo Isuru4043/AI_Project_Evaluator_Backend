@@ -270,13 +270,28 @@ class ProjectSubmissionSerializer(serializers.ModelSerializer):
     student_name = serializers.CharField(source='student.user.full_name', read_only=True, default=None)
     student_reg_no = serializers.CharField(source='student.registration_number', read_only=True, default=None)
     group_name = serializers.CharField(source='group.group_name', read_only=True, default=None)
+    latest_code_submission_id = serializers.SerializerMethodField()
+    latest_code_analysis_status = serializers.SerializerMethodField()
 
     class Meta:
         model = ProjectSubmission
         fields = [
             'id', 'project', 'student_name', 'student_reg_no',
             'group_name', 'report_file_url', 'github_repo_url', 'submitted_at',
+            'latest_code_submission_id', 'latest_code_analysis_status',
         ]
+
+    def get_latest_code_submission_id(self, obj):
+        latest_code_submission = obj.code_submissions.order_by('-uploaded_at').first()
+        if not latest_code_submission:
+            return None
+        return str(latest_code_submission.id)
+
+    def get_latest_code_analysis_status(self, obj):
+        latest_code_submission = obj.code_submissions.order_by('-uploaded_at').first()
+        if not latest_code_submission:
+            return None
+        return latest_code_submission.analysis_status
 
 
 # =============================================================================
