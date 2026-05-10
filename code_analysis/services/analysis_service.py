@@ -60,13 +60,28 @@ class CodeAnalysisService:
             code_excerpt = collect_code_excerpt(repo_path)
             if self.gemini.is_enabled():
                 submission.code_summary = self.gemini.summarize_code(code_excerpt)
+                question_excerpt = collect_question_focus_excerpt(repo_path)
+                questions = self.gemini.generate_questions(question_excerpt)
+                for question in questions:
+                    GeneratedVivaQuestion.objects.create(
+                        code_submission=submission,
+                        question_text=question.get("question", ""),
+                        blooms_level=question.get("blooms_level"),
+                        source_type=GeneratedVivaQuestion.SourceType.CODE,
+                        code_reference=question.get("code_reference"),
+                        sonar_issue_reference=None,
+                        reasoning=question.get("reasoning"),
+                    )
+                submission.questions_generated_at = timezone.now() if questions else None
             else:
                 submission.code_summary = None
+                submission.questions_generated_at = None
 
             submission.analysis_status = CodeSubmission.AnalysisStatus.SCANNING
             submission.save(update_fields=[
                 "sonar_task_id",
                 "code_summary",
+                "questions_generated_at",
                 "analysis_status",
             ])
 
@@ -124,37 +139,12 @@ class CodeAnalysisService:
             ])
             return submission
 
-        submission.analysis_status = CodeSubmission.AnalysisStatus.QUESTIONING
+        submission.analysis_status = CodeSubmission.AnalysisStatus.COMPLETED
         submission.save(update_fields=[
             "sonar_summary",
             "analyzed_at",
             "quality_status",
             "quality_reason",
-            "analysis_status",
-        ])
-
-        questions = []
-        if self.gemini.is_enabled() and submission.code_summary:
-            questions = self.gemini.generate_questions(
-                submission.code_summary or "",
-                submission.sonar_summary or {},
-            )
-
-        for question in questions:
-            GeneratedVivaQuestion.objects.create(
-                code_submission=submission,
-                question_text=question.get("question", ""),
-                blooms_level=question.get("blooms_level"),
-                source_type=_map_question_source(question.get("source")),
-                code_reference=question.get("code_reference"),
-                sonar_issue_reference=question.get("sonar_issue"),
-                reasoning=question.get("reasoning"),
-            )
-
-        submission.questions_generated_at = timezone.now()
-        submission.analysis_status = CodeSubmission.AnalysisStatus.COMPLETED
-        submission.save(update_fields=[
-            "questions_generated_at",
             "analysis_status",
         ])
 
@@ -226,6 +216,36 @@ def collect_code_excerpt(repo_path):
     return "".join(parts)
 
 
+def collect_question_focus_excerpt(repo_path):
+    repo_root = Path(repo_path)
+    max_chars = getattr(settings, "CODE_ANALYSIS_QUESTION_PROMPT_CHARS", 12000)
+    max_file_bytes = 200000
+    max_files = getattr(settings, "CODE_ANALYSIS_QUESTION_MAX_FILES", 8)
+    total = 0
+    parts = []
+
+    files = list(iter_code_files(repo_path))
+    ranked_files = sorted(files, key=_question_file_score, reverse=True)
+
+    for file_path in ranked_files[:max_files]:
+        if total >= max_chars:
+            break
+        try:
+            if file_path.stat().st_size > max_file_bytes:
+                continue
+            content = file_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+
+        header = f"\n# Focus File: {file_path.relative_to(repo_root)}\n"
+        remaining = max_chars - total
+        chunk = (header + content)[:remaining]
+        parts.append(chunk)
+        total += len(chunk)
+
+    return "".join(parts)
+
+
 def run_build_command(command, repo_path):
     if not command:
         return
@@ -255,12 +275,45 @@ def _scanner_extra_args():
     return extra
 
 
-def _map_question_source(source_value):
-    if source_value in ("sonar", "sonarqube", "sonar_issues"):
-        return GeneratedVivaQuestion.SourceType.SONAR
-    if source_value == "combined":
-        return GeneratedVivaQuestion.SourceType.COMBINED
-    return GeneratedVivaQuestion.SourceType.CODE
+def _question_file_score(file_path):
+    path_text = str(file_path).lower()
+    file_name = file_path.name.lower()
+
+    if file_name.startswith("test") or "test" in file_name or "spec" in file_name:
+        return -100
+
+    keywords = {
+        "action": 6,
+        "api": 5,
+        "route": 5,
+        "service": 5,
+        "controller": 5,
+        "helper": 5,
+        "util": 4,
+        "model": 4,
+        "schema": 4,
+        "form": 4,
+        "auth": 4,
+        "login": 4,
+        "submit": 4,
+        "analysis": 4,
+        "question": 4,
+        "page": 3,
+        "component": 3,
+        "job": 2,
+        "listing": 2,
+        "submission": 2,
+    }
+
+    score = 0
+    for keyword, weight in keywords.items():
+        if keyword in path_text or keyword in file_name:
+            score += weight
+
+    if file_path.suffix.lower() in {".ts", ".tsx", ".js", ".jsx", ".py", ".java", ".go", ".php"}:
+        score += 1
+
+    return score
 
 
 def compute_quality_status(sonar_summary):

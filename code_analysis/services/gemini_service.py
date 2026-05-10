@@ -34,20 +34,18 @@ class GeminiService:
         response = self._model.generate_content(prompt)
         return response.text.strip()
 
-    def generate_questions(self, code_summary, sonar_summary, max_questions=8):
+    def generate_questions(self, code_excerpt, max_questions=8):
         if not self.is_enabled():
             return []
 
-        sonar_issues = sonar_summary.get("issues", []) if sonar_summary else []
-        issues_text = json.dumps(sonar_issues[:10], indent=2)
-
         prompt = (
-            "Generate viva questions for a student project. Use Bloom's taxonomy "
-            "(Understand, Apply, Analyze, Evaluate, Create).\n\n"
-            "CODE SUMMARY:\n"
-            f"{code_summary}\n\n"
-            "SONAR ISSUES (top):\n"
-            f"{issues_text}\n\n"
+            "Generate viva questions using ONLY the provided source code excerpt. "
+            "Do not use SonarQube data, issue lists, or quality metrics. Focus on "
+            "important source-code sections such as routes, components, services, "
+            "validation, database access, auth, helpers, error handling, and data flow. "
+            "Use Bloom's taxonomy (Understand, Apply, Analyze, Evaluate, Create).\n\n"
+            "SOURCE CODE EXCERPT:\n"
+            f"{code_excerpt}\n\n"
             f"Return a JSON array of up to {max_questions} objects with keys: "
             "question, blooms_level, source, code_reference, reasoning."
         )
