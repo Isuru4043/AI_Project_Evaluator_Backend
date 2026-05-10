@@ -55,6 +55,7 @@ INSTALLED_APPS = [
     'core',
     'authentication',
     'code_analysis',
+    'projects',
 ]
 
 MIDDLEWARE = [
