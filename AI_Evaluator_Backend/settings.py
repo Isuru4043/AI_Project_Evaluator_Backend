@@ -197,10 +197,10 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # Gemini API
 # =============================================================================
 
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', 'AIzaSyAfP2u6pyXUSSK2CMoaH9E7vqNPGn2rUYg')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
 GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash-lite')
 
-GROQ_API_KEY = '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'
+GROQ_API_KEY = ''
 # =============================================================================
 # Code Analysis Configuration
 
