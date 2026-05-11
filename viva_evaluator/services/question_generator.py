@@ -2,7 +2,6 @@ import json
 from google import genai
 from django.conf import settings
 
-# Initialize client using the new SDK
 client = genai.Client(api_key=settings.GEMINI_API_KEY)
 MODEL = "gemini-2.5-flash"
 
@@ -18,11 +17,31 @@ def generate_first_question(
     criteria_name: str,
     criteria_description: str,
     difficulty: str = "medium",
+    question_hints: list = None,
 ) -> dict:
     """
     Generates the opening viva question for a given rubric criterion.
+
+    Args:
+        report_text:           Full extracted text of the student's report.
+        criteria_name:         e.g. "Problem Formulation"
+        criteria_description:  The examiner's description of this criterion.
+        difficulty:            'easy', 'medium', or 'hard'
+        question_hints:        Optional list of hint strings from the examiner.
+                               Used as guidelines, not exact questions.
+
+    Returns:
+        dict with keys: question_text, blooms_level, difficulty
     """
     blooms_level = DIFFICULTY_TO_BLOOMS.get(difficulty, ["Apply", "Analyze"])[0]
+
+    hints_section = ""
+    if question_hints:
+        hints_text = "\n".join(f"- {h}" for h in question_hints)
+        hints_section = f"""
+EXAMINER'S SUGGESTED QUESTION AREAS (use as loose guidelines only):
+{hints_text}
+"""
 
     prompt = f"""
 You are an academic viva examiner evaluating a student's final year project report.
@@ -33,7 +52,7 @@ Description: {criteria_description}
 
 STUDENT REPORT (excerpt):
 {report_text[:3000]}
-
+{hints_section}
 TASK:
 Generate ONE clear, focused viva question that:
 - Directly relates to the criterion above
@@ -41,6 +60,7 @@ Generate ONE clear, focused viva question that:
 - Is based on what the student has actually written in their report
 - Cannot be answered with a simple yes or no
 - Is phrased naturally as a spoken question
+- If examiner hints are provided, draw inspiration from them but adapt to the report
 
 Respond in this exact JSON format with no extra text or markdown:
 {{
@@ -66,11 +86,33 @@ def generate_followup_question(
     previous_answer: str,
     next_difficulty: str,
     question_number: int,
+    question_hints: list = None,
 ) -> dict:
     """
     Generates a follow-up question based on the student's previous answer.
+
+    Args:
+        report_text:           Full extracted text of the student's report.
+        criteria_name:         Current rubric criterion being evaluated.
+        criteria_description:  Examiner's description of the criterion.
+        previous_question:     The question that was just asked.
+        previous_answer:       What the student said in response.
+        next_difficulty:       'easy', 'medium', or 'hard'
+        question_number:       How many questions asked for this criterion so far.
+        question_hints:        Optional list of hint strings from the examiner.
+
+    Returns:
+        dict with keys: question_text, blooms_level, difficulty
     """
     blooms_level = DIFFICULTY_TO_BLOOMS.get(next_difficulty, ["Apply", "Analyze"])[0]
+
+    hints_section = ""
+    if question_hints:
+        hints_text = "\n".join(f"- {h}" for h in question_hints)
+        hints_section = f"""
+EXAMINER'S SUGGESTED QUESTION AREAS (use as loose guidelines only):
+{hints_text}
+"""
 
     prompt = f"""
 You are an academic viva examiner conducting an oral examination.
@@ -85,7 +127,7 @@ STUDENT REPORT (excerpt):
 CONVERSATION SO FAR:
 Question asked: {previous_question}
 Student answered: {previous_answer}
-
+{hints_section}
 TASK:
 Generate ONE follow-up viva question that:
 - Builds naturally on the student's answer above
@@ -94,6 +136,7 @@ Generate ONE follow-up viva question that:
 - Stays focused on the criterion: {criteria_name}
 - Is different from the previous question
 - Cannot be answered with a simple yes or no
+- If examiner hints are provided, consider them but prioritize the conversation flow
 
 This is question number {question_number} for this criterion.
 
