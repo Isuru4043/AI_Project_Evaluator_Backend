@@ -394,6 +394,9 @@ class SubmitProjectView(APIView):
     """POST /api/projects/<project_id>/submit/"""
     permission_classes = [IsAuthenticated, IsStudent]
 
+    # File validation constants
+    MAX_REPORT_SIZE = 50 * 1024 * 1024  # 50 MB
+
     def post(self, request, project_id):
         try:
             sp = _get_student_profile(request.user)
@@ -405,10 +408,6 @@ class SubmitProjectView(APIView):
                 return _err('Project not found.', code=404)
             if project.submission_deadline and project.submission_deadline < timezone.now():
                 return _err('Submission deadline has passed.')
-
-            ser = SubmitProjectSerializer(data=request.data)
-            if not ser.is_valid():
-                return _err('Validation failed.', ser.errors)
 
             if project.is_group_project:
                 membership = GroupMember.objects.filter(
@@ -430,14 +429,37 @@ class SubmitProjectView(APIView):
             if submission.report_file_url or submission.github_repo_url:
                 return _err('You have already submitted. Resubmission is not allowed.')
 
+            # Handle file upload
+            report_file = request.FILES.get('report_file')
+            github_repo_url = request.data.get('github_repo_url', '')
+
+            report_blob_url = None
+            if report_file:
+                # Validate file type
+                if not report_file.name.lower().endswith('.pdf'):
+                    return _err('Only PDF files are allowed for reports.')
+                # Validate file size
+                if report_file.size > self.MAX_REPORT_SIZE:
+                    return _err('File too large. Maximum report size is 50MB.')
+
+                from AI_Evaluator_Backend.azure_storage import upload_report_to_blob
+                if project.is_group_project:
+                    report_blob_url = upload_report_to_blob(
+                        report_file, str(project.id), group_id=str(membership.group.id),
+                    )
+                else:
+                    report_blob_url = upload_report_to_blob(
+                        report_file, str(project.id), student_id=str(sp.id),
+                    )
+
             code_submission = None
 
             with transaction.atomic():
-                submission.report_file_url = ser.validated_data.get('report_file_url')
-                submission.github_repo_url = ser.validated_data.get('github_repo_url')
+                if report_blob_url:
+                    submission.report_file_url = report_blob_url
+                submission.github_repo_url = github_repo_url or None
                 submission.save()
 
-                github_repo_url = ser.validated_data.get('github_repo_url')
                 if github_repo_url:
                     code_submission = CodeSubmission.objects.create(
                         project_submission=submission,
@@ -456,7 +478,7 @@ class SubmitProjectView(APIView):
                 response_data['code_submission_id'] = str(code_submission.id)
                 response_data['code_analysis_status'] = code_submission.analysis_status
 
-            return _ok('Submission successful. Code analysis has been started.', response_data)
+            return _ok('Submission successful.', response_data)
         except Exception as e:
             return _500(e)
 

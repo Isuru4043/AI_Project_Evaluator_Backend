@@ -58,6 +58,7 @@ INSTALLED_APPS = [
     
     'code_analysis',
     'projects',
+    'sessions_app',
 ]
 
 MIDDLEWARE = [
