@@ -18,6 +18,10 @@ urlpatterns = [
 
     # Viva evaluator endpoints
     path('api/viva/', include('viva_evaluator.urls')),
+    path('api/code-analysis/', include('code_analysis.urls')),
+
+    # Projects endpoints — /api/projects/...
+    path('api/projects/', include('projects.urls')),
 ]
 
 # Media file serving

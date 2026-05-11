@@ -10,11 +10,17 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
+import os
 from pathlib import Path
 from datetime import timedelta
 
+from dotenv import load_dotenv
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Load environment variables from .env if present.
+load_dotenv(BASE_DIR / '.env')
 
 
 # Quick-start development settings - unsuitable for production
@@ -50,6 +56,8 @@ INSTALLED_APPS = [
     'authentication',
     'viva_evaluator',
     
+    'code_analysis',
+    'projects',
 ]
 
 MIDDLEWARE = [
@@ -136,6 +144,10 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 
+# Media uploads
+MEDIA_URL = '/uploads/'
+MEDIA_ROOT = BASE_DIR / 'uploads'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 # =============================================================================
 # Custom User Model
@@ -185,3 +197,45 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # Gemini API
 # =============================================================================
 GEMINI_API_KEY = 'AIzaSyAQjs6BEWncMCb0mfs7-99uGttGOcVlHhk'
+
+# =============================================================================
+# Code Analysis Configuration
+# =============================================================================
+SONAR_HOST_URL = os.getenv('SONAR_HOST_URL', 'https://sonarcloud.io')
+SONAR_ORG_KEY = os.getenv('SONAR_ORG_KEY', '')
+SONAR_TOKEN = os.getenv('SONAR_TOKEN', '')
+SONAR_SCANNER_BIN = os.getenv('SONAR_SCANNER_BIN', 'sonar-scanner')
+
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
+GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
+
+CODE_ANALYSIS_MAX_ZIP_MB = int(os.getenv('CODE_ANALYSIS_MAX_ZIP_MB', '100'))
+CODE_ANALYSIS_MAX_PROMPT_CHARS = int(os.getenv('CODE_ANALYSIS_MAX_PROMPT_CHARS', '20000'))
+CODE_ANALYSIS_ASYNC = os.getenv('CODE_ANALYSIS_ASYNC', 'true').lower() == 'true'
+CODE_ANALYSIS_MAX_RATING = float(os.getenv('CODE_ANALYSIS_MAX_RATING', '2'))
+CODE_ANALYSIS_MIN_COVERAGE = float(os.getenv('CODE_ANALYSIS_MIN_COVERAGE', '0'))
+CODE_ANALYSIS_MAX_DUPLICATION = float(os.getenv('CODE_ANALYSIS_MAX_DUPLICATION', '5'))
+
+CODE_ANALYSIS_ALLOWED_EXTENSIONS = [
+    '.py',
+    '.js',
+    '.ts',
+    '.java',
+    '.cpp',
+    '.c',
+    '.h',
+    '.cs',
+    '.go',
+    '.rb',
+    '.php',
+    '.kt',
+    '.swift',
+    '.rs',
+    '.json',
+    '.yml',
+    '.yaml',
+    '.toml',
+    '.xml',
+    '.html',
+    '.css',
+]
