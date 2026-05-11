@@ -15,3 +15,4 @@ sqlparse==0.5.5
 google-genai
 PyMuPDF
 python-docx
+azure-storage-blob

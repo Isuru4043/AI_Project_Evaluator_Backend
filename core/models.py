@@ -403,6 +403,7 @@ class EvaluationSession(models.Model):
     scheduled_start = models.DateTimeField()
     scheduled_end = models.DateTimeField()
     actual_start = models.DateTimeField(null=True, blank=True)
+    demo_completed_at = models.DateTimeField(null=True, blank=True)
     location_room = models.CharField(max_length=255, null=True, blank=True)
     status = models.CharField(
         max_length=20,
@@ -524,11 +525,24 @@ class VivaQuestion(models.Model):
         EVALUATE = 'Evaluate', 'Evaluate'
         CREATE = 'Create', 'Create'
 
+    class QuestionSource(models.TextChoices):
+        AI = 'ai', 'AI'
+        EXAMINER = 'examiner', 'Examiner'
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     session = models.ForeignKey(
         EvaluationSession,
         on_delete=models.CASCADE,
+        null=True,
+        blank=True,
         related_name='viva_questions',
+    )
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='examiner_questions',
     )
     question_text = models.TextField()
     blooms_level = models.CharField(
@@ -536,6 +550,11 @@ class VivaQuestion(models.Model):
         choices=BloomsLevel.choices,
         null=True,
         blank=True,
+    )
+    question_source = models.CharField(
+        max_length=20,
+        choices=QuestionSource.choices,
+        default=QuestionSource.AI,
     )
     question_order = models.IntegerField()
     generated_at = models.DateTimeField(auto_now_add=True)
