@@ -54,6 +54,8 @@ INSTALLED_APPS = [
     # Project apps
     'core',
     'authentication',
+    'viva_evaluator',
+    
     'code_analysis',
     'projects',
 ]
@@ -183,6 +185,18 @@ SIMPLE_JWT = {
 # =============================================================================
 CORS_ALLOW_ALL_ORIGINS = True
 
+# =============================================================================
+# Media Files
+# =============================================================================
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
+
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# =============================================================================
+# Gemini API
+# =============================================================================
+GEMINI_API_KEY = 'AIzaSyAQjs6BEWncMCb0mfs7-99uGttGOcVlHhk'
 
 # =============================================================================
 # Code Analysis Configuration
