@@ -6,10 +6,10 @@ from core.models import ProjectSubmission, VivaQuestion, VivaAnswer, RubricCrite
 class SubmissionIndexStatus(models.Model):
 
     class IndexStatus(models.TextChoices):
-        PENDING   = 'pending',   'Pending'
+        PENDING    = 'pending',    'Pending'
         PROCESSING = 'processing', 'Processing'
-        READY     = 'ready',     'Ready'
-        FAILED    = 'failed',    'Failed'
+        READY      = 'ready',      'Ready'
+        FAILED     = 'failed',     'Failed'
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
@@ -123,3 +123,29 @@ class VivaAnswerExtension(models.Model):
 
     def __str__(self):
         return f"Answer extension — LLM score: {self.llm_score}"
+
+
+class CriteriaQuestionHint(models.Model):
+    """
+    Optional sample questions provided by the examiner for a rubric criterion.
+    Used as guidelines for the AI question generator.
+    If none are provided the AI generates freely from the rubric description.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    criteria = models.ForeignKey(
+        RubricCriteria,
+        on_delete=models.CASCADE,
+        related_name='question_hints',
+    )
+    hint_text = models.TextField()
+    order = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Criteria Question Hint'
+        verbose_name_plural = 'Criteria Question Hints'
+        ordering = ['order']
+
+    def __str__(self):
+        return f"Hint for {self.criteria.criteria_name}: {self.hint_text[:60]}"

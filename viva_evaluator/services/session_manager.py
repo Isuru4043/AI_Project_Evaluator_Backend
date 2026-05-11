@@ -5,28 +5,15 @@ from django.conf import settings
 client = genai.Client(api_key=settings.GEMINI_API_KEY)
 MODEL = "gemini-2.5-flash"
 
-# How many questions to ask per rubric criterion
-QUESTIONS_PER_CRITERION = 3
-
 
 def get_session_context(session_id: str) -> dict:
     """
     Loads the current state of a viva session from the database.
 
-    Returns everything the adaptive loop needs to decide what to do next:
-    - Which criteria have been covered
-    - Which criterion is currently active
-    - What questions and answers have happened so far
-    - Current difficulty level
-
-    Args:
-        session_id: UUID of the EvaluationSession
-
-    Returns:
-        dict with session state
+    Reads questions_to_ask per criterion from the rubric.
+    Loads question hints per criterion for the generator.
     """
-    from core.models import EvaluationSession, RubricCategory
-    from viva_evaluator.models import VivaQuestionExtension
+    from core.models import EvaluationSession
 
     session = EvaluationSession.objects.get(id=session_id)
     project = session.project
@@ -35,21 +22,27 @@ def get_session_context(session_id: str) -> dict:
     all_criteria = []
     for category in project.rubric_categories.all().order_by('id'):
         for criterion in category.criteria.all().order_by('id'):
+
+            # Load hints for this criterion
+            hints = list(
+                criterion.question_hints.values_list('hint_text', flat=True)
+            )
+
             all_criteria.append({
                 'id': str(criterion.id),
                 'name': criterion.criteria_name,
                 'description': criterion.description or '',
                 'max_score': float(criterion.max_score),
                 'category': category.category_name,
+                'questions_to_ask': criterion.questions_to_ask,
+                'hints': hints,
             })
 
     # Get all questions asked so far in this session
     asked_questions = session.viva_questions.all().order_by('question_order')
 
-    # Figure out which criteria have been fully covered
-    covered_criteria_ids = set()
-    current_criterion_id = None
-    current_criterion_question_count = 0
+    # Count questions per criterion
+    criterion_question_counts = {}
     current_difficulty = 'medium'
 
     for question in asked_questions:
@@ -57,30 +50,28 @@ def get_session_context(session_id: str) -> dict:
             ext = question.extension
             crit_id = str(ext.criteria_id) if ext.criteria_id else None
             current_difficulty = ext.difficulty_level
-
             if crit_id:
-                # Count how many questions were asked for each criterion
-                criterion_questions = [
-                    q for q in asked_questions
-                    if hasattr(q, 'extension') and
-                    str(q.extension.criteria_id) == crit_id
-                ]
-                if len(criterion_questions) >= QUESTIONS_PER_CRITERION:
-                    covered_criteria_ids.add(crit_id)
-                else:
-                    current_criterion_id = crit_id
-                    current_criterion_question_count = len(criterion_questions)
+                criterion_question_counts[crit_id] = (
+                    criterion_question_counts.get(crit_id, 0) + 1
+                )
         except Exception:
             pass
 
-    # Get the next difficulty signal from the last answer
+    # Figure out which criteria are fully covered
+    covered_criteria_ids = set()
+    for criterion in all_criteria:
+        crit_id = criterion['id']
+        asked = criterion_question_counts.get(crit_id, 0)
+        if asked >= criterion['questions_to_ask']:
+            covered_criteria_ids.add(crit_id)
+
+    # Get next difficulty signal from last answer
     last_question = asked_questions.last()
     if last_question:
         last_answers = last_question.answers.all()
         if last_answers.exists():
-            last_answer = last_answers.last()
             try:
-                next_diff = last_answer.extension.next_difficulty_signal
+                next_diff = last_answers.last().extension.next_difficulty_signal
                 if next_diff == 'higher':
                     current_difficulty = _escalate_difficulty(current_difficulty)
                 elif next_diff == 'lower':
@@ -88,22 +79,20 @@ def get_session_context(session_id: str) -> dict:
             except Exception:
                 pass
 
-    # Find the next uncovered criterion
+    # Find next criterion that isn't fully covered
     next_criterion = None
+    current_criterion_question_count = 0
+
     for criterion in all_criteria:
         if criterion['id'] not in covered_criteria_ids:
-            if current_criterion_id is None or criterion['id'] == current_criterion_id:
-                next_criterion = criterion
-                break
-
-    # If current criterion is done, move to next
-    if current_criterion_question_count >= QUESTIONS_PER_CRITERION:
-        for criterion in all_criteria:
-            if criterion['id'] not in covered_criteria_ids:
-                next_criterion = criterion
-                current_criterion_question_count = 0
-                current_difficulty = 'medium'  # Reset difficulty for new criterion
-                break
+            next_criterion = criterion
+            current_criterion_question_count = criterion_question_counts.get(
+                criterion['id'], 0
+            )
+            # Reset difficulty when moving to a new criterion
+            if current_criterion_question_count == 0:
+                current_difficulty = 'medium'
+            break
 
     return {
         'session': session,
@@ -120,23 +109,12 @@ def get_session_context(session_id: str) -> dict:
 def generate_session_report(session_id: str) -> dict:
     """
     Generates the final XAI report for a completed viva session.
-
-    Aggregates all QA turns, scores per criterion, and asks the LLM
-    to write an overall explanation of the student's performance.
-
-    Args:
-        session_id: UUID of the EvaluationSession
-
-    Returns:
-        dict with full session report
     """
-    from core.models import EvaluationSession, RubricCriteria
-    from viva_evaluator.models import VivaQuestionExtension, VivaAnswerExtension
+    from core.models import EvaluationSession
 
     session = EvaluationSession.objects.get(id=session_id)
     questions = session.viva_questions.all().order_by('question_order')
 
-    # Build a transcript and per-criterion scores
     transcript = []
     criteria_scores = {}
 
@@ -168,7 +146,6 @@ def generate_session_report(session_id: str) -> dict:
 
             q_data['answers'].append(a_data)
 
-            # Accumulate scores per criterion
             if criteria_id:
                 if criteria_id not in criteria_scores:
                     criteria_scores[criteria_id] = {
@@ -191,9 +168,10 @@ def generate_session_report(session_id: str) -> dict:
             per_criterion_summary[data['name']] = round(avg, 2)
             overall_scores.extend(data['scores'])
 
-    overall_avg = round(sum(overall_scores) / len(overall_scores), 2) if overall_scores else 0
+    overall_avg = round(
+        sum(overall_scores) / len(overall_scores), 2
+    ) if overall_scores else 0
 
-    # Ask LLM for overall XAI explanation
     transcript_text = json.dumps(transcript, indent=2)
 
     prompt = f"""
@@ -240,6 +218,35 @@ Respond in this exact JSON format with no extra text or markdown:
     }
 
 
+def create_viva_question(session, question_text, blooms_level, question_order):
+    """
+    Creates a VivaQuestion using raw SQL to handle columns not yet
+    reflected in the Django model.
+    """
+    from django.db import connection
+    import uuid
+
+    question_id = uuid.uuid4()
+
+    with connection.cursor() as cursor:
+        cursor.execute("""
+            INSERT INTO core_vivaquestion
+                (id, session_id, question_text, blooms_level, question_order, generated_at, question_source)
+            VALUES
+                (%s, %s, %s, %s, %s, NOW(), %s)
+        """, [
+            str(question_id),
+            str(session.id),
+            question_text,
+            blooms_level,
+            question_order,
+            'ai',
+        ])
+
+    from core.models import VivaQuestion
+    return VivaQuestion.objects.get(id=question_id)
+
+
 def _escalate_difficulty(current: str) -> str:
     progression = ['easy', 'medium', 'hard']
     idx = progression.index(current) if current in progression else 1
@@ -261,4 +268,9 @@ def _parse_json_response(response_text: str) -> dict:
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        return {"overall_summary": text, "strengths": "", "gaps": "", "examiner_recommendation": ""}
+        return {
+            "overall_summary": text,
+            "strengths": "",
+            "gaps": "",
+            "examiner_recommendation": ""
+        }

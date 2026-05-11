@@ -197,18 +197,20 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # =============================================================================
 # Gemini API
 # =============================================================================
-GEMINI_API_KEY = 'AIzaSyAQjs6BEWncMCb0mfs7-99uGttGOcVlHhk'
 
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
+GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash-lite')
+
+GROQ_API_KEY = ''
 # =============================================================================
 # Code Analysis Configuration
+
 # =============================================================================
 SONAR_HOST_URL = os.getenv('SONAR_HOST_URL', 'https://sonarcloud.io')
 SONAR_ORG_KEY = os.getenv('SONAR_ORG_KEY', '')
 SONAR_TOKEN = os.getenv('SONAR_TOKEN', '')
 SONAR_SCANNER_BIN = os.getenv('SONAR_SCANNER_BIN', 'sonar-scanner')
 
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
-GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
 
 CODE_ANALYSIS_MAX_ZIP_MB = int(os.getenv('CODE_ANALYSIS_MAX_ZIP_MB', '100'))
 CODE_ANALYSIS_MAX_PROMPT_CHARS = int(os.getenv('CODE_ANALYSIS_MAX_PROMPT_CHARS', '20000'))
