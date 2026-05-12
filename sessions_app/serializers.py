@@ -104,12 +104,14 @@ class SessionRecordingSerializer(serializers.ModelSerializer):
 class StudentSessionStatusSerializer(serializers.ModelSerializer):
     """Serializes session status for the student dashboard."""
 
+    session_id = serializers.UUIDField(source='id', read_only=True)
+    project_id = serializers.UUIDField(read_only=True)
     project_name = serializers.CharField(source='project.project_name', read_only=True)
     group_name = serializers.CharField(source='group.group_name', read_only=True, default=None)
 
     class Meta:
         model = EvaluationSession
         fields = [
-            'project_name', 'scheduled_start', 'scheduled_end',
+            'session_id', 'project_id', 'project_name', 'scheduled_start', 'scheduled_end',
             'location_room', 'status', 'group_name', 'demo_completed_at',
         ]
