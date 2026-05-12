@@ -198,6 +198,10 @@ class SessionListView(APIView):
                 project=project,
             ).select_related('student__user', 'group').order_by('scheduled_start')
 
+            status_filter = request.query_params.get('status')
+            if status_filter:
+                sessions = sessions.filter(status=status_filter)
+
             if project.is_group_project:
                 # Group sessions by group
                 groups = {}
@@ -334,5 +338,61 @@ class SessionResetView(APIView):
 
             EvaluationSession.objects.filter(project=project).delete()
             return _ok('All sessions have been reset. You can now reschedule.')
+        except Exception as e:
+            return _500(e)
+
+
+class NextSessionView(APIView):
+    """GET /api/projects/sessions/next/"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            now = timezone.now()
+            next_session = None
+
+            if request.user.role == 'student':
+                sp = _get_student_profile(request.user)
+                if not sp:
+                    return _err('Student profile not found.', code=404)
+                next_session = EvaluationSession.objects.filter(
+                    student=sp,
+                    status='scheduled',
+                    scheduled_start__gte=now
+                ).select_related('project', 'group').order_by('scheduled_start').first()
+
+            elif request.user.role == 'examiner':
+                ep = _get_examiner_profile(request.user)
+                if not ep:
+                    return _err('Examiner profile not found.', code=404)
+                project_ids = ProjectExaminer.objects.filter(examiner=ep).values_list('project_id', flat=True)
+                next_session = EvaluationSession.objects.filter(
+                    project_id__in=project_ids,
+                    status='scheduled',
+                    scheduled_start__gte=now
+                ).select_related('project', 'student__user', 'group').order_by('scheduled_start').first()
+            else:
+                return _err('Invalid role.', code=403)
+
+            if not next_session:
+                return _err('No upcoming sessions.', code=404)
+
+            data = {
+                'session_id': str(next_session.id),
+                'project_id': str(next_session.project_id),
+                'project_name': next_session.project.project_name,
+                'scheduled_start': next_session.scheduled_start,
+                'scheduled_end': next_session.scheduled_end,
+                'location_room': next_session.location_room,
+                'status': next_session.status,
+            }
+
+            if next_session.group:
+                data['group_name'] = next_session.group.group_name
+            if next_session.student:
+                data['student_name'] = next_session.student.user.full_name
+                data['student_reg_no'] = next_session.student.registration_number
+
+            return _ok('Next session retrieved.', data)
         except Exception as e:
             return _500(e)
