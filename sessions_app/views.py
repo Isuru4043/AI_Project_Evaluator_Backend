@@ -461,9 +461,29 @@ class StudentSessionStatusView(APIView):
             except StudentProfile.DoesNotExist:
                 return _err('Student profile not found.', code=404)
 
-            sessions = EvaluationSession.objects.filter(
+            sessions_qs = EvaluationSession.objects.filter(
                 student=sp,
             ).select_related('project', 'group').order_by('scheduled_start')
+
+            sessions = list(sessions_qs)
+            now = timezone.now()
+            changed_sessions = []
+            for session in sessions:
+                if session.status == 'completed':
+                    computed_status = 'completed'
+                elif now < session.scheduled_start:
+                    computed_status = 'scheduled'
+                elif now <= session.scheduled_end:
+                    computed_status = 'in_progress'
+                else:
+                    computed_status = 'completed'
+
+                if session.status != computed_status:
+                    session.status = computed_status
+                    changed_sessions.append(session)
+
+            if changed_sessions:
+                EvaluationSession.objects.bulk_update(changed_sessions, ['status'])
 
             status_filter = request.query_params.get('status')
             status_map = {
@@ -481,7 +501,7 @@ class StudentSessionStatusView(APIView):
                         'Invalid status filter. Use upcoming, ongoing, or completed.',
                         code=400,
                     )
-                sessions = sessions.filter(status=mapped_status)
+                sessions = [s for s in sessions if s.status == mapped_status]
 
             data = StudentSessionStatusSerializer(sessions, many=True).data
             return _ok('Session status retrieved.', data)

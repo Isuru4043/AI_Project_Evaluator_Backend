@@ -21,6 +21,16 @@ from projects.serializers import (
 from projects.views.project_views import _err, _get_examiner_profile, _get_student_profile, _is_assigned, _ok, _500
 
 
+def _status_by_schedule(session, now):
+    if session.status == 'completed':
+        return 'completed'
+    if now < session.scheduled_start:
+        return 'scheduled'
+    if now <= session.scheduled_end:
+        return 'in_progress'
+    return 'completed'
+
+
 class ManualScheduleView(APIView):
     """POST /api/projects/<project_id>/sessions/schedule/manual/"""
     permission_classes = [IsAuthenticated, IsExaminer]
@@ -250,6 +260,12 @@ class MySessionView(APIView):
 
             if not session:
                 return _err('No session found for you in this project.', code=404)
+
+            now = timezone.now()
+            computed_status = _status_by_schedule(session, now)
+            if session.status != computed_status:
+                session.status = computed_status
+                session.save(update_fields=['status'])
 
             data = {
                 'session_id': str(session.id),
