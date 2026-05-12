@@ -21,7 +21,8 @@ from projects.views.rubric_views import (
 )
 from projects.views.session_views import (
     AutoScheduleView, ManualScheduleView, MySessionView,
-    SessionListView, SessionResetView, SessionUpdateView,
+    NextSessionView, SessionListView, SessionResetView, 
+    SessionUpdateView,
 )
 
 app_name = 'projects'
@@ -58,6 +59,7 @@ urlpatterns = [
     path('<uuid:project_id>/rubrics/categories/<uuid:category_id>/criteria/<uuid:criteria_id>/delete/', RubricCriteriaDeleteView.as_view(), name='rubric-criteria-delete'),
 
     # ── Session Scheduling ───────────────────────────────────────────────
+    path('sessions/next/', NextSessionView.as_view(), name='session-next'),
     path('<uuid:project_id>/sessions/', SessionListView.as_view(), name='session-list'),
     path('<uuid:project_id>/sessions/my-session/', MySessionView.as_view(), name='my-session'),
     path('<uuid:project_id>/sessions/schedule/manual/', ManualScheduleView.as_view(), name='schedule-manual'),
