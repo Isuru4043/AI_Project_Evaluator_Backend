@@ -451,7 +451,7 @@ class ExaminerVivaQuestionDeleteView(APIView):
 # =============================================================================
 
 class StudentSessionStatusView(APIView):
-    """GET /api/sessions/my-status/"""
+    """GET /api/sessions/my-status/?status=upcoming|ongoing|completed"""
     permission_classes = [IsAuthenticated, IsStudent]
 
     def get(self, request):
@@ -464,6 +464,24 @@ class StudentSessionStatusView(APIView):
             sessions = EvaluationSession.objects.filter(
                 student=sp,
             ).select_related('project', 'group').order_by('scheduled_start')
+
+            status_filter = request.query_params.get('status')
+            status_map = {
+                'upcoming': 'scheduled',
+                'scheduled': 'scheduled',
+                'ongoing': 'in_progress',
+                'in_progress': 'in_progress',
+                'completed': 'completed',
+            }
+
+            if status_filter:
+                mapped_status = status_map.get(status_filter)
+                if not mapped_status:
+                    return _err(
+                        'Invalid status filter. Use upcoming, ongoing, or completed.',
+                        code=400,
+                    )
+                sessions = sessions.filter(status=mapped_status)
 
             data = StudentSessionStatusSerializer(sessions, many=True).data
             return _ok('Session status retrieved.', data)
