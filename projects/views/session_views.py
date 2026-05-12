@@ -260,11 +260,12 @@ class MySessionView(APIView):
                 'location_room': session.location_room,
                 'status': session.status,
                 'demo_completed_at': session.demo_completed_at,
+                'rubrics': [],
             }
 
             # Add rubrics from the project
             rubric_categories = project.rubric_categories.prefetch_related('criteria').all()
-            if rubric_categories:
+            if rubric_categories.exists():
                 data['rubrics'] = RubricCategorySerializer(rubric_categories, many=True).data
 
             if session.group:
