@@ -50,6 +50,7 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
+    'storages',
 
     # Project apps
     'core',
@@ -218,6 +219,24 @@ CODE_ANALYSIS_ASYNC = os.getenv('CODE_ANALYSIS_ASYNC', 'true').lower() == 'true'
 CODE_ANALYSIS_MAX_RATING = float(os.getenv('CODE_ANALYSIS_MAX_RATING', '2'))
 CODE_ANALYSIS_MIN_COVERAGE = float(os.getenv('CODE_ANALYSIS_MIN_COVERAGE', '0'))
 CODE_ANALYSIS_MAX_DUPLICATION = float(os.getenv('CODE_ANALYSIS_MAX_DUPLICATION', '5'))
+
+# =============================================================================
+# Azure Blob Storage (django-storages)
+# =============================================================================
+STORAGES = {
+    "default": {
+        "BACKEND": "storages.backends.azure_storage.AzureStorage",
+        "OPTIONS": {
+            "account_name": "vivasensestorage",
+            "account_key": "U11xrzbhYh+l3yv+El/Ro8Nfi8rZX7YortukYz3sinQ+dNN7OCiQHEpdccHZFRz2zxyWb2kBd7z9+AStmKyAWg==",
+            "azure_container": "media",
+            "expiration_secs": None,
+        },
+    },
+    "staticfiles": {
+        "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+    },
+}
 
 CODE_ANALYSIS_ALLOWED_EXTENSIONS = [
     '.py',

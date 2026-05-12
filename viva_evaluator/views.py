@@ -25,7 +25,7 @@ class SubmissionUploadView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        from core.utils.document_parser import extract_text_from_file
+        from core.utils.document_parser import extract_text_from_bytes
 
         data = request.data.copy()
         user = request.user
@@ -60,8 +60,12 @@ class SubmissionUploadView(APIView):
             index_status.status = SubmissionIndexStatus.IndexStatus.PROCESSING
             index_status.save()
 
-            file_path = index_status.report_file.path
-            extracted_text = extract_text_from_file(file_path)
+            # Read file content directly so this works with cloud-backed storage.
+            with index_status.report_file.open('rb') as f:
+                file_content = f.read()
+            extracted_text = extract_text_from_bytes(
+                file_content, index_status.report_file.name
+            )
 
             index_status.extracted_text = extracted_text
             index_status.status = SubmissionIndexStatus.IndexStatus.READY
