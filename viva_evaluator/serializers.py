@@ -43,4 +43,4 @@ class SubmissionIndexStatusSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = SubmissionIndexStatus
-        fields = ['submission', 'status', 'error_message', 'indexed_at']
+        fields = ['submission', 'status', 'error_message', 'processed_at']

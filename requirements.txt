@@ -16,3 +16,4 @@ google-genai
 PyMuPDF
 python-docx
 azure-storage-blob
+django-storages[azure]

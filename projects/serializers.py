@@ -260,8 +260,13 @@ class MyEnrollmentSerializer(serializers.ModelSerializer):
 class SubmitProjectSerializer(serializers.Serializer):
     """Validates input for submitting project files."""
 
-    report_file_url = serializers.CharField(required=False, allow_blank=True, allow_null=True, default=None)
+    report_file = serializers.FileField(required=True)
     github_repo_url = serializers.CharField(required=False, allow_blank=True, allow_null=True, default=None)
+
+    def validate_report_file(self, value):
+        if not value.name.lower().endswith('.pdf'):
+            raise serializers.ValidationError('Only PDF files are allowed for reports.')
+        return value
 
 
 class ProjectSubmissionSerializer(serializers.ModelSerializer):
