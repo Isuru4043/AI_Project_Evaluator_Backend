@@ -16,7 +16,7 @@ from core.models import (
 from projects.permissions import IsExaminer, IsProjectLead, IsStudent
 from projects.serializers import (
     AutoScheduleSerializer, EvaluationSessionSerializer,
-    ManualScheduleSerializer, SessionUpdateSerializer,
+    ManualScheduleSerializer, SessionUpdateSerializer, RubricCategorySerializer,
 )
 from projects.views.project_views import _err, _get_examiner_profile, _get_student_profile, _is_assigned, _ok, _500
 
@@ -246,18 +246,26 @@ class MySessionView(APIView):
 
             session = EvaluationSession.objects.filter(
                 project=project, student=sp,
-            ).select_related('group').first()
+            ).select_related('group', 'project').first()
 
             if not session:
                 return _err('No session found for you in this project.', code=404)
 
             data = {
                 'session_id': str(session.id),
+                'project_id': str(session.project.id),
+                'project_name': session.project.project_name,
                 'scheduled_start': session.scheduled_start,
                 'scheduled_end': session.scheduled_end,
                 'location_room': session.location_room,
                 'status': session.status,
+                'demo_completed_at': session.demo_completed_at,
             }
+
+            # Add rubrics from the project
+            rubric_categories = project.rubric_categories.prefetch_related('criteria').all()
+            if rubric_categories:
+                data['rubrics'] = RubricCategorySerializer(rubric_categories, many=True).data
 
             if session.group:
                 members = GroupMember.objects.filter(
@@ -265,7 +273,11 @@ class MySessionView(APIView):
                 ).select_related('student__user').exclude(student=sp)
                 data['group_name'] = session.group.group_name
                 data['group_members'] = [
-                    m.student.user.full_name for m in members
+                    {
+                        'full_name': m.student.user.full_name,
+                        'registration_number': m.student.registration_number,
+                    }
+                    for m in members
                 ]
 
             return _ok('Session retrieved.', data)
