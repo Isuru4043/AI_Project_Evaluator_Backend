@@ -26,6 +26,37 @@ from core.models import (
 
 
 # =============================================================================
+# RUBRIC SERIALIZERS
+# =============================================================================
+
+class RubricCriteriaSerializer(serializers.ModelSerializer):
+    """Serializes individual rubric criteria."""
+
+    criteria_id = serializers.UUIDField(source='id', read_only=True)
+
+    class Meta:
+        model = RubricCriteria
+        fields = [
+            'criteria_id', 'criteria_name', 'max_score',
+            'weight_in_category', 'description',
+        ]
+
+
+class RubricCategorySerializer(serializers.ModelSerializer):
+    """Serializes rubric categories with their criteria."""
+
+    category_id = serializers.UUIDField(source='id', read_only=True)
+    criteria = RubricCriteriaSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = RubricCategory
+        fields = [
+            'category_id', 'category_name', 'weight_percentage',
+            'description', 'criteria',
+        ]
+
+
+# =============================================================================
 # PROJECT SERIALIZERS
 # =============================================================================
 
