@@ -67,6 +67,28 @@ jobs:
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_13333E4E0CFE49D185AD22E924B90069 }}
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_894B8DC8B41745AFAC1C7A1289F9CADB }}
 
+      - name: Configure Azure App Service settings
+        run: |
+          if [ -z "${{ secrets.GEMINI_API_KEY }}" ]; then
+            echo "GEMINI_API_KEY repository secret is not configured."
+            exit 1
+          fi
+
+          APP_ID=$(az resource list \
+            --name ai-evaluator-backend-isuru \
+            --resource-type Microsoft.Web/sites \
+            --query "[0].id" \
+            -o tsv)
+
+          if [ -z "$APP_ID" ]; then
+            echo "Azure App Service ai-evaluator-backend-isuru was not found."
+            exit 1
+          fi
+
+          az webapp config appsettings set \
+            --ids "$APP_ID" \
+            --settings GEMINI_API_KEY="${{ secrets.GEMINI_API_KEY }}"
+
       - name: 'Deploy to Azure Web App'
         uses: azure/webapps-deploy@v3
         id: deploy-to-webapp

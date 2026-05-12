@@ -16,9 +16,19 @@ from core.models import (
 from projects.permissions import IsExaminer, IsProjectLead, IsStudent
 from projects.serializers import (
     AutoScheduleSerializer, EvaluationSessionSerializer,
-    ManualScheduleSerializer, SessionUpdateSerializer,
+    ManualScheduleSerializer, SessionUpdateSerializer, RubricCategorySerializer,
 )
 from projects.views.project_views import _err, _get_examiner_profile, _get_student_profile, _is_assigned, _ok, _500
+
+
+def _status_by_schedule(session, now):
+    if session.status == 'completed':
+        return 'completed'
+    if now < session.scheduled_start:
+        return 'scheduled'
+    if now <= session.scheduled_end:
+        return 'in_progress'
+    return 'completed'
 
 
 class ManualScheduleView(APIView):
@@ -198,6 +208,10 @@ class SessionListView(APIView):
                 project=project,
             ).select_related('student__user', 'group').order_by('scheduled_start')
 
+            status_filter = request.query_params.get('status')
+            if status_filter:
+                sessions = sessions.filter(status=status_filter)
+
             if project.is_group_project:
                 # Group sessions by group
                 groups = {}
@@ -242,18 +256,33 @@ class MySessionView(APIView):
 
             session = EvaluationSession.objects.filter(
                 project=project, student=sp,
-            ).select_related('group').first()
+            ).select_related('group', 'project').first()
 
             if not session:
                 return _err('No session found for you in this project.', code=404)
 
+            now = timezone.now()
+            computed_status = _status_by_schedule(session, now)
+            if session.status != computed_status:
+                session.status = computed_status
+                session.save(update_fields=['status'])
+
             data = {
                 'session_id': str(session.id),
+                'project_id': str(session.project.id),
+                'project_name': session.project.project_name,
                 'scheduled_start': session.scheduled_start,
                 'scheduled_end': session.scheduled_end,
                 'location_room': session.location_room,
                 'status': session.status,
+                'demo_completed_at': session.demo_completed_at,
+                'rubrics': [],
             }
+
+            # Add rubrics from the project
+            rubric_categories = project.rubric_categories.prefetch_related('criteria').all()
+            if rubric_categories.exists():
+                data['rubrics'] = RubricCategorySerializer(rubric_categories, many=True).data
 
             if session.group:
                 members = GroupMember.objects.filter(
@@ -261,7 +290,11 @@ class MySessionView(APIView):
                 ).select_related('student__user').exclude(student=sp)
                 data['group_name'] = session.group.group_name
                 data['group_members'] = [
-                    m.student.user.full_name for m in members
+                    {
+                        'full_name': m.student.user.full_name,
+                        'registration_number': m.student.registration_number,
+                    }
+                    for m in members
                 ]
 
             return _ok('Session retrieved.', data)
@@ -334,5 +367,61 @@ class SessionResetView(APIView):
 
             EvaluationSession.objects.filter(project=project).delete()
             return _ok('All sessions have been reset. You can now reschedule.')
+        except Exception as e:
+            return _500(e)
+
+
+class NextSessionView(APIView):
+    """GET /api/projects/sessions/next/"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            now = timezone.now()
+            next_session = None
+
+            if request.user.role == 'student':
+                sp = _get_student_profile(request.user)
+                if not sp:
+                    return _err('Student profile not found.', code=404)
+                next_session = EvaluationSession.objects.filter(
+                    student=sp,
+                    status='scheduled',
+                    scheduled_start__gte=now
+                ).select_related('project', 'group').order_by('scheduled_start').first()
+
+            elif request.user.role == 'examiner':
+                ep = _get_examiner_profile(request.user)
+                if not ep:
+                    return _err('Examiner profile not found.', code=404)
+                project_ids = ProjectExaminer.objects.filter(examiner=ep).values_list('project_id', flat=True)
+                next_session = EvaluationSession.objects.filter(
+                    project_id__in=project_ids,
+                    status='scheduled',
+                    scheduled_start__gte=now
+                ).select_related('project', 'student__user', 'group').order_by('scheduled_start').first()
+            else:
+                return _err('Invalid role.', code=403)
+
+            if not next_session:
+                return _err('No upcoming sessions.', code=404)
+
+            data = {
+                'session_id': str(next_session.id),
+                'project_id': str(next_session.project_id),
+                'project_name': next_session.project.project_name,
+                'scheduled_start': next_session.scheduled_start,
+                'scheduled_end': next_session.scheduled_end,
+                'location_room': next_session.location_room,
+                'status': next_session.status,
+            }
+
+            if next_session.group:
+                data['group_name'] = next_session.group.group_name
+            if next_session.student:
+                data['student_name'] = next_session.student.user.full_name
+                data['student_reg_no'] = next_session.student.registration_number
+
+            return _ok('Next session retrieved.', data)
         except Exception as e:
             return _500(e)
