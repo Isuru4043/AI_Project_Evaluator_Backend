@@ -311,6 +311,7 @@ class RubricCriteria(models.Model):
         max_digits=5, decimal_places=2, null=True, blank=True,
     )
     description = models.TextField(null=True, blank=True)
+    questions_to_ask = models.IntegerField(default=3)   # ← ADD THIS LINE ONLY
 
     class Meta:
         verbose_name = 'Rubric Criteria'
@@ -526,7 +527,7 @@ class VivaQuestion(models.Model):
         CREATE = 'Create', 'Create'
 
     class QuestionSource(models.TextChoices):
-        AI = 'ai', 'AI'
+        AI = 'ai', 'AI Generated'
         EXAMINER = 'examiner', 'Examiner'
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -539,10 +540,10 @@ class VivaQuestion(models.Model):
     )
     project = models.ForeignKey(
         Project,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='examiner_questions',
+        related_name='viva_questions',
     )
     question_text = models.TextField()
     blooms_level = models.CharField(
@@ -557,6 +558,11 @@ class VivaQuestion(models.Model):
         default=QuestionSource.AI,
     )
     question_order = models.IntegerField()
+    question_source = models.CharField(
+        max_length=20,
+        choices=QuestionSource.choices,
+        default=QuestionSource.AI,
+    )
     generated_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
