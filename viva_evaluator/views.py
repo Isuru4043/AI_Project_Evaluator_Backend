@@ -227,7 +227,15 @@ class SessionStartView(APIView):
                 )
 
             # Get session context to find first criterion
+            # Get session context to find first criterion
             context = get_session_context(session_id)
+
+            # If project has no rubric criteria configured, treat as misconfiguration
+            if not context.get('all_criteria'):
+                return Response(
+                    {"error": "No rubric configured for this project. Please add rubric criteria before starting a viva session."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
             if context['is_complete']:
                 return Response(
