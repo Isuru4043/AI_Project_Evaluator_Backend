@@ -1,0 +1,1086 @@
+openapi: 3.0.3
+info:
+  title: AI Project Evaluator — Viva Module API
+  version: 1.0.0
+  description: API for student and examiner interactions in the Viva Evaluation system.
+paths:
+  /api/auth/examiner/register/:
+    post:
+      operationId: auth_examiner_register_create
+      description: |-
+        POST /api/auth/examiner/register/
+
+        Register a new examiner account. Creates both the User
+        (with role='examiner') and the linked ExaminerProfile.
+      tags:
+      - auth
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          description: No response body
+  /api/auth/login/:
+    post:
+      operationId: auth_login_create
+      description: |-
+        POST /api/auth/login/
+
+        Authenticate a user (examiner or student) and return
+        JWT access + refresh tokens along with basic user info.
+      tags:
+      - auth
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          description: No response body
+  /api/auth/logout/:
+    post:
+      operationId: auth_logout_create
+      description: |-
+        POST /api/auth/logout/
+
+        Blacklist the provided refresh token so it can no longer
+        be used to obtain new access tokens.
+        Requires: Bearer <access_token> in the Authorization header.
+      tags:
+      - auth
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/auth/me/:
+    get:
+      operationId: auth_me_retrieve
+      description: |-
+        GET /api/auth/me/
+
+        Return the authenticated user's info together with their
+        role-specific profile (ExaminerProfile or StudentProfile).
+        Requires: Bearer <access_token> in the Authorization header.
+      tags:
+      - auth
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/auth/student/register/:
+    post:
+      operationId: auth_student_register_create
+      description: |-
+        POST /api/auth/student/register/
+
+        Register a new student account. Creates both the User
+        (with role='student') and the linked StudentProfile.
+      tags:
+      - auth
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          description: No response body
+  /api/auth/token/refresh/:
+    post:
+      operationId: auth_token_refresh_create
+      description: |-
+        Takes a refresh type JSON web token and returns an access type JSON web
+        token if the refresh token is valid.
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenRefresh'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TokenRefresh'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/TokenRefresh'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenRefresh'
+          description: ''
+  /api/code-analysis/submissions/{code_submission_id}/questions/:
+    get:
+      operationId: code_analysis_submissions_questions_retrieve
+      parameters:
+      - in: path
+        name: code_submission_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - code-analysis
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/code-analysis/submissions/{code_submission_id}/sonar-summary/:
+    get:
+      operationId: code_analysis_submissions_sonar_summary_retrieve
+      parameters:
+      - in: path
+        name: code_submission_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - code-analysis
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/code-analysis/submissions/{code_submission_id}/status/:
+    get:
+      operationId: code_analysis_submissions_status_retrieve
+      parameters:
+      - in: path
+        name: code_submission_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - code-analysis
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/code-analysis/submit/:
+    post:
+      operationId: code_analysis_submit_create
+      tags:
+      - code-analysis
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/projects/:
+    get:
+      operationId: projects_retrieve
+      description: GET /api/projects/
+      tags:
+      - projects
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/projects/{project_id}/:
+    get:
+      operationId: projects_retrieve_2
+      description: GET /api/projects/<project_id>/
+      parameters:
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - projects
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/projects/{project_id}/activate/:
+    patch:
+      operationId: projects_activate_partial_update
+      description: PATCH /api/projects/<project_id>/activate/
+      parameters:
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - projects
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/projects/{project_id}/enroll/:
+    post:
+      operationId: projects_enroll_create
+      description: POST /api/projects/<project_id>/enroll/
+      parameters:
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - projects
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/projects/{project_id}/examiners/:
+    get:
+      operationId: projects_examiners_retrieve
+      description: GET /api/projects/<project_id>/examiners/
+      parameters:
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - projects
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/projects/{project_id}/examiners/add/:
+    post:
+      operationId: projects_examiners_add_create
+      description: POST /api/projects/<project_id>/examiners/add/
+      parameters:
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - projects
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/projects/{project_id}/examiners/remove/:
+    delete:
+      operationId: projects_examiners_remove_destroy
+      description: DELETE /api/projects/<project_id>/examiners/remove/
+      parameters:
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - projects
+      security:
+      - jwtAuth: []
+      responses:
+        '204':
+          description: No response body
+  /api/projects/{project_id}/rubrics/:
+    get:
+      operationId: projects_rubrics_retrieve
+      description: GET /api/projects/<project_id>/rubrics/
+      parameters:
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - projects
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/projects/{project_id}/rubrics/categories/{category_id}/criteria/{criteria_id}/delete/:
+    delete:
+      operationId: projects_rubrics_categories_criteria_delete_destroy
+      description: DELETE .../criteria/<criteria_id>/delete/
+      parameters:
+      - in: path
+        name: category_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: criteria_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - projects
+      security:
+      - jwtAuth: []
+      responses:
+        '204':
+          description: No response body
+  /api/projects/{project_id}/rubrics/categories/{category_id}/criteria/{criteria_id}/update/:
+    put:
+      operationId: projects_rubrics_categories_criteria_update_update
+      description: PUT .../criteria/<criteria_id>/update/
+      parameters:
+      - in: path
+        name: category_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: criteria_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - projects
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/projects/{project_id}/rubrics/categories/{category_id}/criteria/create/:
+    post:
+      operationId: projects_rubrics_categories_criteria_create_create
+      description: POST /api/projects/<project_id>/rubrics/categories/<category_id>/criteria/create/
+      parameters:
+      - in: path
+        name: category_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - projects
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/projects/{project_id}/rubrics/categories/{category_id}/delete/:
+    delete:
+      operationId: projects_rubrics_categories_delete_destroy
+      description: DELETE /api/projects/<project_id>/rubrics/categories/<category_id>/delete/
+      parameters:
+      - in: path
+        name: category_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - projects
+      security:
+      - jwtAuth: []
+      responses:
+        '204':
+          description: No response body
+  /api/projects/{project_id}/rubrics/categories/{category_id}/update/:
+    put:
+      operationId: projects_rubrics_categories_update_update
+      description: PUT /api/projects/<project_id>/rubrics/categories/<category_id>/update/
+      parameters:
+      - in: path
+        name: category_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - projects
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/projects/{project_id}/rubrics/categories/create/:
+    post:
+      operationId: projects_rubrics_categories_create_create
+      description: POST /api/projects/<project_id>/rubrics/categories/create/
+      parameters:
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - projects
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/projects/{project_id}/sessions/:
+    get:
+      operationId: projects_sessions_retrieve
+      description: GET /api/projects/<project_id>/sessions/
+      parameters:
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - projects
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/projects/{project_id}/sessions/{session_id}/update/:
+    put:
+      operationId: projects_sessions_update_update
+      description: PUT /api/projects/<project_id>/sessions/<session_id>/update/
+      parameters:
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - in: path
+        name: session_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - projects
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/projects/{project_id}/sessions/my-session/:
+    get:
+      operationId: projects_sessions_my_session_retrieve
+      description: GET /api/projects/<project_id>/sessions/my-session/
+      parameters:
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - projects
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/projects/{project_id}/sessions/reset/:
+    delete:
+      operationId: projects_sessions_reset_destroy
+      description: DELETE /api/projects/<project_id>/sessions/reset/
+      parameters:
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - projects
+      security:
+      - jwtAuth: []
+      responses:
+        '204':
+          description: No response body
+  /api/projects/{project_id}/sessions/schedule/auto/:
+    post:
+      operationId: projects_sessions_schedule_auto_create
+      description: POST /api/projects/<project_id>/sessions/schedule/auto/
+      parameters:
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - projects
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/projects/{project_id}/sessions/schedule/manual/:
+    post:
+      operationId: projects_sessions_schedule_manual_create
+      description: POST /api/projects/<project_id>/sessions/schedule/manual/
+      parameters:
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - projects
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/projects/{project_id}/submission/:
+    get:
+      operationId: projects_submission_retrieve
+      description: GET /api/projects/<project_id>/submission/
+      parameters:
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - projects
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/projects/{project_id}/submit/:
+    post:
+      operationId: projects_submit_create
+      description: POST /api/projects/<project_id>/submit/
+      parameters:
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - projects
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/projects/{project_id}/update/:
+    put:
+      operationId: projects_update_update
+      description: PUT /api/projects/<project_id>/update/
+      parameters:
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - projects
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/projects/available/:
+    get:
+      operationId: projects_available_retrieve
+      description: GET /api/projects/available/
+      tags:
+      - projects
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/projects/create/:
+    post:
+      operationId: projects_create_create
+      description: POST /api/projects/create/
+      tags:
+      - projects
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/projects/my-enrollments/:
+    get:
+      operationId: projects_my_enrollments_retrieve
+      description: GET /api/projects/my-enrollments/
+      tags:
+      - projects
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/viva/categories/{category_id}/:
+    patch:
+      operationId: viva_categories_partial_update
+      description: |-
+        PATCH /api/viva/categories/<category_id>/
+
+        Examiner updates a rubric category's name, weight, or description.
+      parameters:
+      - in: path
+        name: category_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - viva
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/viva/categories/{category_id}/criteria/:
+    post:
+      operationId: viva_categories_criteria_create
+      description: |-
+        POST /api/viva/categories/<category_id>/criteria/
+
+        Add a criterion to an existing rubric category.
+        Includes optional question hints and questions_to_ask count.
+      parameters:
+      - in: path
+        name: category_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - viva
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/viva/criteria/{criteria_id}/:
+    patch:
+      operationId: viva_criteria_partial_update
+      description: |-
+        PATCH /api/viva/criteria/<criteria_id>/
+
+        Examiner updates a rubric criterion's fields.
+      parameters:
+      - in: path
+        name: criteria_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - viva
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/viva/criteria/{criteria_id}/hints/:
+    post:
+      operationId: viva_criteria_hints_create
+      description: |-
+        POST /api/viva/criteria/<criteria_id>/hints/
+
+        Add question hints to an existing criterion.
+      parameters:
+      - in: path
+        name: criteria_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - viva
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/viva/hints/{hint_id}/:
+    delete:
+      operationId: viva_hints_destroy
+      description: |-
+        DELETE /api/viva/hints/<hint_id>/
+
+        Examiner removes a question hint from a criterion.
+      parameters:
+      - in: path
+        name: hint_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - viva
+      security:
+      - jwtAuth: []
+      responses:
+        '204':
+          description: No response body
+  /api/viva/projects/:
+    get:
+      operationId: viva_projects_retrieve
+      description: |-
+        GET /api/viva/projects/
+
+        Returns all projects. Examiner sees their full dashboard.
+      tags:
+      - viva
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/viva/projects/{project_id}/:
+    get:
+      operationId: viva_projects_retrieve_2
+      description: |-
+        GET /api/viva/projects/<project_id>/
+
+        Returns full project details including rubric.
+      parameters:
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - viva
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/viva/projects/{project_id}/categories/:
+    post:
+      operationId: viva_projects_categories_create
+      description: |-
+        POST /api/viva/projects/<project_id>/categories/
+
+        Add a rubric category to an existing project.
+      parameters:
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - viva
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/viva/projects/{project_id}/sessions/:
+    get:
+      operationId: viva_projects_sessions_retrieve
+      description: |-
+        GET /api/viva/projects/<project_id>/sessions/
+
+        Returns all sessions for a project.
+      parameters:
+      - in: path
+        name: project_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - viva
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/viva/rubric/confirm-save/:
+    post:
+      operationId: viva_rubric_confirm_save_create
+      description: POST /api/viva/rubric/confirm-save/
+      tags:
+      - viva
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/viva/rubric/upload-preview/:
+    post:
+      operationId: viva_rubric_upload_preview_create
+      description: |-
+        POST /api/viva/rubric/upload-preview/
+
+        Examiner uploads a rubric PDF or DOCX.
+        Gemini extracts the structure and returns a preview for the examiner to review.
+        Nothing is saved to the database yet.
+
+        Request: multipart/form-data with 'rubric_file' field.
+        Response: structured rubric JSON for examiner to review and edit.
+      tags:
+      - viva
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/viva/sessions/{session_id}/answer/:
+    post:
+      operationId: viva_sessions_answer_create
+      description: |-
+        POST /api/viva/sessions/<session_id>/answer/
+
+        Student submits their answer to the current question.
+        The answer is evaluated, saved, and the next question is generated.
+
+        Request body:
+        {
+            "question_id": "uuid",
+            "answer_text": "student's answer here"
+        }
+      parameters:
+      - in: path
+        name: session_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - viva
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/viva/sessions/{session_id}/final-scores/:
+    post:
+      operationId: viva_sessions_final_scores_create
+      description: |-
+        POST /api/viva/sessions/<session_id>/final-scores/
+
+        Examiner submits final approved scores after reviewing the XAI report.
+        Saves to FinalScore and creates SessionSummaryReport.
+
+        Request body:
+        {
+            "scores": [
+                {
+                    "criteria_id": "uuid",
+                    "examiner_final_score": 8.5,
+                    "examiner_note": "Good understanding overall"
+                }
+            ],
+            "overall_feedback": "Student demonstrated solid knowledge",
+            "grade": "A"
+        }
+      parameters:
+      - in: path
+        name: session_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - viva
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/viva/sessions/{session_id}/report/:
+    get:
+      operationId: viva_sessions_report_retrieve
+      description: |-
+        GET /api/viva/sessions/<session_id>/report/
+
+        Returns the full XAI report for a completed session.
+        The examiner reviews this before making final grade decisions.
+      parameters:
+      - in: path
+        name: session_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - viva
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/viva/sessions/{session_id}/status/:
+    get:
+      operationId: viva_sessions_status_retrieve
+      description: |-
+        GET /api/viva/sessions/<session_id>/status/
+
+        Returns current status of a session.
+        Frontend polls this to know if session is scheduled, in progress, or complete.
+      parameters:
+      - in: path
+        name: session_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - viva
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/viva/sessions/create/:
+    post:
+      operationId: viva_sessions_create_create
+      description: |-
+        POST /api/viva/sessions/create/
+
+        Examiner creates a viva session linking project, student, submission.
+      tags:
+      - viva
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/viva/sessions/start/:
+    post:
+      operationId: viva_sessions_start_create
+      description: |-
+        POST /api/viva/sessions/start/
+
+        Starts a viva session for a submission.
+        Generates and returns the first question for the first rubric criterion.
+
+        Request body:
+        {
+            "session_id": "uuid-of-evaluation-session"
+        }
+      tags:
+      - viva
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/viva/students/:
+    get:
+      operationId: viva_students_retrieve
+      description: |-
+        GET /api/viva/students/
+
+        Returns all students. Used by examiner when creating a session.
+      tags:
+      - viva
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/viva/submissions/{submission_id}/status/:
+    get:
+      operationId: viva_submissions_status_retrieve
+      description: |-
+        GET /api/viva/submissions/<submission_id>/status/
+
+        Returns the current processing status of a submission.
+        Frontend checks this before allowing a session to start.
+      parameters:
+      - in: path
+        name: submission_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - viva
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/viva/submissions/upload/:
+    post:
+      operationId: viva_submissions_upload_create
+      description: |-
+        POST /api/viva/submissions/upload/
+
+        Handles report upload for both students and examiners.
+        - Student logged in: auto-attaches their profile, only needs project + file
+        - Examiner logged in: requires student UUID in request body
+      tags:
+      - viva
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+components:
+  schemas:
+    TokenRefresh:
+      type: object
+      properties:
+        access:
+          type: string
+          readOnly: true
+        refresh:
+          type: string
+      required:
+      - access
+      - refresh
+  securitySchemes:
+    jwtAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

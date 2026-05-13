@@ -812,9 +812,8 @@ class EvaluationSessionCreateView(APIView):
 
 class ProjectListView(APIView):
     """
-    GET /api/viva/projects/
-
-    Returns all projects. Examiner sees their full dashboard.
+    GET  /api/viva/projects/ — Returns all projects
+    POST /api/viva/projects/ — Creates a new project with rubric
     """
     permission_classes = [IsAuthenticated]
 
@@ -824,6 +823,26 @@ class ProjectListView(APIView):
         projects = Project.objects.all().order_by('-created_at')
         serializer = ProjectDetailSerializer(projects, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        from viva_evaluator.serializers import (
+            ProjectCreateSerializer, ProjectDetailSerializer
+        )
+        context = {'warnings': []}
+        serializer = ProjectCreateSerializer(
+            data=request.data,
+            context=context,
+        )
+        if serializer.is_valid():
+            project = serializer.save()
+            response_data = ProjectDetailSerializer(project).data
+            warnings = serializer.context.get('warnings', [])
+            if warnings:
+                response_data['warnings'] = warnings
+            else:
+                response_data['warnings'] = []
+            return Response(response_data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 class StudentListView(APIView):
