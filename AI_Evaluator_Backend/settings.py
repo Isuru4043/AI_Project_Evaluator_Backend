@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 from datetime import timedelta
 
+
 from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -28,7 +29,6 @@ load_dotenv(BASE_DIR / '.env')
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = 'django-insecure-2ll$i@i3@(g&rj&nlg@8+)=7dd^bw-^@vd6=$71k!7z_jlpurs'
-
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
@@ -58,6 +58,8 @@ INSTALLED_APPS = [
     
     'code_analysis',
     'projects',
+
+    'drf_spectacular',
 ]
 
 MIDDLEWARE = [
@@ -165,6 +167,7 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated',
     ),
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
 }
 
 
@@ -197,7 +200,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # Gemini API
 # =============================================================================
 
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', 'AIzaSyDE4ZHR5WoIgOTu2HInC2-67PR7w8f80hA')
 GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash-lite')
 
 GROQ_API_KEY = ''
@@ -241,3 +244,10 @@ CODE_ANALYSIS_ALLOWED_EXTENSIONS = [
     '.html',
     '.css',
 ]
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'AI Project Evaluator — Viva Module API',
+    'DESCRIPTION': 'API for student and examiner interactions in the Viva Evaluation system.',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+}
