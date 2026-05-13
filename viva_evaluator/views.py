@@ -346,8 +346,19 @@ class AnswerSubmitView(APIView):
             session = EvaluationSession.objects.get(id=session_id)
             question = VivaQuestion.objects.get(id=question_id, session=session)
 
+            # Resolve submission (may be via direct FK, group, or student)
+            submission = _resolve_session_submission(session)
+            if not submission:
+                return Response(
+                    {"error": "No submission found for this session."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
             # Get report text
-            report_text = session.submission.index_status.extracted_text or ""
+            try:
+                report_text = submission.index_status.extracted_text or ""
+            except Exception:
+                report_text = ""
 
             # Get question extension for criterion info
             try:
