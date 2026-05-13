@@ -23,6 +23,7 @@ from projects.serializers import (
     ProjectSerializer, ProjectSubmissionSerializer, ProjectUpdateSerializer,
     RemoveExaminerSerializer, StudentEnrollSerializer, SubmitProjectSerializer,
 )
+from viva_evaluator.models import SubmissionIndexStatus
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -460,6 +461,21 @@ class SubmitProjectView(APIView):
                 submission.report_file_url = report_blob_url
                 submission.github_repo_url = github_repo_url or None
                 submission.save()
+
+                from core.utils.document_parser import extract_text_from_bytes
+
+                report_file.seek(0)
+                report_bytes = report_file.read()
+                extracted_text = extract_text_from_bytes(report_bytes, report_file.name)
+
+                index_status, _ = SubmissionIndexStatus.objects.get_or_create(
+                    submission=submission,
+                )
+                index_status.extracted_text = extracted_text
+                index_status.status = SubmissionIndexStatus.IndexStatus.READY
+                index_status.processed_at = timezone.now()
+                index_status.error_message = None
+                index_status.save()
 
                 if github_repo_url:
                     code_submission = CodeSubmission.objects.create(
