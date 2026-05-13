@@ -4,9 +4,6 @@ from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import IsAuthenticated
 from django.utils import timezone
-from django.core.files.base import ContentFile
-from urllib.parse import unquote, urlparse
-from urllib.request import urlopen
 
 from core.models import ProjectSubmission
 from viva_evaluator.models import SubmissionIndexStatus
@@ -14,60 +11,6 @@ from viva_evaluator.serializers import (
     SubmissionUploadSerializer,
     SubmissionIndexStatusSerializer,
 )
-
-
-def _resolve_session_submission(session):
-    if session.submission_id:
-        return session.submission
-
-    if session.student_id:
-        submission = ProjectSubmission.objects.filter(
-            project=session.project,
-            student=session.student,
-        ).first()
-        if submission:
-            return submission
-
-    if session.group_id:
-        submission = ProjectSubmission.objects.filter(
-            project=session.project,
-            group=session.group,
-        ).first()
-        if submission:
-            return submission
-
-    return None
-
-
-def _get_or_create_index_status(submission):
-    try:
-        return submission.index_status
-    except SubmissionIndexStatus.DoesNotExist:
-        pass
-
-    if not submission.report_file_url:
-        return None
-
-    with urlopen(submission.report_file_url) as response:
-        file_bytes = response.read()
-
-    parsed_url = urlparse(submission.report_file_url)
-    filename = unquote(parsed_url.path.rsplit('/', 1)[-1]) or 'submission.pdf'
-
-    index_status = SubmissionIndexStatus.objects.create(
-        submission=submission,
-        status=SubmissionIndexStatus.IndexStatus.PROCESSING,
-    )
-    index_status.report_file.save(filename, ContentFile(file_bytes), save=False)
-
-    from core.utils.document_parser import extract_text_from_bytes
-    extracted_text = extract_text_from_bytes(file_bytes, filename)
-
-    index_status.extracted_text = extracted_text
-    index_status.status = SubmissionIndexStatus.IndexStatus.READY
-    index_status.processed_at = timezone.now()
-    index_status.save()
-    return index_status
 
 
 class SubmissionUploadView(APIView):
@@ -209,19 +152,7 @@ class SessionStartView(APIView):
 
             # Make sure submission is ready
             try:
-                submission = _resolve_session_submission(session)
-                if not submission:
-                    return Response(
-                        {"error": "No processed submission found for this session."},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-
-                index_status = _get_or_create_index_status(submission)
-                if not index_status:
-                    return Response(
-                        {"error": "No processed submission found for this session."},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
+                index_status = session.submission.index_status
                 if index_status.status != SubmissionIndexStatus.IndexStatus.READY:
                     return Response(
                         {"error": "Submission is not ready yet. Please wait for processing to complete."},
@@ -347,13 +278,7 @@ class AnswerSubmitView(APIView):
             question = VivaQuestion.objects.get(id=question_id, session=session)
 
             # Get report text
-            submission = _resolve_session_submission(session)
-            if not submission:
-                return Response({"error": "No processed submission found for this session."}, status=status.HTTP_400_BAD_REQUEST)
-            index_status = _get_or_create_index_status(submission)
-            if not index_status:
-                return Response({"error": "No processed submission found for this session."}, status=status.HTTP_400_BAD_REQUEST)
-            report_text = index_status.extracted_text or ""
+            report_text = session.submission.index_status.extracted_text or ""
 
             # Get question extension for criterion info
             try:

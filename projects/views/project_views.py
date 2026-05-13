@@ -440,7 +440,6 @@ class SubmitProjectView(APIView):
             github_repo_url = submission_serializer.validated_data.get('github_repo_url', '')
 
             report_blob_url = None
-            from core.utils.document_parser import extract_text_from_bytes
             # Validate file size
             if report_file.size > self.MAX_REPORT_SIZE:
                 return _err('File too large. Maximum report size is 50MB.')
@@ -457,26 +456,10 @@ class SubmitProjectView(APIView):
 
             code_submission = None
 
-            report_file.seek(0)
-            report_bytes = report_file.read()
-            extracted_text = extract_text_from_bytes(report_bytes, report_file.name)
-
             with transaction.atomic():
                 submission.report_file_url = report_blob_url
                 submission.github_repo_url = github_repo_url or None
                 submission.save()
-
-                from viva_evaluator.models import SubmissionIndexStatus
-                index_status, _ = SubmissionIndexStatus.objects.get_or_create(
-                    submission=submission,
-                    defaults={'report_file': report_file},
-                )
-                index_status.report_file = report_file
-                index_status.status = SubmissionIndexStatus.IndexStatus.READY
-                index_status.extracted_text = extracted_text
-                index_status.processed_at = timezone.now()
-                index_status.error_message = None
-                index_status.save()
 
                 if github_repo_url:
                     code_submission = CodeSubmission.objects.create(
