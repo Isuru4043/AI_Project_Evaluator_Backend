@@ -22,6 +22,9 @@ urlpatterns = [
 
     # Projects endpoints — /api/projects/...
     path('api/projects/', include('projects.urls')),
+
+    # Sessions endpoints — /api/sessions/... and /api/projects/.../session-panel/...
+    path('api/', include('sessions_app.urls')),
 ]
 
 # Media file serving

@@ -60,6 +60,7 @@ INSTALLED_APPS = [
     'projects',
 
     'drf_spectacular',
+    'sessions_app',
 ]
 
 MIDDLEWARE = [

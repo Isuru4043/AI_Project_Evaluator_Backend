@@ -404,6 +404,7 @@ class EvaluationSession(models.Model):
     scheduled_start = models.DateTimeField()
     scheduled_end = models.DateTimeField()
     actual_start = models.DateTimeField(null=True, blank=True)
+    demo_completed_at = models.DateTimeField(null=True, blank=True)
     location_room = models.CharField(max_length=255, null=True, blank=True)
     status = models.CharField(
         max_length=20,
@@ -533,6 +534,8 @@ class VivaQuestion(models.Model):
     session = models.ForeignKey(
         EvaluationSession,
         on_delete=models.CASCADE,
+        null=True,
+        blank=True,
         related_name='viva_questions',
     )
     project = models.ForeignKey(
@@ -548,6 +551,11 @@ class VivaQuestion(models.Model):
         choices=BloomsLevel.choices,
         null=True,
         blank=True,
+    )
+    question_source = models.CharField(
+        max_length=20,
+        choices=QuestionSource.choices,
+        default=QuestionSource.AI,
     )
     question_order = models.IntegerField()
     question_source = models.CharField(
