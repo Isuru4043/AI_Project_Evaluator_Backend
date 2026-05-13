@@ -62,6 +62,8 @@ INSTALLED_APPS = [
 
     'drf_spectacular',
     'sessions_app',
+    'cloudinary',
+    'cloudinary_storage',
 ]
 
 MIDDLEWARE = [
@@ -189,6 +191,17 @@ SIMPLE_JWT = {
 # CORS Configuration (development — allow all origins)
 # =============================================================================
 CORS_ALLOW_ALL_ORIGINS = True
+
+# =============================================================================
+# Cloudinary Configuration
+# =============================================================================
+CLOUDINARY_STORAGE = {
+    'CLOUD_NAME': os.getenv('CLOUDINARY_CLOUD_NAME'),
+    'API_KEY': os.getenv('CLOUDINARY_API_KEY'),
+    'API_SECRET': os.getenv('CLOUDINARY_API_SECRET'),
+}
+
+DEFAULT_FILE_STORAGE = 'cloudinary_storage.storage.MediaCloudinaryStorage'
 
 # =============================================================================
 # Media Files
