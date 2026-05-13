@@ -6,6 +6,7 @@ Student Enrollment, and Submissions (Features 1-3).
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import status
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -22,6 +23,7 @@ from projects.serializers import (
     ProjectSerializer, ProjectSubmissionSerializer, ProjectUpdateSerializer,
     RemoveExaminerSerializer, StudentEnrollSerializer, SubmitProjectSerializer,
 )
+from viva_evaluator.models import SubmissionIndexStatus
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -393,6 +395,7 @@ class MyEnrollmentsView(APIView):
 class SubmitProjectView(APIView):
     """POST /api/projects/<project_id>/submit/"""
     permission_classes = [IsAuthenticated, IsStudent]
+    parser_classes = [MultiPartParser, FormParser]
 
     # File validation constants
     MAX_REPORT_SIZE = 50 * 1024 * 1024  # 50 MB
@@ -429,36 +432,50 @@ class SubmitProjectView(APIView):
             if submission.report_file_url or submission.github_repo_url:
                 return _err('You have already submitted. Resubmission is not allowed.')
 
+            submission_serializer = SubmitProjectSerializer(data=request.data)
+            if not submission_serializer.is_valid():
+                return _err('Validation failed.', submission_serializer.errors)
+
             # Handle file upload
-            report_file = request.FILES.get('report_file')
-            github_repo_url = request.data.get('github_repo_url', '')
+            report_file = submission_serializer.validated_data['report_file']
+            github_repo_url = submission_serializer.validated_data.get('github_repo_url', '')
 
             report_blob_url = None
-            if report_file:
-                # Validate file type
-                if not report_file.name.lower().endswith('.pdf'):
-                    return _err('Only PDF files are allowed for reports.')
-                # Validate file size
-                if report_file.size > self.MAX_REPORT_SIZE:
-                    return _err('File too large. Maximum report size is 50MB.')
+            # Validate file size
+            if report_file.size > self.MAX_REPORT_SIZE:
+                return _err('File too large. Maximum report size is 50MB.')
 
-                from AI_Evaluator_Backend.azure_storage import upload_report_to_blob
-                if project.is_group_project:
-                    report_blob_url = upload_report_to_blob(
-                        report_file, str(project.id), group_id=str(membership.group.id),
-                    )
-                else:
-                    report_blob_url = upload_report_to_blob(
-                        report_file, str(project.id), student_id=str(sp.id),
-                    )
+            from AI_Evaluator_Backend.azure_storage import upload_report_to_blob
+            if project.is_group_project:
+                report_blob_url = upload_report_to_blob(
+                    report_file, str(project.id), group_id=str(membership.group.id),
+                )
+            else:
+                report_blob_url = upload_report_to_blob(
+                    report_file, str(project.id), student_id=str(sp.id),
+                )
 
             code_submission = None
 
             with transaction.atomic():
-                if report_blob_url:
-                    submission.report_file_url = report_blob_url
+                submission.report_file_url = report_blob_url
                 submission.github_repo_url = github_repo_url or None
                 submission.save()
+
+                from core.utils.document_parser import extract_text_from_bytes
+
+                report_file.seek(0)
+                report_bytes = report_file.read()
+                extracted_text = extract_text_from_bytes(report_bytes, report_file.name)
+
+                index_status, _ = SubmissionIndexStatus.objects.get_or_create(
+                    submission=submission,
+                )
+                index_status.extracted_text = extracted_text
+                index_status.status = SubmissionIndexStatus.IndexStatus.READY
+                index_status.processed_at = timezone.now()
+                index_status.error_message = None
+                index_status.save()
 
                 if github_repo_url:
                     code_submission = CodeSubmission.objects.create(

@@ -6,6 +6,7 @@ videos, and audio files, plus SAS URL generation.
 import os
 from datetime import datetime, timedelta, timezone
 
+from azure.core.exceptions import ResourceExistsError
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
 
 
@@ -25,11 +26,37 @@ AZURE_CONNECTION_STRING = (
 AZURE_CONTAINER_REPORTS = "reports"
 AZURE_CONTAINER_VIDEOS = "videos"
 AZURE_CONTAINER_AUDIOS = "audios"
+AZURE_PUBLIC_ACCESS_LEVEL = os.getenv("AZURE_PUBLIC_ACCESS_LEVEL", "blob")
 
 
 def _get_blob_service_client():
     """Return a BlobServiceClient instance."""
     return BlobServiceClient.from_connection_string(AZURE_CONNECTION_STRING)
+
+
+def _ensure_container(container_name):
+    """
+    Ensure a container exists and is configured with public blob read access.
+
+    This is intentionally permissive for the current project setup where
+    frontend clients should be able to open uploaded files directly by URL.
+    """
+    client = _get_blob_service_client()
+    container_client = client.get_container_client(container_name)
+
+    try:
+        container_client.create_container()
+    except ResourceExistsError:
+        pass
+
+    access_level = (AZURE_PUBLIC_ACCESS_LEVEL or "").strip().lower()
+    if access_level in ("blob", "container"):
+        container_client.set_container_access_policy(
+            signed_identifiers={},
+            public_access=access_level,
+        )
+
+    return container_client
 
 
 # =============================================================================
@@ -56,11 +83,7 @@ def upload_report_to_blob(file, project_id, student_id=None, group_id=None):
             raise ValueError("Either student_id or group_id must be provided.")
 
         client = _get_blob_service_client()
-        container_client = client.get_container_client(AZURE_CONTAINER_REPORTS)
-        try:
-            container_client.create_container()
-        except Exception:
-            pass # Container already exists
+        _ensure_container(AZURE_CONTAINER_REPORTS)
 
         blob_client = client.get_blob_client(
             container=AZURE_CONTAINER_REPORTS, blob=blob_path,
@@ -89,11 +112,7 @@ def upload_video_to_blob(file, project_id, session_id):
     try:
         blob_path = f"{project_id}/{session_id}/{file.name}"
         client = _get_blob_service_client()
-        container_client = client.get_container_client(AZURE_CONTAINER_VIDEOS)
-        try:
-            container_client.create_container()
-        except Exception:
-            pass
+        _ensure_container(AZURE_CONTAINER_VIDEOS)
 
         blob_client = client.get_blob_client(
             container=AZURE_CONTAINER_VIDEOS, blob=blob_path,
@@ -122,11 +141,7 @@ def upload_audio_to_blob(file, project_id, session_id):
     try:
         blob_path = f"{project_id}/{session_id}/{file.name}"
         client = _get_blob_service_client()
-        container_client = client.get_container_client(AZURE_CONTAINER_AUDIOS)
-        try:
-            container_client.create_container()
-        except Exception:
-            pass
+        _ensure_container(AZURE_CONTAINER_AUDIOS)
 
         blob_client = client.get_blob_client(
             container=AZURE_CONTAINER_AUDIOS, blob=blob_path,
