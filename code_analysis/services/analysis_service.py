@@ -1,3 +1,4 @@
+import logging
 import os
 import subprocess
 from pathlib import Path
@@ -11,6 +12,8 @@ from .gemini_service import GeminiService
 from .repo_service import cleanup_path, clone_repo, iter_code_files, safe_extract_zip
 from .sonarqube_service import SonarQubeService
 
+logger = logging.getLogger(__name__)
+
 
 class CodeAnalysisService:
     def __init__(self):
@@ -18,16 +21,21 @@ class CodeAnalysisService:
         self.gemini = GeminiService()
 
     def analyze_submission(self, code_submission_id):
+        logger.info(f"Starting analyze_submission for code_submission_id: {code_submission_id}")
         submission = CodeSubmission.objects.get(id=code_submission_id)
         repo_path = None
 
         try:
+            logger.info("Setting status to FETCHING")
             submission.analysis_status = CodeSubmission.AnalysisStatus.FETCHING
             submission.save(update_fields=["analysis_status"])
 
+            logger.info(f"Preparing repo for submission {submission.id}")
             repo_path = self._prepare_repo(submission)
+            logger.info(f"Repo prepared at {repo_path}. Detecting language...")
             language, build_system, build_command = detect_language_and_build(repo_path)
 
+            logger.info(f"Language detected: {language}, Build system: {build_system}")
             submission.language_detected = language
             submission.build_system_detected = build_system
             submission.save(update_fields=[
@@ -38,6 +46,7 @@ class CodeAnalysisService:
             project_key = submission.sonar_project_key or f"code-{submission.id.hex}"
             submission.sonar_project_key = project_key
             submission.sonar_report_url = self.sonar.dashboard_url(project_key)
+            logger.info(f"Setting status to SCANNING. Sonar project key: {project_key}")
             submission.analysis_status = CodeSubmission.AnalysisStatus.SCANNING
             submission.save(update_fields=[
                 "sonar_project_key",
@@ -45,23 +54,30 @@ class CodeAnalysisService:
                 "analysis_status",
             ])
 
+            logger.info(f"Ensuring SonarQube project {project_key} exists...")
             self.sonar.ensure_project(project_key, f"Code Submission {submission.id}")
 
             if submission.build_command and submission.build_command.strip():
+                logger.info(f"Running build command: {submission.build_command}")
                 run_build_command(submission.build_command, repo_path)
 
+            logger.info(f"Running SonarQube scanner for {project_key}...")
             self.sonar.run_scanner(
                 project_key=project_key,
                 base_dir=repo_path,
                 extra_args=_scanner_extra_args(),
             )
             submission.sonar_task_id = read_sonar_task_id(repo_path)
+            logger.info(f"SonarQube scanner finished. Task ID: {submission.sonar_task_id}")
 
+            logger.info("Collecting code excerpt for Gemini...")
             code_excerpt = collect_code_excerpt(repo_path)
             if self.gemini.is_enabled():
+                logger.info("Gemini is enabled. Summarizing code and generating questions...")
                 submission.code_summary = self.gemini.summarize_code(code_excerpt)
                 question_excerpt = collect_question_focus_excerpt(repo_path)
                 questions = self.gemini.generate_questions(question_excerpt)
+                logger.info(f"Generated {len(questions)} questions.")
                 for question in questions:
                     GeneratedVivaQuestion.objects.create(
                         code_submission=submission,
@@ -74,6 +90,7 @@ class CodeAnalysisService:
                     )
                 submission.questions_generated_at = timezone.now() if questions else None
             else:
+                logger.info("Gemini is disabled. Skipping code summary and questions.")
                 submission.code_summary = None
                 submission.questions_generated_at = None
 
@@ -84,12 +101,15 @@ class CodeAnalysisService:
                 "questions_generated_at",
                 "analysis_status",
             ])
+            logger.info(f"Analysis process successfully started/completed for submission {submission.id}")
 
         except Exception as exc:
+            logger.error(f"Error during analysis for submission {submission.id}: {exc}", exc_info=True)
             submission.analysis_status = CodeSubmission.AnalysisStatus.FAILED
             submission.analysis_error = str(exc)
             submission.save(update_fields=["analysis_status", "analysis_error"])
         finally:
+            logger.info(f"Cleaning up repo path {repo_path}")
             cleanup_path(repo_path)
 
     def refresh_submission(self, code_submission_id):

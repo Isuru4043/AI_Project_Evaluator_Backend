@@ -1,4 +1,5 @@
 import os
+import shutil
 import time
 import subprocess
 
@@ -64,6 +65,12 @@ class SonarQubeService:
 
         if extra_args:
             command.extend(extra_args)
+
+        scanner_exe = shutil.which(self.scanner_bin)
+        if not scanner_exe:
+            raise FileNotFoundError(f"Scanner binary '{self.scanner_bin}' not found in system PATH. Ensure SonarScanner is installed.")
+        
+        command[0] = scanner_exe
 
         subprocess.run(
             command,
