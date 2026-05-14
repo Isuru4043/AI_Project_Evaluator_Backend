@@ -3,6 +3,8 @@ Views for Project Management, Examiner Assignment,
 Student Enrollment, and Submissions (Features 1-3).
 """
 
+import logging
+
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import status
@@ -25,6 +27,7 @@ from projects.serializers import (
 )
 from viva_evaluator.models import SubmissionIndexStatus
 
+logger = logging.getLogger(__name__)
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -478,11 +481,13 @@ class SubmitProjectView(APIView):
                 index_status.save()
 
                 if github_repo_url:
+                    logger.info(f"GitHub URL provided: {github_repo_url}. Creating CodeSubmission.")
                     code_submission = CodeSubmission.objects.create(
                         project_submission=submission,
                         source_type=CodeSubmission.SourceType.GITHUB,
                         github_url=github_repo_url,
                     )
+                    logger.info(f"Created CodeSubmission with ID: {code_submission.id}. Enqueueing analysis...")
 
                     transaction.on_commit(
                         lambda code_submission_id=code_submission.id: enqueue_code_analysis(
