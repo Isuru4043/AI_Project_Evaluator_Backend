@@ -33,6 +33,18 @@ def _resolve_session_submission(session):
     return None
 
 
+def _difficulty_signal_from_score(soft_score: float) -> str:
+    """
+    Legacy compatibility: VivaAnswerExtension expects 'lower'|'same'|'higher'.
+    Map the new soft_score to that signal so the audit trail stays consistent.
+    """
+    if soft_score < 0.4:
+        return 'lower'
+    if soft_score < 0.7:
+        return 'same'
+    return 'higher'
+
+
 def _get_or_create_index_status(submission):
     from core.utils.document_parser import extract_text_from_bytes
 
@@ -122,6 +134,30 @@ class SubmissionUploadView(APIView):
             )
 
             index_status.extracted_text = extracted_text
+
+            # =========================================================
+            # Build FAISS index from the extracted text (Week 2 RAG).
+            # Uses section-aware chunking + multimodal image captioning.
+            # On indexing failure we still mark the submission READY so
+            # the legacy text-only flow keeps working — but log it loudly.
+            # =========================================================
+            try:
+                from viva_evaluator.services.indexing import index_report
+                from viva_evaluator.services.rag.vector_store import save_index_for_submission
+
+                index_result = index_report(file_content, enable_image_captions=True)
+                chunks = index_result['chunks']
+                num_chunks, _ = save_index_for_submission(submission, chunks)
+                indexed_chunks = num_chunks
+                images_captioned = index_result['images_captioned']
+            except Exception as idx_exc:
+                import logging
+                logging.getLogger(__name__).exception(
+                    'FAISS indexing failed for submission=%s: %s', submission.id, idx_exc,
+                )
+                indexed_chunks = 0
+                images_captioned = 0
+
             index_status.status = SubmissionIndexStatus.IndexStatus.READY
             index_status.processed_at = timezone.now()
             index_status.save()
@@ -132,6 +168,8 @@ class SubmissionUploadView(APIView):
                     "submission_id": str(submission.id),
                     "status": "ready",
                     "characters_extracted": len(extracted_text),
+                    "chunks_indexed": indexed_chunks,
+                    "images_captioned": images_captioned,
                 },
                 status=status.HTTP_201_CREATED,
             )
@@ -198,7 +236,10 @@ class SessionStartView(APIView):
         try:
             from core.models import EvaluationSession
             from viva_evaluator.services.session_manager import get_session_context
-            from viva_evaluator.services.question_generator import generate_first_question
+            from viva_evaluator.services.agents import (
+                generate_anchored_question, QuestionerInput,
+            )
+            from viva_evaluator.services.rag.retrieval import retrieve_hybrid_for_turn
             from viva_evaluator.models import VivaQuestionExtension
             from core.models import VivaQuestion
 
@@ -219,14 +260,12 @@ class SessionStartView(APIView):
                         {"error": "Submission is not ready yet. Please wait for processing to complete."},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
-                report_text = index_status.extracted_text or ""
             except Exception:
                 return Response(
                     {"error": "No processed submission found for this session."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # Get session context to find first criterion
             # Get session context to find first criterion
             context = get_session_context(session_id)
 
@@ -245,14 +284,33 @@ class SessionStartView(APIView):
 
             next_criterion = context['next_criterion']
 
-            # Generate the first question
-            question_data = generate_first_question(
-                report_text=report_text,
-                criteria_name=next_criterion['name'],
-                criteria_description=next_criterion['description'],
+            # =================================================================
+            # Hybrid retrieval — pull both FAISS chunks AND KG signals
+            # (CONTRADICTS_CODE alerts, DEPENDS_ON topics).
+            # =================================================================
+            retrieval = retrieve_hybrid_for_turn(
+                submission=submission,
+                criterion_name=next_criterion['name'],
+                criterion_description=next_criterion['description'],
+                last_answer='',
+                top_k=3,
+            )
+            retrieved = retrieval['chunks']
+
+            # =================================================================
+            # Generate the anchored question via the new pipeline.
+            # =================================================================
+            question_data = generate_anchored_question(QuestionerInput(
+                criterion_name=next_criterion['name'],
+                criterion_description=next_criterion['description'],
+                retrieved_chunks=retrieved,
+                kg_signals=retrieval,
                 difficulty='medium',
                 question_hints=next_criterion.get('hints', []),
-            )
+                recent_questions=[],
+                is_first_question=True,
+                question_number_in_criterion=1,
+            ))
 
             # Save the question to DB
             question_order = context['total_questions_asked'] + 1
@@ -290,6 +348,11 @@ class SessionStartView(APIView):
                     "difficulty": question_data.get('difficulty', 'medium'),
                     "criterion": next_criterion['name'],
                     "question_number": question_order,
+                    "tier1_passed": question_data.get('tier1_passed', False),
+                    "tier1_failures": question_data.get('tier1_failures', []),
+                    "critic_passed": question_data.get('critic_passed', True),
+                    "critic_critique": question_data.get('critic_critique', ''),
+                    "critic_scores": question_data.get('critic_scores', {}),
                 },
                 status=status.HTTP_200_OK,
             )
@@ -300,6 +363,17 @@ class SessionStartView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
         except Exception as e:
+            from viva_evaluator.services.llm_service import LLMQuotaError
+            if isinstance(e, LLMQuotaError):
+                return Response(
+                    {
+                        "error": "The AI service is busy right now (quota limit reached). "
+                                 "Please try again in a moment.",
+                        "code": "ai_quota_exceeded",
+                        "retry_after_seconds": getattr(e, 'retry_after_seconds', None),
+                    },
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
             return Response(
                 {"error": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -324,6 +398,7 @@ class AnswerSubmitView(APIView):
     def post(self, request, session_id):
         question_id = request.data.get('question_id')
         answer_text = request.data.get('answer_text', '').strip()
+        speech_metrics = request.data.get('speech_metrics')   # Week 6: optional
 
         if not question_id or not answer_text:
             return Response(
@@ -334,19 +409,18 @@ class AnswerSubmitView(APIView):
         try:
             from core.models import (
                 EvaluationSession, VivaQuestion,
-                VivaAnswer, RubricCriteria
+                VivaAnswer, RubricCriteria,
             )
-            from viva_evaluator.models import VivaAnswerExtension, VivaQuestionExtension
-            from viva_evaluator.services.answer_evaluator import evaluate_answer
-            from viva_evaluator.services.session_manager import get_session_context
-            from viva_evaluator.services.question_generator import (
-                generate_first_question, generate_followup_question
+            from viva_evaluator.models import (
+                VivaAnswerExtension, VivaQuestionExtension,
+            )
+            from viva_evaluator.services.pipeline import (
+                process_answer_and_pick_next,
             )
 
             session = EvaluationSession.objects.get(id=session_id)
             question = VivaQuestion.objects.get(id=question_id, session=session)
 
-            # Resolve submission (may be via direct FK, group, or student)
             submission = _resolve_session_submission(session)
             if not submission:
                 return Response(
@@ -354,134 +428,113 @@ class AnswerSubmitView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # Get report text
-            try:
-                report_text = submission.index_status.extracted_text or ""
-            except Exception:
-                report_text = ""
-
-            # Get question extension for criterion info
-            try:
-                q_ext = question.extension
-                criteria = q_ext.criteria
-                criteria_name = criteria.criteria_name
-                criteria_description = criteria.description or ""
-                current_difficulty = q_ext.difficulty_level
-            except Exception:
-                criteria = None
-                criteria_name = "General"
-                criteria_description = ""
-                current_difficulty = "medium"
-
-            # Evaluate the answer
-            evaluation = evaluate_answer(
-                question_text=question.question_text,
+            # =================================================================
+            # WEEK 5 — single pipeline call replaces legacy answer_evaluator
+            # + session_manager glue. Runs Analyzer → BKT update →
+            # termination check → Strategist → Questioner.
+            # =================================================================
+            result = process_answer_and_pick_next(
+                session=session,
+                submission=submission,
+                prev_question_obj=question,
                 student_answer=answer_text,
-                criteria_name=criteria_name,
-                criteria_description=criteria_description,
-                report_text=report_text,
-                current_difficulty=current_difficulty,
+                speech_metrics=speech_metrics,
             )
 
-            # Get student profile
-            student_profile = session.student
+            analysis = result['analysis']
+            soft_score = result['soft_score']
+            confidence = result.get('speech_confidence') or {}
 
-            # Save the answer
+            # Persist the answer + extension (audit trail).
             answer = VivaAnswer.objects.create(
                 question=question,
-                student=student_profile,
+                student=session.student,
                 transcribed_answer=answer_text,
-                ai_answer_score=evaluation.get('llm_score', 0),
+                # ai_answer_score is on a 0-10 scale historically; map from soft_score
+                ai_answer_score=round(soft_score * 10.0, 2),
             )
-
-            # Save answer extension
             VivaAnswerExtension.objects.create(
                 answer=answer,
-                llm_score=evaluation.get('llm_score', 0),
-                llm_reasoning=evaluation.get('llm_reasoning', ''),
-                next_difficulty_signal=evaluation.get('next_difficulty', 'same'),
+                llm_score=round(soft_score * 10.0, 2),
+                llm_reasoning=analysis.get('reasoning', '') or '',
+                next_difficulty_signal=_difficulty_signal_from_score(soft_score),
             )
 
-            # Get updated session context
-            context = get_session_context(session_id)
+            # Build a unified rubric scores block for the response.
+            rubric_payload = {
+                'correctness': analysis.get('correctness', {}),
+                'depth':       analysis.get('depth', {}),
+                'consistency': analysis.get('consistency', {}),
+                'soft_score':  soft_score,
+                'reasoning':   analysis.get('reasoning', ''),
+                'gap_identified':       analysis.get('gap_identified', ''),
+                'revealed_assumption':  analysis.get('revealed_assumption', ''),
+                'contradicts_code_flag': analysis.get('contradicts_code_flag', False),
+            }
 
-            # Check if session is complete
-            if context['is_complete']:
-                session.status = EvaluationSession.Status.COMPLETED
-                session.save()
-
+            # ---- Session complete -------------------------------------------
+            if result['session_complete']:
                 return Response(
                     {
                         "answer_saved": True,
-                        "score": evaluation.get('llm_score'),
-                        "reasoning": evaluation.get('llm_reasoning'),
-                        "strengths": evaluation.get('strengths', ''),
-                        "gaps": evaluation.get('gaps', ''),
                         "session_complete": True,
-                        "message": "All criteria have been covered. Session is complete.",
+                        "termination_reason": result.get('termination_reason'),
+                        "rubric": rubric_payload,
+                        "speech_confidence": confidence,
+                        "message": "All termination conditions satisfied — session complete.",
                     },
                     status=status.HTTP_200_OK,
                 )
 
-            # Generate next question
-            next_criterion = context['next_criterion']
-            next_difficulty = context['current_difficulty']
-            question_count = context['current_criterion_question_count']
-            total_asked = context['total_questions_asked']
+            # ---- Save next question -----------------------------------------
+            payload = result['next_question_payload']
+            next_criterion = payload['criterion']
+            qd = payload['question_data']
 
-            # Decide: follow-up on same criterion or first question of new criterion
-            if question_count > 0:
-                next_question_data = generate_followup_question(
-                    report_text=report_text,
-                    criteria_name=next_criterion['name'],
-                    criteria_description=next_criterion['description'],
-                    previous_question=question.question_text,
-                    previous_answer=answer_text,
-                    next_difficulty=next_difficulty,
-                    question_number=question_count + 1,
-                    question_hints=next_criterion.get('hints', [])
-                )
-            else:
-                next_question_data = generate_first_question(
-                    report_text=report_text,
-                    criteria_name=next_criterion['name'],
-                    criteria_description=next_criterion['description'],
-                    difficulty=next_difficulty,
-                    question_hints=next_criterion.get('hints', []),
-                )
+            total_asked = session.viva_questions.count()
 
-            # Save next question
             next_question = VivaQuestion.objects.create(
                 session=session,
-                question_text=next_question_data['question_text'],
-                blooms_level=next_question_data.get('blooms_level', 'Understand'),
+                question_text=qd['question_text'],
+                blooms_level=qd.get('blooms_level', payload['bloom_level']),
                 question_order=total_asked + 1,
                 question_source='ai',
             )
-
-            # Save next question extension
-            next_criterion_obj = RubricCriteria.objects.get(id=next_criterion['id'])
-            VivaQuestionExtension.objects.create(
-                question=next_question,
-                criteria=next_criterion_obj,
-                difficulty_level=next_question_data.get('difficulty', 'medium'),
-            )
+            try:
+                next_criterion_obj = RubricCriteria.objects.get(id=next_criterion['id'])
+                VivaQuestionExtension.objects.create(
+                    question=next_question,
+                    criteria=next_criterion_obj,
+                    difficulty_level=qd.get('difficulty', payload['difficulty']),
+                )
+            except RubricCriteria.DoesNotExist:
+                pass
 
             return Response(
                 {
                     "answer_saved": True,
-                    "score": evaluation.get('llm_score'),
-                    "reasoning": evaluation.get('llm_reasoning'),
-                    "strengths": evaluation.get('strengths', ''),
-                    "gaps": evaluation.get('gaps', ''),
                     "session_complete": False,
+                    "rubric": rubric_payload,
+                    "speech_confidence": confidence,
+                    "strategy": {
+                        "bloom_level":     payload['bloom_level'],
+                        "socratic_intent": payload['socratic_intent'],
+                        "p_lt":            round(payload['p_lt'], 3),
+                        "rationale":       result['strategy'].get('rationale', ''),
+                    },
                     "next_question": {
-                        "question_id": str(next_question.id),
-                        "question_text": next_question.question_text,
-                        "blooms_level": next_question.blooms_level,
-                        "difficulty": next_question_data.get('difficulty', 'medium'),
-                        "criterion": next_criterion['name'],
+                        "question_id":     str(next_question.id),
+                        "question_text":   next_question.question_text,
+                        "blooms_level":    payload['bloom_level'],
+                        "difficulty":      payload['difficulty'],
+                        "criterion":       next_criterion['name'],
                         "question_number": total_asked + 1,
+                        "tier1_passed":    qd.get('tier1_passed', False),
+                        "tier1_failures":  qd.get('tier1_failures', []),
+                        "critic_passed":   qd.get('critic_passed', True),
+                        "critic_critique": qd.get('critic_critique', ''),
+                        "critic_scores":   qd.get('critic_scores', {}),
+                        "attempts":        qd.get('attempts', 1),
                     },
                 },
                 status=status.HTTP_200_OK,
@@ -492,6 +545,17 @@ class AnswerSubmitView(APIView):
         except VivaQuestion.DoesNotExist:
             return Response({"error": "Question not found."}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
+            from viva_evaluator.services.llm_service import LLMQuotaError
+            if isinstance(e, LLMQuotaError):
+                return Response(
+                    {
+                        "error": "The AI service is busy right now (quota limit reached). "
+                                 "Please try again in a moment.",
+                        "code": "ai_quota_exceeded",
+                        "retry_after_seconds": getattr(e, 'retry_after_seconds', None),
+                    },
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -499,26 +563,20 @@ class SessionReportView(APIView):
     """
     GET /api/viva/sessions/<session_id>/report/
 
-    Returns the full XAI report for a completed session.
-    The examiner reviews this before making final grade decisions.
+    Returns the structured post-viva report. Allowed even before the
+    session is COMPLETED so examiners can review mid-session if needed —
+    the report just reflects whatever turns have happened so far.
     """
     permission_classes = [IsAuthenticated]
 
     def get(self, request, session_id):
         try:
             from core.models import EvaluationSession
-            from viva_evaluator.services.session_manager import generate_session_report
+            from viva_evaluator.services.reporting import generate_post_viva_report
 
             session = EvaluationSession.objects.get(id=session_id)
-
-            if session.status != EvaluationSession.Status.COMPLETED:
-                return Response(
-                    {"error": "Session is not completed yet."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-            report = generate_session_report(str(session_id))
-
+            report = generate_post_viva_report(session)
+            report['session_status'] = session.status
             return Response(report, status=status.HTTP_200_OK)
 
         except EvaluationSession.DoesNotExist:
@@ -1147,5 +1205,284 @@ class QuestionHintDeleteView(APIView):
         hint.delete()
         return Response(
             {"message": "Hint deleted successfully."},
+            status=status.HTTP_200_OK,
+        )
+
+
+
+# =============================================================================
+# WEEK 4 — Examiner-in-the-Loop Brief Review API
+# =============================================================================
+
+class BriefListView(APIView):
+    """
+    GET /api/viva/briefs/
+
+    List domain briefs. Default returns pending (T2) drafts for the examiner
+    to review. Filterable via query params:
+        ?status=pending|active|archived
+        ?technology=PostgreSQL
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from viva_evaluator.models import ApprovedDomainBrief
+        from viva_evaluator.serializers import ApprovedDomainBriefListSerializer
+
+        qs = ApprovedDomainBrief.objects.all()
+
+        status_filter = request.query_params.get('status', 'pending')
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+
+        tech = request.query_params.get('technology')
+        if tech:
+            qs = qs.filter(technology__iexact=tech)
+
+        qs = qs.order_by('-drafted_at')[:100]
+        serializer = ApprovedDomainBriefListSerializer(qs, many=True)
+        return Response(
+            {'count': len(serializer.data), 'results': serializer.data},
+            status=status.HTTP_200_OK,
+        )
+
+
+class BriefDetailView(APIView):
+    """
+    GET /api/viva/briefs/<brief_id>/
+
+    Full brief including the JSON body the examiner is reviewing.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, brief_id):
+        from viva_evaluator.models import ApprovedDomainBrief
+        from viva_evaluator.serializers import ApprovedDomainBriefDetailSerializer
+        try:
+            brief = ApprovedDomainBrief.objects.get(id=brief_id)
+        except ApprovedDomainBrief.DoesNotExist:
+            return Response(
+                {"error": "Brief not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return Response(
+            ApprovedDomainBriefDetailSerializer(brief).data,
+            status=status.HTTP_200_OK,
+        )
+
+
+class BriefApproveView(APIView):
+    """
+    POST /api/viva/briefs/<brief_id>/approve/
+
+    Examiner approves a pending T2 draft → status=ACTIVE, tier=1.
+    Optional body:
+        {
+            "scope": "examiner" | "department",
+            "tech_version": "..."
+        }
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, brief_id):
+        from viva_evaluator.models import ApprovedDomainBrief
+        from viva_evaluator.serializers import ApprovedDomainBriefDetailSerializer
+        from django.utils import timezone
+
+        try:
+            brief = ApprovedDomainBrief.objects.get(id=brief_id)
+        except ApprovedDomainBrief.DoesNotExist:
+            return Response(
+                {"error": "Brief not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Examiner check
+        try:
+            examiner = request.user.examiner_profile
+        except Exception:
+            return Response(
+                {"error": "Only examiners can approve briefs."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        scope = request.data.get('scope', ApprovedDomainBrief.Scope.EXAMINER)
+        if scope not in dict(ApprovedDomainBrief.Scope.choices):
+            return Response(
+                {"error": f"Invalid scope: {scope}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        tech_version = request.data.get('tech_version')
+        if tech_version is not None:
+            brief.tech_version = tech_version
+
+        brief.status = ApprovedDomainBrief.Status.ACTIVE
+        brief.tier = 1
+        brief.scope = scope
+        brief.approved_by = examiner
+        brief.approved_at = timezone.now()
+        brief.last_verified_at = timezone.now()
+        brief.save()
+
+        return Response(
+            ApprovedDomainBriefDetailSerializer(brief).data,
+            status=status.HTTP_200_OK,
+        )
+
+
+class BriefEditView(APIView):
+    """
+    PATCH /api/viva/briefs/<brief_id>/edit/
+
+    Examiner edits the brief body before approving. Status stays PENDING
+    until they call /approve/ explicitly.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, brief_id):
+        from viva_evaluator.models import ApprovedDomainBrief
+        from viva_evaluator.serializers import (
+            ApprovedDomainBriefEditSerializer,
+            ApprovedDomainBriefDetailSerializer,
+        )
+        try:
+            brief = ApprovedDomainBrief.objects.get(id=brief_id)
+        except ApprovedDomainBrief.DoesNotExist:
+            return Response(
+                {"error": "Brief not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            request.user.examiner_profile
+        except Exception:
+            return Response(
+                {"error": "Only examiners can edit briefs."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        serializer = ApprovedDomainBriefEditSerializer(
+            brief, data=request.data, partial=True,
+        )
+        if not serializer.is_valid():
+            return Response(
+                serializer.errors, status=status.HTTP_400_BAD_REQUEST,
+            )
+        serializer.save()
+        return Response(
+            ApprovedDomainBriefDetailSerializer(brief).data,
+            status=status.HTTP_200_OK,
+        )
+
+
+class BriefRejectView(APIView):
+    """
+    POST /api/viva/briefs/<brief_id>/reject/
+
+    Examiner rejects the draft → status=ARCHIVED. The system will not
+    re-draft a brief for the same technology unless this is explicitly
+    cleared (admin operation).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, brief_id):
+        from viva_evaluator.models import ApprovedDomainBrief
+        try:
+            brief = ApprovedDomainBrief.objects.get(id=brief_id)
+        except ApprovedDomainBrief.DoesNotExist:
+            return Response(
+                {"error": "Brief not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            request.user.examiner_profile
+        except Exception:
+            return Response(
+                {"error": "Only examiners can reject briefs."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        brief.status = ApprovedDomainBrief.Status.ARCHIVED
+        brief.save(update_fields=['status'])
+        return Response(
+            {"message": "Brief archived.", "id": str(brief.id)},
+            status=status.HTTP_200_OK,
+        )
+
+
+
+# =============================================================================
+# WEEK 7 — Ablation experiment endpoint
+# =============================================================================
+
+class AblationRunView(APIView):
+    """
+    POST /api/viva/ablation/run/
+
+    Generate the same question under multiple ablation conditions for the
+    dissertation evaluation chapter. Examiners use this to compare the
+    full system against ablated variants on identical inputs.
+
+    Body:
+        {
+            "submission_id":         "<uuid>",
+            "criterion_name":        "...",
+            "criterion_description": "...",
+            "last_answer":           "...",            (optional)
+            "previous_question":     "...",            (optional)
+            "difficulty":            "easy|medium|hard", (optional, default medium)
+            "conditions": [                            (optional)
+                {},
+                {"disable_anchoring": true},
+                {"disable_kg": true}
+            ]
+        }
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from core.models import ProjectSubmission
+        from viva_evaluator.services.ablation import run_ablation_set
+
+        submission_id = request.data.get('submission_id')
+        criterion_name = request.data.get('criterion_name')
+        criterion_description = request.data.get('criterion_description', '')
+        last_answer = request.data.get('last_answer', '') or ''
+        previous_question = request.data.get('previous_question')
+        difficulty = request.data.get('difficulty', 'medium')
+        conditions = request.data.get('conditions')
+
+        if not submission_id or not criterion_name:
+            return Response(
+                {"error": "submission_id and criterion_name are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            submission = ProjectSubmission.objects.get(id=submission_id)
+        except ProjectSubmission.DoesNotExist:
+            return Response(
+                {"error": "Submission not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        runs = run_ablation_set(
+            submission=submission,
+            criterion_name=criterion_name,
+            criterion_description=criterion_description,
+            last_answer=last_answer,
+            previous_question=previous_question,
+            difficulty=difficulty,
+            conditions=conditions,
+        )
+
+        return Response(
+            {
+                "submission_id": str(submission.id),
+                "criterion_name": criterion_name,
+                "runs": runs,
+            },
             status=status.HTTP_200_OK,
         )

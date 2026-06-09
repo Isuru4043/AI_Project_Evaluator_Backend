@@ -21,6 +21,12 @@ from viva_evaluator.views import (
     RubricCategoryUpdateView,
     RubricCriteriaUpdateView,
     QuestionHintDeleteView,
+    BriefListView,
+    BriefDetailView,
+    BriefApproveView,
+    BriefEditView,
+    BriefRejectView,
+    AblationRunView,
 )
 
 urlpatterns = [
@@ -55,4 +61,13 @@ urlpatterns = [
     path('criteria/<uuid:criteria_id>/', RubricCriteriaUpdateView.as_view(), name='criteria-update'),
     path('hints/<uuid:hint_id>/', QuestionHintDeleteView.as_view(), name='hint-delete'),
 
+    # ── WEEK 4 — Examiner-in-the-loop brief review ──────────────────────────
+    path('briefs/', BriefListView.as_view(), name='brief-list'),
+    path('briefs/<uuid:brief_id>/', BriefDetailView.as_view(), name='brief-detail'),
+    path('briefs/<uuid:brief_id>/approve/', BriefApproveView.as_view(), name='brief-approve'),
+    path('briefs/<uuid:brief_id>/edit/', BriefEditView.as_view(), name='brief-edit'),
+    path('briefs/<uuid:brief_id>/reject/', BriefRejectView.as_view(), name='brief-reject'),
+
+    # ── WEEK 7 — Ablation experiment harness ────────────────────────────────
+    path('ablation/run/', AblationRunView.as_view(), name='ablation-run'),
 ]

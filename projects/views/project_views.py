@@ -480,6 +480,28 @@ class SubmitProjectView(APIView):
                 index_status.error_message = None
                 index_status.save()
 
+                # =========================================================
+                # Build FAISS index from the extracted text (Week 2 RAG).
+                # Uses section-aware chunking + multimodal image captioning.
+                # On indexing failure we still mark the submission READY so
+                # the legacy text-only flow keeps working — but log loudly.
+                # =========================================================
+                indexed_chunks = 0
+                images_captioned = 0
+                try:
+                    from viva_evaluator.services.indexing import index_report
+                    from viva_evaluator.services.rag.vector_store import save_index_for_submission
+
+                    index_result = index_report(report_bytes, enable_image_captions=True)
+                    chunks = index_result['chunks']
+                    images_captioned = index_result['images_captioned']
+                    indexed_chunks, _ = save_index_for_submission(submission, chunks)
+                except Exception as idx_exc:
+                    logger.exception(
+                        'FAISS indexing failed for submission=%s: %s',
+                        submission.id, idx_exc,
+                    )
+
                 if github_repo_url:
                     logger.info(f"GitHub URL provided: {github_repo_url}. Creating CodeSubmission.")
                     code_submission = CodeSubmission.objects.create(
@@ -496,6 +518,8 @@ class SubmitProjectView(APIView):
                     )
 
             response_data = ProjectSubmissionSerializer(submission).data
+            response_data['chunks_indexed'] = indexed_chunks
+            response_data['images_captioned'] = images_captioned
             if code_submission:
                 response_data['code_submission_id'] = str(code_submission.id)
                 response_data['code_analysis_status'] = code_submission.analysis_status

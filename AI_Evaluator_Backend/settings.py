@@ -222,7 +222,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # Gemini API
 # =============================================================================
 
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', 'AIzaSyDE4ZHR5WoIgOTu2HInC2-67PR7w8f80hA')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
 GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash-lite')
 
 GROQ_API_KEY = ''
@@ -290,4 +290,36 @@ SPECTACULAR_SETTINGS = {
     'DESCRIPTION': 'API for student and examiner interactions in the Viva Evaluation system.',
     'VERSION': '1.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
+}
+
+
+
+# =============================================================================
+# Logging — surface INFO logs (incl. per-LLM-call latency + turn timing)
+# in the dev console so latency can be diagnosed in real time.
+# =============================================================================
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'simple': {
+            'format': '[{asctime}] {levelname} {name}: {message}',
+            'style': '{',
+            'datefmt': '%H:%M:%S',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'simple',
+        },
+    },
+    'loggers': {
+        # Our viva pipeline modules
+        'viva_evaluator': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+    },
 }
