@@ -1,30 +1,31 @@
 """
-Bayesian Knowledge Tracing (BKT) — calibrated for ASSESSMENT, not tutoring.
+Mastery estimation for ASSESSMENT (not tutoring).
 
-Standard BKT was designed for intelligent tutoring systems where the learner
-acquires knowledge between turns. A viva is the opposite: the student already
-holds whatever knowledge they have, and the session reveals what's there.
+A viva measures a student's pre-existing ability in a single sitting with few
+observations per concept. The appropriate model family is Item Response Theory
+(IRT) / Computerized Adaptive Testing (CAT), not Bayesian Knowledge Tracing
+(BKT, which is built for tracking *learning* over many attempts).
 
-Calibration choices (from the v3 spec):
-    P(L₀)   = 0.30   (slight presumption of non-demonstrated mastery)
-    P(T)    = 0.05   (low; viva reveals existing knowledge)
-    P(G)    = 0.20   (literature standard)
-    P(S)    = 0.10   (literature standard)
+This package provides `ability_engine`: an online Bayesian Rasch-style
+estimator that is difficulty-aware (a correct hard answer counts more than a
+correct easy one) and reports calibrated uncertainty (σ) used as the
+convergence / stopping signal.
 
-Soft evidence: instead of binary correct/incorrect, the Analyzer feeds in a
-continuous score s ∈ [0, 1] from the 3D rubric weighted average.
+NOTE: the package directory is still named `bkt` for import stability
+(session state, pipeline, and strategist import from here). The legacy BKT
+engine itself has been removed.
 """
 
-from viva_evaluator.services.bkt.bkt_engine import (
-    BKT_DEFAULTS,
-    BktState,
-    update_bkt,
-    bloom_target_for_mastery,
+from viva_evaluator.services.bkt.ability_engine import (
+    AbilityState,
+    update_ability,
+    bloom_target_for_ability,
+    ABILITY_SD_THRESHOLD,
 )
 
 __all__ = [
-    'BKT_DEFAULTS',
-    'BktState',
-    'update_bkt',
-    'bloom_target_for_mastery',
+    'AbilityState',
+    'update_ability',
+    'bloom_target_for_ability',
+    'ABILITY_SD_THRESHOLD',
 ]

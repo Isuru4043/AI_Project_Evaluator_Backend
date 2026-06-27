@@ -108,7 +108,7 @@ def process_answer_and_pick_next(
         load_session_state, save_session_state,
     )
     from viva_evaluator.services.pipeline.termination import should_terminate
-    from viva_evaluator.services.bkt.bkt_engine import update_bkt
+    from viva_evaluator.services.bkt.ability_engine import update_ability
     from viva_evaluator.services.agents.analyzer import (
         analyze_answer, AnalyzerInput,
     )
@@ -187,10 +187,17 @@ def process_answer_and_pick_next(
     _mark('B.5:confidence')
 
     # ------------------------------------------------------------------
-    # Step C — BKT update for the answered criterion
+    # Step C — Bayesian ability update for the answered criterion.
+    # Difficulty-aware: the answered question's Bloom level sets the item
+    # difficulty, so a correct hard answer raises ability more than a
+    # correct easy one (and a wrong easy answer costs more).
     # ------------------------------------------------------------------
-    bkt_state = state.get_or_init_bkt(str(answered_criterion['id']))
-    update_bkt(bkt_state, soft_score)
+    ability_state = state.get_or_init_bkt(str(answered_criterion['id']))
+    update_ability(
+        ability_state,
+        soft_score,
+        bloom_level=getattr(prev_question_obj, 'blooms_level', 'Analyze') or 'Analyze',
+    )
 
     # ------------------------------------------------------------------
     # Step D — Termination check (BEFORE strategist for the next turn)

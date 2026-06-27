@@ -31,7 +31,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional
 
-from viva_evaluator.services.bkt.bkt_engine import bloom_target_for_mastery
+from viva_evaluator.services.bkt.ability_engine import bloom_target_for_ability
 
 logger = logging.getLogger(__name__)
 
@@ -112,9 +112,9 @@ def select_strategy(inp: StrategistInput) -> Dict:
     contradicts_alerts = kg.get('contradicts_code_alerts') or []
     has_kg_alt = _has_alternative_edge(kg)
 
-    # ----- 1) Bloom level: BKT-driven baseline ------------------------------
-    bloom = bloom_target_for_mastery(inp.p_lt)
-    rationale_parts = [f'BKT P(L_t)={inp.p_lt:.2f} → bloom={bloom}']
+    # ----- 1) Bloom level: ability-driven baseline --------------------------
+    bloom = bloom_target_for_ability(inp.p_lt)
+    rationale_parts = [f'ability P(mastery)={inp.p_lt:.2f} → bloom={bloom}']
 
     # ----- 2) Apply overrides per v3 spec -----------------------------------
 

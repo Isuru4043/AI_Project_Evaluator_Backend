@@ -3,7 +3,7 @@ SessionState — typed view over per-session memory.
 
 Persisted on EvaluationSession.bkt_state_json (added in migration 0007).
 Holds:
-    - bkt_states: Dict[criterion_id → BktState dict]
+    - bkt_states: Dict[criterion_id → AbilityState dict]
     - intent_history: list of intents used (anti-repetition)
     - rubric_coverage: per-criterion turn counts and avg correctness
     - last_soft_scores: rolling list (for diagnostics)
@@ -17,7 +17,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from viva_evaluator.services.bkt.bkt_engine import BktState, BKT_DEFAULTS
+from viva_evaluator.services.bkt.ability_engine import AbilityState
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ class CriterionCoverage:
 class SessionState:
     """Top-level session memory persisted between turns."""
 
-    bkt_states: Dict[str, BktState] = field(default_factory=dict)
+    bkt_states: Dict[str, AbilityState] = field(default_factory=dict)
     coverage: Dict[str, CriterionCoverage] = field(default_factory=dict)
     intent_history: List[str] = field(default_factory=list)
     soft_score_history: List[float] = field(default_factory=list)
@@ -72,9 +72,9 @@ class SessionState:
     # BKT helpers
     # ------------------------------------------------------------------
 
-    def get_or_init_bkt(self, criterion_id: str) -> BktState:
+    def get_or_init_bkt(self, criterion_id: str) -> AbilityState:
         if criterion_id not in self.bkt_states:
-            self.bkt_states[criterion_id] = BktState(concept_id=criterion_id)
+            self.bkt_states[criterion_id] = AbilityState(concept_id=criterion_id)
         return self.bkt_states[criterion_id]
 
     # ------------------------------------------------------------------
@@ -134,7 +134,7 @@ class SessionState:
     def from_dict(cls, data: Optional[Dict]) -> 'SessionState':
         data = data or {}
         return cls(
-            bkt_states={k: BktState.from_dict(v) for k, v in (data.get('bkt_states') or {}).items()},
+            bkt_states={k: AbilityState.from_dict(v) for k, v in (data.get('bkt_states') or {}).items()},
             coverage={k: CriterionCoverage.from_dict(v) for k, v in (data.get('coverage') or {}).items()},
             intent_history=list(data.get('intent_history') or []),
             soft_score_history=list(data.get('soft_score_history') or []),

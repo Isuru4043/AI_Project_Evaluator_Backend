@@ -8,7 +8,8 @@ From v3 spec, Phase 3 step 3.8:
                                turns where Correctness > 0.3
         2. Min session length: total_turns >= MIN_TOTAL_TURNS
         3. BKT convergence   : for every concept C, either
-                                  std(delta_last3) < 0.05  (mastery stable)
+                                  posterior SD σ < ABILITY_SD_THRESHOLD
+                                  (ability measured precisely)
                                OR concept has reached MAX_TURNS_PER_CONCEPT
 
     Hard cap: if total_turns >= HARD_TURN_CAP, terminate regardless.
@@ -169,17 +170,17 @@ def _check_bkt_convergence(state: SessionState, all_criteria: List[Dict]) -> tup
         if turns >= MAX_TURNS_PER_CONCEPT:
             continue   # max-turns satisfies the convergence guarantee
 
-        if not bkt or len(bkt.delta_last3) < 3:
+        if not bkt or bkt.turns < 2:
             not_converged.append(
                 f"{crit.get('name', crit_id)}: insufficient history "
                 f"(turns={turns})"
             )
             continue
 
-        if not bkt.is_converged(BKT_CONVERGENCE_THRESHOLD):
+        if not bkt.is_converged():
             not_converged.append(
                 f"{crit.get('name', crit_id)}: not converged "
-                f"(P_Lt={bkt.p_lt:.2f}, turns={turns})"
+                f"(P_Lt={bkt.p_lt:.2f}, σ={bkt.sigma:.2f}, turns={turns})"
             )
 
     if not_converged:
