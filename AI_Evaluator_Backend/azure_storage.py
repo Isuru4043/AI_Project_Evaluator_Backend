@@ -13,8 +13,8 @@ from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPerm
 # =============================================================================
 # Azure Blob Storage Credentials
 # =============================================================================
-AZURE_ACCOUNT_NAME = "vivasensestorage"
-AZURE_ACCOUNT_KEY = "U11xrzbhYh+l3yv+El/Ro8Nfi8rZX7YortukYz3sinQ+dNN7OCiQHEpdccHZFRz2zxyWb2kBd7z9+AStmKyAWg=="
+AZURE_ACCOUNT_NAME = "aievaluatorstorage"
+AZURE_ACCOUNT_KEY = "FAEXipyUAw6xx29WwLfVQPF0H/u+G+7D4jfusHYay3LgEAUuiVRPlsV4bFuwAPtx1gTopyccZUhq+AStX2Iqgw=="
 AZURE_CONNECTION_STRING = (
     f"DefaultEndpointsProtocol=https;"
     f"AccountName={AZURE_ACCOUNT_NAME};"
@@ -36,10 +36,11 @@ def _get_blob_service_client():
 
 def _ensure_container(container_name):
     """
-    Ensure a container exists and is configured with public blob read access.
+    Ensure a container exists. Optionally configure public blob read access
+    if the storage account permits it.
 
-    This is intentionally permissive for the current project setup where
-    frontend clients should be able to open uploaded files directly by URL.
+    If the storage account has public access disabled, the container will
+    remain private and files should be accessed via SAS URLs instead.
     """
     client = _get_blob_service_client()
     container_client = client.get_container_client(container_name)
@@ -51,10 +52,15 @@ def _ensure_container(container_name):
 
     access_level = (AZURE_PUBLIC_ACCESS_LEVEL or "").strip().lower()
     if access_level in ("blob", "container"):
-        container_client.set_container_access_policy(
-            signed_identifiers={},
-            public_access=access_level,
-        )
+        try:
+            container_client.set_container_access_policy(
+                signed_identifiers={},
+                public_access=access_level,
+            )
+        except Exception:
+            # Storage account may have public access disabled — that's fine.
+            # Files will be accessed via SAS URLs instead.
+            pass
 
     return container_client
 
