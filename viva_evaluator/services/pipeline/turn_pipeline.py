@@ -20,6 +20,38 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+# A1 Response Triage: maximum CONSECUTIVE clarification re-asks before the
+# pipeline proceeds to score regardless (prevents a student stalling forever).
+CLARIFICATION_CAP = 2
+
+# B3 Weak-retrieval awareness: if the best retrieved chunk's cosine similarity
+# is below this, the submission barely covers the criterion → ask a broader
+# question instead of fabricating specifics.
+WEAK_GROUNDING_THRESHOLD = 0.30
+
+# A2 Charitable interpretation: only runs when correctness falls in this
+# borderline band, and can only RAISE the score up to CHARITABLE_FLOOR.
+CHARITABLE_BAND = (0.40, 0.60)
+CHARITABLE_FLOOR = 0.65
+
+# A3 Material-vs-superficial inconsistency: only review when consistency is
+# flagged below this; if superficial, lift it to the neutral value (no penalty).
+CONSISTENCY_REVIEW_THRESHOLD = 0.40
+CONSISTENCY_NEUTRAL = 0.80
+
+# A4 Self-correction: only run when there's a prior answer AND the current score
+# left room to rescue; can only RAISE the score up to SELF_CORRECTION_FLOOR.
+SELF_CORRECTION_TRIGGER_MAX = 0.70
+SELF_CORRECTION_FLOOR = 0.65
+
+
+def _grounding_is_weak(chunks: List[Dict], threshold: float = WEAK_GROUNDING_THRESHOLD) -> bool:
+    """True if no retrieved chunk clears the similarity threshold (thin coverage)."""
+    if not chunks:
+        return True
+    best = max((float(c.get('score', 0.0)) for c in chunks), default=0.0)
+    return best < threshold
+
 
 # =============================================================================
 # Helpers — load rubric and resolve session submission
@@ -159,6 +191,92 @@ def process_answer_and_pick_next(
     _mark('A:retrieval')
 
     # ------------------------------------------------------------------
+    # Step A.5 — Response Triage (A1, FAIRNESS GATE).
+    # Decide whether the student actually engaged with the question or was
+    # confused by it. If confused (and we still have clarification budget),
+    # SUSPEND scoring entirely — no Analyzer, no ability update, no turn
+    # consumed — and re-ask the same question in clearer words.
+    # This can only ever HELP the student (asymmetric) and is bounded by
+    # CLARIFICATION_CAP so it cannot be used to stall.
+    # ------------------------------------------------------------------
+    from viva_evaluator.services.agents.response_triage import (
+        triage_response, TriageInput, CLARIFY_LABELS, RESTATE_LABELS, LABEL_GARBLED,
+    )
+
+    triage = triage_response(TriageInput(
+        question_text=prev_question_obj.question_text,
+        student_answer=student_answer,
+        is_spoken=bool(speech_metrics),
+    ))
+    _mark('A.5:triage')
+
+    gate_labels = CLARIFY_LABELS | RESTATE_LABELS
+    if triage['label'] in gate_labels and state.clarification_streak < CLARIFICATION_CAP:
+        state.clarification_streak += 1
+        prev_bloom = getattr(prev_question_obj, 'blooms_level', 'Analyze') or 'Analyze'
+
+        if triage['label'] in RESTATE_LABELS:
+            # A5: transcription artifact — re-present the SAME question verbatim
+            # and ask the student to restate. No rephrase, no LLM call needed.
+            question_data = {
+                'question_text':  prev_question_obj.question_text,
+                'blooms_level':   prev_bloom,
+                'difficulty':     _bloom_to_difficulty(prev_bloom),
+                'tier1_passed':   True,
+                'tier1_failures': [],
+                'critic_ran':     False,
+                'critic_passed':  None,
+                'critic_critique': '',
+                'critic_scores':  {},
+                'attempts':       0,
+            }
+        else:
+            # A1: confusion — re-ask the same concept in clearer words.
+            question_data = generate_anchored_question(QuestionerInput(
+                criterion_name=answered_criterion['name'],
+                criterion_description=answered_criterion['description'],
+                retrieved_chunks=retrieval['chunks'],
+                kg_signals=retrieval,
+                difficulty=_bloom_to_difficulty(prev_bloom),
+                question_hints=answered_criterion.get('hints', []),
+                recent_questions=[],            # a rephrase SHOULD resemble the original
+                previous_question=prev_question_obj.question_text,
+                previous_answer=student_answer,
+                is_first_question=False,
+                clarify_mode=True,
+                clarify_reason=triage.get('rationale', ''),
+            ))
+            question_data['blooms_level'] = prev_bloom
+
+        save_session_state(session, state)
+        logger.info(
+            '[turn] %s (streak=%d/%d) label=%s for criterion=%s',
+            'RESTATE' if triage['label'] in RESTATE_LABELS else 'CLARIFICATION',
+            state.clarification_streak, CLARIFICATION_CAP,
+            triage['label'], answered_criterion['name'],
+        )
+
+        return {
+            'clarification':       True,
+            'triage':              triage,
+            'session_complete':    False,
+            'analysis':            None,
+            'soft_score':          None,
+            'speech_confidence':   {},
+            'clarification_attempt': state.clarification_streak,
+            'clarified_question_payload': {
+                'question_data':   question_data,
+                'criterion':       answered_criterion,
+                'bloom_level':     prev_bloom,
+                'difficulty':      _bloom_to_difficulty(prev_bloom),
+            },
+        }
+
+    # Not clarifying (real attempt, or clarification budget exhausted) →
+    # reset the streak and proceed to normal scoring.
+    state.clarification_streak = 0
+
+    # ------------------------------------------------------------------
     # Step B — Analyzer (3D rubric)
     # ------------------------------------------------------------------
     transcript_recent = _build_recent_transcript(session)
@@ -175,6 +293,120 @@ def process_answer_and_pick_next(
 
     soft_score = float(analysis.get('soft_score', 0.5))
     correctness = float((analysis.get('correctness') or {}).get('score', 0.5))
+
+    # ------------------------------------------------------------------
+    # Step B.1 — Material vs superficial inconsistency (A3, FAIRNESS).
+    # If consistency was flagged low, decide whether it's a real
+    # contradiction or just reworded phrasing. Superficial clashes get the
+    # penalty neutralised (asymmetric: can only lift consistency, not lower).
+    # ------------------------------------------------------------------
+    consistency_dim = analysis.get('consistency') or {}
+    consistency_score = float(consistency_dim.get('score', 1.0))
+    if consistency_score < CONSISTENCY_REVIEW_THRESHOLD:
+        from viva_evaluator.services.agents.consistency_check import (
+            classify_inconsistency, ConsistencyInput,
+        )
+        from viva_evaluator.services.agents.analyzer import recompute_soft_score
+
+        verdict = classify_inconsistency(ConsistencyInput(
+            question_text=prev_question_obj.question_text,
+            student_answer=student_answer,
+            transcript_recent=transcript_recent,
+            consistency_evidence=consistency_dim.get('evidence_quote', ''),
+        ))
+        if not verdict['material']:
+            analysis['consistency']['score'] = max(consistency_score, CONSISTENCY_NEUTRAL)
+            analysis['consistency_adjustment'] = {
+                'applied':   True,
+                'original':  round(consistency_score, 4),
+                'rationale': verdict['rationale'],
+            }
+            soft_score = recompute_soft_score(analysis)
+            analysis['soft_score'] = soft_score
+            logger.info(
+                '[turn] A3 consistency suppressed (superficial): %.2f -> %.2f',
+                consistency_score, analysis['consistency']['score'],
+            )
+        else:
+            analysis['consistency_adjustment'] = {
+                'applied': False, 'material': True, 'rationale': verdict['rationale'],
+            }
+        _mark('B.1:consistency')
+
+    # ------------------------------------------------------------------
+    # Step B.2 — Charitable interpretation (A2, FAIRNESS RESCUE).
+    # If correctness is borderline, check whether the answer shows sound
+    # understanding despite weak wording. This can only RAISE the score
+    # (asymmetric) and only fires inside the borderline band.
+    # ------------------------------------------------------------------
+    if CHARITABLE_BAND[0] <= correctness <= CHARITABLE_BAND[1]:
+        from viva_evaluator.services.agents.charitable_check import (
+            assess_understanding, CharitableInput,
+        )
+        charitable = assess_understanding(CharitableInput(
+            question_text=prev_question_obj.question_text,
+            student_answer=student_answer,
+            criterion_name=answered_criterion['name'],
+            criterion_description=answered_criterion['description'],
+            retrieved_chunks=retrieval['chunks'],
+        ))
+        if charitable['understanding_sound'] and soft_score < CHARITABLE_FLOOR:
+            original_soft = soft_score
+            soft_score = CHARITABLE_FLOOR
+            analysis['charitable'] = {
+                'applied':       True,
+                'original_soft': round(original_soft, 4),
+                'adjusted_soft': CHARITABLE_FLOOR,
+                'rationale':     charitable['rationale'],
+            }
+            logger.info(
+                '[turn] CHARITABLE rescue: soft %.2f -> %.2f (%s)',
+                original_soft, soft_score, charitable['rationale'][:80],
+            )
+        else:
+            analysis['charitable'] = {'applied': False,
+                                      'rationale': charitable['rationale']}
+        _mark('B.2:charitable')
+
+    # ------------------------------------------------------------------
+    # Step B.3 — Self-correction crediting (A4, FAIRNESS RESCUE).
+    # If the current answer corrects/improves the student's previous answer,
+    # credit the recovery. Asymmetric: can only RAISE the score, and only when
+    # the current score left room (below the trigger threshold).
+    # ------------------------------------------------------------------
+    if soft_score < SELF_CORRECTION_TRIGGER_MAX:
+        previous_answer = ''
+        for _pair in reversed(transcript_recent):
+            if _pair.get('answer_text'):
+                previous_answer = _pair['answer_text']
+                break
+        if previous_answer:
+            from viva_evaluator.services.agents.self_correction import (
+                assess_self_correction, SelfCorrectionInput,
+            )
+            sc = assess_self_correction(SelfCorrectionInput(
+                question_text=prev_question_obj.question_text,
+                current_answer=student_answer,
+                previous_answer=previous_answer,
+            ))
+            if sc['is_correction'] and sc['improved'] and soft_score < SELF_CORRECTION_FLOOR:
+                original_soft = soft_score
+                soft_score = SELF_CORRECTION_FLOOR
+                analysis['self_correction'] = {
+                    'applied':       True,
+                    'original_soft': round(original_soft, 4),
+                    'adjusted_soft': SELF_CORRECTION_FLOOR,
+                    'rationale':     sc['rationale'],
+                }
+                analysis['soft_score'] = soft_score
+                logger.info(
+                    '[turn] A4 self-correction credit: soft %.2f -> %.2f (%s)',
+                    original_soft, soft_score, sc['rationale'][:80],
+                )
+            else:
+                analysis['self_correction'] = {'applied': False,
+                                                'rationale': sc['rationale']}
+            _mark('B.3:self_correction')
 
     # ------------------------------------------------------------------
     # Step B.5 — Speech confidence (Week 6)
@@ -292,6 +524,7 @@ def process_answer_and_pick_next(
         previous_answer=student_answer,
         is_first_question=is_first_for_criterion,
         question_number_in_criterion=state.coverage[str(next_criterion['id'])].turns + 1,
+        weak_grounding=_grounding_is_weak(retrieval['chunks']),
     ))
     _mark('F:questioner(LLM+critic)')
 

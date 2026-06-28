@@ -67,6 +67,9 @@ class SessionState:
     intent_history: List[str] = field(default_factory=list)
     soft_score_history: List[float] = field(default_factory=list)
     total_turns: int = 0
+    # A1 Response Triage: number of CONSECUTIVE clarification re-asks. Bounded
+    # so a student cannot stall indefinitely. Reset to 0 on any scored turn.
+    clarification_streak: int = 0
 
     # ------------------------------------------------------------------
     # BKT helpers
@@ -128,6 +131,7 @@ class SessionState:
             'intent_history':     list(self.intent_history),
             'soft_score_history': list(self.soft_score_history),
             'total_turns':        self.total_turns,
+            'clarification_streak': self.clarification_streak,
         }
 
     @classmethod
@@ -139,6 +143,7 @@ class SessionState:
             intent_history=list(data.get('intent_history') or []),
             soft_score_history=list(data.get('soft_score_history') or []),
             total_turns=int(data.get('total_turns') or 0),
+            clarification_streak=int(data.get('clarification_streak') or 0),
         )
 
 

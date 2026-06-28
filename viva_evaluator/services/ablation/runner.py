@@ -110,8 +110,10 @@ def run_single_ablation(
     return {
         'condition':       flags.label(),
         'question_text':   qd.get('question_text', ''),
+        'blooms_level':    qd.get('blooms_level', ''),
         'tier1_passed':    qd.get('tier1_passed', False),
         'tier1_failures':  qd.get('tier1_failures', []),
+        'critic_ran':      qd.get('critic_ran', False),
         'critic_passed':   qd.get('critic_passed', True),
         'critic_critique': qd.get('critic_critique', ''),
         'critic_scores':   qd.get('critic_scores', {}),

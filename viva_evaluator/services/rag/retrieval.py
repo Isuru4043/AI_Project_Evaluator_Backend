@@ -21,6 +21,9 @@ from viva_evaluator.services.rag.vector_store import (
 
 logger = logging.getLogger(__name__)
 
+# Reciprocal Rank Fusion constant (standard default).
+_RRF_K0 = 60
+
 
 # =============================================================================
 # Public API
@@ -34,18 +37,20 @@ def retrieve_for_turn(
     top_k: int = 3,
 ) -> List[Dict]:
     """
-    Pull the top-k chunks most relevant to the current viva turn.
+    Pull the top-k chunks most relevant to the current viva turn, using HYBRID
+    retrieval (dense SBERT + BM25 lexical, fused via RRF) followed by an
+    optional cross-encoder rerank.
 
-    Args:
-        submission:            ProjectSubmission.
-        criterion_name:        e.g. "Database Design".
-        criterion_description: rubric description for added context.
-        last_answer:           student's latest answer (empty for first question).
-        top_k:                 chunks to return.
+    Pipeline:
+        1. Dense search (FAISS)        → wide candidate set, keeps cosine 'score'
+        2. Lexical search (BM25)       → wide candidate set on exact terms
+        3. Reciprocal Rank Fusion      → merge both rankings
+        4. Cross-encoder rerank        → precise final top_k (if enabled)
 
     Returns:
         List of chunk dicts (each with 'text', 'source', 'section', 'score').
-        Empty list if submission is not yet indexed.
+        'score' is preserved as the dense cosine (0 for lexical-only hits) so
+        downstream grounding checks (B3) keep working. Empty list if not indexed.
     """
     store = load_index_for_submission(submission)
     if store is None or store.num_chunks == 0:
@@ -54,7 +59,79 @@ def retrieve_for_turn(
 
     query = _build_query(criterion_name, criterion_description, last_answer)
     query_vec = embed_text(query)
-    return store.search(query_vec, top_k=top_k)
+
+    # Wide candidate set for fusion/rerank, then narrow to top_k.
+    candidate_k = min(max(top_k * 5, 15), store.num_chunks)
+
+    # 1. Dense candidates (chunk dicts with cosine 'score' + 'chunk_idx')
+    dense_hits = store.search(query_vec, top_k=candidate_k)
+
+    # 2. Lexical candidates (BM25 positions → chunk dicts)
+    lex_hits: List[Dict] = []
+    try:
+        from viva_evaluator.services.rag.lexical import lexical_search
+        for pos, bm25_score in lexical_search(str(submission.id), store.chunks, query, k=candidate_k):
+            if 0 <= pos < store.num_chunks:
+                c = dict(store.chunks[pos])
+                c['bm25_score'] = bm25_score
+                c.setdefault('score', 0.0)   # no dense cosine unless also in dense_hits
+                lex_hits.append(c)
+    except Exception as exc:
+        logger.warning('retrieve_for_turn: lexical stage failed (%s); dense-only.', exc)
+
+    # 3. Fuse the two rankings
+    fused = _rrf_fuse(dense_hits, lex_hits)
+
+    if not fused:
+        return dense_hits[:top_k]
+
+    # 4. Cross-encoder rerank the fused candidates → final top_k
+    try:
+        from viva_evaluator.services.rag.rerank import rerank_chunks, reranker_enabled
+        if reranker_enabled():
+            return rerank_chunks(query, fused[:candidate_k], top_k)
+    except Exception as exc:
+        logger.warning('retrieve_for_turn: rerank stage failed (%s); fused order.', exc)
+
+    return fused[:top_k]
+
+
+def _rrf_fuse(dense_hits: List[Dict], lex_hits: List[Dict]) -> List[Dict]:
+    """
+    Reciprocal Rank Fusion of two ranked chunk lists, keyed by 'chunk_idx'.
+
+    RRF score = sum over lists of 1 / (k0 + rank). The representative chunk
+    prefers the dense copy (so the cosine 'score' is preserved for grounding);
+    lexical-only chunks keep score=0.0.
+    """
+    fused: Dict = {}
+
+    def _key(c: Dict):
+        return c.get('chunk_idx', id(c))
+
+    for rank, c in enumerate(dense_hits):
+        k = _key(c)
+        entry = fused.setdefault(k, {'chunk': dict(c), 'rrf': 0.0})
+        entry['rrf'] += 1.0 / (_RRF_K0 + rank)
+
+    for rank, c in enumerate(lex_hits):
+        k = _key(c)
+        if k in fused:
+            # Already have the dense copy (with cosine score); just add weight
+            # and carry the bm25 score for transparency.
+            fused[k]['rrf'] += 1.0 / (_RRF_K0 + rank)
+            fused[k]['chunk'].setdefault('bm25_score', c.get('bm25_score'))
+        else:
+            entry = fused.setdefault(k, {'chunk': dict(c), 'rrf': 0.0})
+            entry['rrf'] += 1.0 / (_RRF_K0 + rank)
+
+    ordered = sorted(fused.values(), key=lambda e: e['rrf'], reverse=True)
+    out = []
+    for e in ordered:
+        chunk = e['chunk']
+        chunk['rrf_score'] = round(e['rrf'], 6)
+        out.append(chunk)
+    return out
 
 
 def retrieve_for_indexing(
@@ -178,11 +255,32 @@ def retrieve_hybrid_for_turn(
 
     graph = load_kg_for_submission(submission)
     depends_on_topics: List[str] = []
+    alternative_edges: List[Dict] = []
+    _seen_alts = set()
     if graph is not None:
         for u, v, data in graph.edges(data=True):
-            if data.get('edge_type') == 'DEPENDS_ON':
+            et = data.get('edge_type')
+            if et == 'DEPENDS_ON':
                 depends_on_topics.append(str(v))
+            elif et in ('ALTERNATIVE_TO', 'BETTER_FOR_SCALE'):
+                base_tech = data.get('base_tech') or str(v)
+                alternative = data.get('alternative') or str(u)
+                dedup_key = (base_tech.lower(), alternative.lower())
+                if dedup_key in _seen_alts:
+                    continue
+                _seen_alts.add(dedup_key)
+                alternative_edges.append({
+                    'edge_type':   et,
+                    'base_tech':   base_tech,
+                    'alternative': alternative,
+                    'rationale':   data.get('rationale', ''),
+                    'trigger':     data.get('trigger', ''),
+                    'tier':        data.get('tier', 2),
+                })
         depends_on_topics = sorted(set(depends_on_topics))[:20]  # cap for prompt size
+        # Prefer examiner-approved (tier 1) edges; cap for prompt size.
+        alternative_edges.sort(key=lambda e: e.get('tier', 2))
+        alternative_edges = alternative_edges[:3]
 
     kg_available = bool(graph and graph.number_of_edges() > 0)
 
@@ -190,6 +288,7 @@ def retrieve_hybrid_for_turn(
         'chunks':                  chunks,
         'contradicts_code_alerts': contradicts,
         'depends_on_topics':       depends_on_topics,
+        'alternative_edges':       alternative_edges,
         'kg_available_for_topic':  kg_available,
     }
 
@@ -225,6 +324,28 @@ def format_kg_signals_for_prompt(retrieval_result: Dict) -> str:
         parts.append(
             "DEPENDENCIES (the student's code imports these):\n"
             f"  {', '.join(depends_on)}"
+        )
+
+    # D3: surface concrete alternative technologies so the Questioner can ask a
+    # grounded "why X and not Y?" comparison instead of a vague one.
+    alternatives = retrieval_result.get('alternative_edges') or []
+    if alternatives:
+        lines = []
+        for e in alternatives:
+            base = e.get('base_tech', '')
+            alt = e.get('alternative', '')
+            rationale = (e.get('rationale') or '').strip()
+            if e.get('edge_type') == 'BETTER_FOR_SCALE':
+                note = f"{alt} is often preferred at scale"
+            else:
+                note = f"{alt} is a common alternative"
+            if rationale:
+                note += f" — {rationale[:160]}"
+            lines.append(f"  - The student used {base}. {note}.")
+        parts.append(
+            "ALTERNATIVE TECHNOLOGIES (you MAY ask why they chose theirs over one "
+            "of these — a comparative 'why X and not Y' question):\n"
+            + '\n'.join(lines)
         )
 
     return '\n\n'.join(parts) if parts else ''

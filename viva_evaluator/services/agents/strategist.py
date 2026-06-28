@@ -196,8 +196,10 @@ def _drop_bloom_one_level(current: str) -> str:
 
 def _has_alternative_edge(kg: Dict) -> bool:
     """True if the KG retrieval surfaced a usable alt edge for the current topic."""
-    # Any depends_on_topics implies the KG has data; for a stronger signal we
-    # would peek at edge types but the v3 design treats availability as binary.
+    # D3: a concrete ALTERNATIVE_TO / BETTER_FOR_SCALE edge is the strongest
+    # signal. Fall back to the older "dependencies available" heuristic.
+    if kg.get('alternative_edges'):
+        return True
     return bool(kg.get('kg_available_for_topic')) and bool(kg.get('depends_on_topics'))
 
 
@@ -227,11 +229,21 @@ def _pick_standard_intent(
 
     # Priority 3: KG has alternatives + topic available → probe alternatives
     if has_kg_alt:
-        # Surface the first depends_on_topic as the implied "your tech" anchor
-        edge_used = {
-            'topics': kg_signals.get('depends_on_topics', [])[:5],
-            'note':   'KG-driven alternative probing',
-        }
+        alts = kg_signals.get('alternative_edges') or []
+        if alts:
+            top = alts[0]
+            edge_used = {
+                'base_tech':   top.get('base_tech'),
+                'alternative': top.get('alternative'),
+                'rationale':   top.get('rationale'),
+                'note':        'KG ALTERNATIVE_TO edge',
+            }
+        else:
+            # Surface the first depends_on_topic as the implied "your tech" anchor
+            edge_used = {
+                'topics': kg_signals.get('depends_on_topics', [])[:5],
+                'note':   'KG-driven alternative probing',
+            }
         return INTENT_EXPLORING_ALTERNATIVES, edge_used
 
     # Priority 4: default — test connections (relates this answer to system context)

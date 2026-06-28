@@ -53,6 +53,15 @@ class QuestionerInput:
     previous_answer: Optional[str] = None             # for follow-up mode
     is_first_question: bool = True
     question_number_in_criterion: int = 1
+    # A1 Response Triage: when True, re-ask the SAME underlying question in
+    # simpler, clearer words because the student found the previous phrasing
+    # unclear. clarify_reason carries the triage rationale.
+    clarify_mode: bool = False
+    clarify_reason: str = ''
+    # B3 Weak-retrieval awareness: when True, the submission contains little
+    # specific material on this criterion, so ask a BROADER conceptual question
+    # instead of inventing specific details the student may never have written.
+    weak_grounding: bool = False
 
 
 # =============================================================================
@@ -313,6 +322,36 @@ def _build_prompt(
             "ANCHORING rule and word count.\n"
         )
 
+    # A1: clarification mode — the student didn't understand the previous
+    # phrasing. Re-ask the SAME underlying question more simply and clearly.
+    clarify_block = ''
+    if inp.clarify_mode:
+        clarify_block = (
+            "\n⚠ CLARIFICATION MODE: The student did NOT understand the previous "
+            "question"
+            + (f" (reason: {inp.clarify_reason})" if inp.clarify_reason else '')
+            + ".\nRe-ask the SAME underlying question about the SAME concept, but "
+            "in simpler, clearer, more concrete words. Shorten it. Avoid jargon "
+            "and any term the student may not recognise. Do NOT switch to a "
+            "different topic, and do NOT make it harder — the goal is purely to "
+            "make the question understandable.\n"
+        )
+
+    # B3: weak-grounding mode — the report barely covers this criterion. Ask a
+    # broad, open question and DO NOT fabricate specific artifacts. Anchor only
+    # to the student's project in general terms ("in your project", "your
+    # report") which still satisfies the anchoring rule honestly.
+    weak_grounding_block = ''
+    if inp.weak_grounding:
+        weak_grounding_block = (
+            "\n⚠ LIMITED SOURCE MATERIAL: the submission contains little specific "
+            "content on this criterion. Ask a BROADER, open conceptual question "
+            "about how the student approached this topic in their project. Do NOT "
+            "invent file names, function names, figures, or specific claims — none "
+            "are available. Anchor generally (e.g. 'in your project', 'your "
+            "report') rather than to a specific artifact.\n"
+        )
+
     bloom_phrasing = _bloom_phrasing_hint(blooms_level)
 
     return f"""You are an academic viva examiner conducting an oral examination.
@@ -328,7 +367,7 @@ their project — every concrete reference must come from here):
 {kg_block}
 CONVERSATION CONTEXT:
 {conversation_block}
-{hints_block}{retry_block}
+{hints_block}{retry_block}{clarify_block}{weak_grounding_block}
 TARGET BLOOM'S LEVEL: {blooms_level}
 PHRASING STYLE FOR THIS LEVEL: {bloom_phrasing}
 

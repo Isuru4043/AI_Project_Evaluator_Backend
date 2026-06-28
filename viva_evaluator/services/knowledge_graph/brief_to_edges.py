@@ -107,10 +107,12 @@ def _add_alternatives_as_edges(graph, tech_name, brief) -> int:
         is_scale = bool(_SCALE_TRIGGERS.search(trigger))
 
         edge_attrs = {
-            'tier':      brief.tier,
-            'trigger':   trigger,
-            'rationale': rationale,
-            'brief_id':  str(brief.id),
+            'tier':        brief.tier,
+            'trigger':     trigger,
+            'rationale':   rationale,
+            'brief_id':    str(brief.id),
+            'base_tech':   tech_name,   # the technology the STUDENT used
+            'alternative': alt_name,    # the alternative they could be asked about
         }
 
         if is_scale:

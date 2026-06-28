@@ -95,6 +95,11 @@ class SubmissionVectorStore:
     def num_chunks(self) -> int:
         return len(self._chunks)
 
+    @property
+    def chunks(self) -> List[Dict]:
+        """Read-only access to the underlying chunk list (for lexical/BM25 search)."""
+        return self._chunks
+
 
 # =============================================================================
 # Persistence — FAISS index <-> bytes
@@ -177,6 +182,7 @@ def save_index_for_submission(submission, chunks: List[Dict]) -> Tuple[int, int]
 
     # Index changed — drop any stale cache entry
     _INDEX_CACHE.pop(str(submission.id), None)
+    _invalidate_lexical(submission)
 
     logger.info(
         'save_index_for_submission: submission=%s chunks=%d bytes=%d',
@@ -224,6 +230,16 @@ def load_index_for_submission(submission) -> Optional[SubmissionVectorStore]:
 def invalidate_index_cache(submission) -> None:
     """Drop the cached store for a submission. Call after re-indexing."""
     _INDEX_CACHE.pop(str(submission.id), None)
+    _invalidate_lexical(submission)
+
+
+def _invalidate_lexical(submission) -> None:
+    """Drop the cached BM25 index for a submission (best-effort)."""
+    try:
+        from viva_evaluator.services.rag.lexical import invalidate as _lex_invalidate
+        _lex_invalidate(str(submission.id))
+    except Exception:
+        pass
 
 
 # =============================================================================
@@ -286,6 +302,7 @@ def append_chunks_to_submission(submission, new_chunks: List[Dict]) -> int:
 
     # Index changed — drop any stale cache entry
     _INDEX_CACHE.pop(str(submission.id), None)
+    _invalidate_lexical(submission)
 
     logger.info(
         'append_chunks_to_submission: submission=%s added=%d total=%d',

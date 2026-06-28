@@ -32,6 +32,35 @@ from viva_evaluator.services.rag.retrieval import format_chunks_for_prompt
 logger = logging.getLogger(__name__)
 
 
+# Canonical 3D rubric weights. Used both for the initial soft_score and for
+# any downstream fairness recomputation (e.g., A3 consistency adjustment).
+RUBRIC_WEIGHTS = {
+    'correctness': 0.50,
+    'depth':       0.35,
+    'consistency': 0.15,
+}
+
+
+def recompute_soft_score(analysis: Dict) -> float:
+    """
+    Recompute the weighted soft_score from the current per-dimension scores,
+    counting only VERIFIED dimensions (same rule as the initial computation).
+
+    Used after a fairness adjustment raises a dimension's score (A3) so the
+    overall score stays internally consistent. Returns a value in [0, 1].
+    """
+    acc = 0.0
+    weight_total = 0.0
+    for dim, weight in RUBRIC_WEIGHTS.items():
+        d = analysis.get(dim) or {}
+        if isinstance(d, dict) and d.get('verified'):
+            acc += float(d.get('score', 0.0)) * weight
+            weight_total += weight
+    if weight_total > 0:
+        return max(0.0, min(1.0, acc / weight_total))
+    return 0.5
+
+
 # =============================================================================
 # Inputs / outputs
 # =============================================================================
@@ -199,11 +228,7 @@ def _verify_citations(response: Dict, inp: AnalyzerInput) -> Dict:
     cited source. Mark dimensions as verified=True/False, then renormalize
     the soft score over only verified dimensions.
     """
-    weights = {
-        'correctness': 0.50,
-        'depth':       0.35,
-        'consistency': 0.15,
-    }
+    weights = RUBRIC_WEIGHTS
 
     # Build searchable text per source
     retrieved_text = ' '.join(c.get('text', '') for c in inp.retrieved_chunks).lower()

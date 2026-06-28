@@ -229,6 +229,10 @@ SONAR_SCANNER_BIN = os.getenv('SONAR_SCANNER_BIN', 'sonar-scanner')
 CODE_ANALYSIS_MAX_ZIP_MB = int(os.getenv('CODE_ANALYSIS_MAX_ZIP_MB', '100'))
 CODE_ANALYSIS_MAX_PROMPT_CHARS = int(os.getenv('CODE_ANALYSIS_MAX_PROMPT_CHARS', '20000'))
 CODE_ANALYSIS_ASYNC = os.getenv('CODE_ANALYSIS_ASYNC', 'true').lower() == 'true'
+
+# D1 — run report FAISS indexing (image captioning + embeddings) in a
+# background thread instead of inside the upload request/transaction.
+REPORT_INDEX_ASYNC = os.getenv('REPORT_INDEX_ASYNC', 'true').lower() == 'true'
 CODE_ANALYSIS_MAX_RATING = float(os.getenv('CODE_ANALYSIS_MAX_RATING', '2'))
 CODE_ANALYSIS_MIN_COVERAGE = float(os.getenv('CODE_ANALYSIS_MIN_COVERAGE', '0'))
 CODE_ANALYSIS_MAX_DUPLICATION = float(os.getenv('CODE_ANALYSIS_MAX_DUPLICATION', '5'))
