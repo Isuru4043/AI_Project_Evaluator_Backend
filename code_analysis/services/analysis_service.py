@@ -103,6 +103,20 @@ class CodeAnalysisService:
             ])
             logger.info(f"Analysis process successfully started/completed for submission {submission.id}")
 
+            # =================================================================
+            # WEEK 3: Code indexing + Knowledge Graph build.
+            # Adds code chunks to the submission's FAISS index and builds the
+            # KG with DEPENDS_ON + CONTRADICTS_CODE edges. Failures are
+            # logged but do not block the rest of the analysis pipeline.
+            # =================================================================
+            try:
+                self._index_code_and_build_kg(submission, repo_path)
+            except Exception as week3_exc:
+                logger.exception(
+                    "Week 3 code indexing / KG build failed for submission %s: %s",
+                    submission.id, week3_exc,
+                )
+
         except Exception as exc:
             logger.error(f"Error during analysis for submission {submission.id}: {exc}", exc_info=True)
             submission.analysis_status = CodeSubmission.AnalysisStatus.FAILED
@@ -178,6 +192,53 @@ class CodeAnalysisService:
             return safe_extract_zip(submission.zip_file.path)
 
         raise ValueError("No source provided for analysis.")
+
+    def _index_code_and_build_kg(self, submission, repo_path):
+        """
+        Week 3 hook: build code chunks + Knowledge Graph for the parent
+        ProjectSubmission. Called from analyze_submission after Sonar runs.
+        """
+        from viva_evaluator.services.code_indexing import index_code_repo
+        from viva_evaluator.services.rag.vector_store import (
+            append_chunks_to_submission,
+        )
+        from viva_evaluator.services.knowledge_graph import (
+            build_kg_for_submission,
+            save_kg_for_submission,
+        )
+        from viva_evaluator.models import SubmissionIndexStatus
+
+        project_submission = submission.project_submission
+
+        # 1. Build code chunks via AST + batched LLM summarization
+        code_result = index_code_repo(repo_path, enable_summaries=True)
+        code_chunks = code_result.get('chunks', [])
+
+        if code_chunks:
+            total_chunks = append_chunks_to_submission(
+                project_submission, code_chunks,
+            )
+            logger.info(
+                'Week 3: appended %d code chunks (FAISS total now %d) for submission %s',
+                len(code_chunks), total_chunks, project_submission.id,
+            )
+
+        # 2. Build Knowledge Graph (DEPENDS_ON + CONTRADICTS_CODE)
+        try:
+            index_status = SubmissionIndexStatus.objects.get(
+                submission=project_submission,
+            )
+            report_chunks = index_status.faiss_chunks_json or []
+        except SubmissionIndexStatus.DoesNotExist:
+            report_chunks = []
+
+        graph = build_kg_for_submission(
+            submission=project_submission,
+            code_index_result=code_result,
+            code_submission=submission,
+            report_chunks=report_chunks,
+        )
+        save_kg_for_submission(project_submission, graph)
 
 
 def detect_language_and_build(repo_path):

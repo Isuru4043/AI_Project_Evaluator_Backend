@@ -13,8 +13,8 @@ from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPerm
 # =============================================================================
 # Azure Blob Storage Credentials
 # =============================================================================
-AZURE_ACCOUNT_NAME = "vivasensestorage"
-AZURE_ACCOUNT_KEY = "U11xrzbhYh+l3yv+El/Ro8Nfi8rZX7YortukYz3sinQ+dNN7OCiQHEpdccHZFRz2zxyWb2kBd7z9+AStmKyAWg=="
+AZURE_ACCOUNT_NAME = os.getenv("AZURE_ACCOUNT_NAME")
+AZURE_ACCOUNT_KEY = os.getenv("AZURE_ACCOUNT_KEY")
 AZURE_CONNECTION_STRING = (
     f"DefaultEndpointsProtocol=https;"
     f"AccountName={AZURE_ACCOUNT_NAME};"
@@ -51,10 +51,20 @@ def _ensure_container(container_name):
 
     access_level = (AZURE_PUBLIC_ACCESS_LEVEL or "").strip().lower()
     if access_level in ("blob", "container"):
-        container_client.set_container_access_policy(
-            signed_identifiers={},
-            public_access=access_level,
-        )
+        try:
+            container_client.set_container_access_policy(
+                signed_identifiers={},
+                public_access=access_level,
+            )
+        except Exception as e:
+            # Accounts created with "Allow Blob public access" disabled will
+            # reject this with PublicAccessNotPermitted. That's fine — the
+            # upload itself still works; the blob is just private. Log and
+            # continue rather than failing the whole upload.
+            print(
+                f"[AZURE WARN] Could not set public access '{access_level}' on "
+                f"'{container_name}': {str(e)}. Continuing with private access."
+            )
 
     return container_client
 

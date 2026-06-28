@@ -278,3 +278,57 @@ class RubricCriteriaUpdateSerializer(serializers.ModelSerializer):
             'criteria_name', 'max_score',
             'weight_in_category', 'description', 'questions_to_ask',
         ]
+
+
+
+# =============================================================================
+# WEEK 4 — Approved Domain Brief serializers
+# =============================================================================
+
+from viva_evaluator.models import ApprovedDomainBrief
+
+
+class ApprovedDomainBriefListSerializer(serializers.ModelSerializer):
+    """Compact view for the pending-review list."""
+    class Meta:
+        model = ApprovedDomainBrief
+        fields = [
+            'id', 'technology', 'tech_version',
+            'status', 'scope', 'tier',
+            'drafted_at', 'approved_at', 'last_verified_at',
+        ]
+
+
+class ApprovedDomainBriefDetailSerializer(serializers.ModelSerializer):
+    """Full view including the brief JSON content."""
+    drafted_for_submission_id = serializers.UUIDField(
+        source='drafted_for_submission.id', read_only=True, allow_null=True,
+    )
+    approved_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ApprovedDomainBrief
+        fields = [
+            'id', 'technology', 'tech_version',
+            'brief_json',
+            'status', 'scope', 'tier',
+            'drafted_at', 'approved_at', 'last_verified_at',
+            'drafted_for_submission_id',
+            'approved_by_name',
+        ]
+        read_only_fields = [
+            'id', 'drafted_at', 'approved_at', 'last_verified_at',
+            'drafted_for_submission_id', 'approved_by_name',
+        ]
+
+    def get_approved_by_name(self, obj):
+        if obj.approved_by:
+            return obj.approved_by.user.full_name
+        return None
+
+
+class ApprovedDomainBriefEditSerializer(serializers.ModelSerializer):
+    """For PATCH /briefs/<id>/edit/ — only mutable fields."""
+    class Meta:
+        model = ApprovedDomainBrief
+        fields = ['technology', 'tech_version', 'brief_json']

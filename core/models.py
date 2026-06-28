@@ -412,6 +412,13 @@ class EvaluationSession(models.Model):
         default=Status.SCHEDULED,
     )
 
+    # =========================================================================
+    # WEEK 5 — BKT + Session memory persistence.
+    # Holds the full SessionState dict (BKT states per criterion, coverage,
+    # intent history, soft score history, total turns).
+    # =========================================================================
+    bkt_state_json = models.JSONField(null=True, blank=True)
+
     class Meta:
         verbose_name = 'Evaluation Session'
         verbose_name_plural = 'Evaluation Sessions'

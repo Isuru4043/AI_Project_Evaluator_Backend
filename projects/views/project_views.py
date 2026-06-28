@@ -475,11 +475,21 @@ class SubmitProjectView(APIView):
                     submission=submission,
                 )
                 index_status.extracted_text = extracted_text
-                index_status.status = SubmissionIndexStatus.IndexStatus.READY
-                index_status.processed_at = timezone.now()
+                # =========================================================
+                # D1 — async indexing. We persist the (fast) extracted text
+                # now and mark the submission PROCESSING. The SLOW work —
+                # image captioning + FAISS embedding — runs in a background
+                # thread (enqueue_report_indexing) so we don't hold the DB
+                # transaction open for minutes. The worker flips the status
+                # to READY (or FAILED) when done; the frontend polls for it.
+                # =========================================================
+                index_status.status = SubmissionIndexStatus.IndexStatus.PROCESSING
+                index_status.processed_at = None
                 index_status.error_message = None
                 index_status.save()
 
+                # Create the code submission (if any) BEFORE scheduling, so its
+                # id can be chained into the indexing worker.
                 if github_repo_url:
                     logger.info(f"GitHub URL provided: {github_repo_url}. Creating CodeSubmission.")
                     code_submission = CodeSubmission.objects.create(
@@ -487,20 +497,32 @@ class SubmitProjectView(APIView):
                         source_type=CodeSubmission.SourceType.GITHUB,
                         github_url=github_repo_url,
                     )
-                    logger.info(f"Created CodeSubmission with ID: {code_submission.id}. Enqueueing analysis...")
+                    logger.info(f"Created CodeSubmission with ID: {code_submission.id}.")
 
-                    transaction.on_commit(
-                        lambda code_submission_id=code_submission.id: enqueue_code_analysis(
-                            code_submission_id,
-                        )
-                    )
+                # Hand off FAISS indexing to a background thread AFTER commit,
+                # so the submission row is guaranteed to exist for the worker.
+                # Code analysis (if any) is CHAINED to run after indexing so it
+                # doesn't race the index build.
+                from viva_evaluator.services.indexing.indexing_runner import (
+                    enqueue_report_indexing,
+                )
+                _code_sub_id = str(code_submission.id) if code_submission else None
+                transaction.on_commit(
+                    lambda sid=str(submission.id), data=report_bytes, cid=_code_sub_id:
+                        enqueue_report_indexing(sid, data, cid)
+                )
 
             response_data = ProjectSubmissionSerializer(submission).data
+            response_data['indexing_status'] = 'processing'
+            response_data['message'] = (
+                'Report uploaded. Indexing is running in the background; '
+                'poll the submission status until it is ready.'
+            )
             if code_submission:
                 response_data['code_submission_id'] = str(code_submission.id)
                 response_data['code_analysis_status'] = code_submission.analysis_status
 
-            return _ok('Submission successful.', response_data)
+            return _ok('Submission received. Indexing in progress.', response_data)
         except Exception as e:
             return _500(e)
 
