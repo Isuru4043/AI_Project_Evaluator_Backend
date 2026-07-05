@@ -412,12 +412,15 @@ class EvaluationSession(models.Model):
         default=Status.SCHEDULED,
     )
 
-    # =========================================================================
-    # WEEK 5 — BKT + Session memory persistence.
-    # Holds the full SessionState dict (BKT states per criterion, coverage,
-    # intent history, soft score history, total turns).
-    # =========================================================================
+   
     bkt_state_json = models.JSONField(null=True, blank=True)
+
+    # =========================================================================
+    # Agora RTC — video call integration.
+    # =========================================================================
+    agora_channel_name = models.CharField(max_length=128, blank=True, default='')
+    agora_stt_task_id = models.CharField(max_length=256, blank=True, default='')
+    transcript_file_url = models.TextField(blank=True, default='')
 
     class Meta:
         verbose_name = 'Evaluation Session'
