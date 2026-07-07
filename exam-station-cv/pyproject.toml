@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "exam-station-cv"
+version = "0.1.0"
+description = "VivaSense exam-station CV/behavioral module: turn attribution, advisory behavioral signals, session recording"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.5",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+# Full exam-station runtime (webcam, mesh, identity, VAD, recording).
+station = [
+    "opencv-python>=4.9",
+    "mediapipe>=0.10",
+    "insightface>=0.7",
+    "onnxruntime>=1.17",
+    "sounddevice>=0.4",
+    "soundfile>=0.12",
+    "silero-vad>=5.0",
+]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+exam-cv = "exam_cv.service:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
