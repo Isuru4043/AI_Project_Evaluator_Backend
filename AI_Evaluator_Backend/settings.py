@@ -340,3 +340,9 @@ CV_ANALYSIS_PYTHON = os.getenv(
     str(BASE_DIR / 'exam-station-cv' / '.venv' / 'Scripts' / 'python.exe'),
 )
 CV_ANALYSIS_TIMEOUT = int(os.getenv('CV_ANALYSIS_TIMEOUT', '1800'))
+
+# Recording storage: 'local' (on this machine — no Azure cost) or 'azure'.
+CV_RECORDING_STORAGE = os.getenv('CV_RECORDING_STORAGE', 'local').lower()
+CV_RECORDINGS_DIR = os.getenv(
+    'CV_RECORDINGS_DIR', str(BASE_DIR / 'cv_recordings'),
+)

@@ -23,6 +23,7 @@ from django.conf import settings
 from core.models import EvaluationSession, SessionRecording
 from cv_analysis.models import CVSessionReport
 from .manifest import build_manifest
+from .storage import is_local_recording
 
 logger = logging.getLogger(__name__)
 
@@ -78,12 +79,20 @@ def run_cv_analysis(session_id) -> CVSessionReport:
         if recording is None:
             raise RuntimeError("No video recording found for this session.")
 
-        report.recording_url = recording.video_file_url
+        ref = recording.video_file_url
+        report.recording_url = ref
 
         with tempfile.TemporaryDirectory(prefix='cv_analysis_') as tmp:
             tmp_path = Path(tmp)
-            video_path = tmp_path / _blob_filename(recording.video_file_url)
-            _download_blob(recording.video_file_url, video_path)
+
+            # Local recordings are read in place; Azure blobs are downloaded.
+            if is_local_recording(ref):
+                video_path = Path(ref)
+                if not video_path.exists():
+                    raise RuntimeError(f"Local recording not found: {video_path}")
+            else:
+                video_path = tmp_path / _blob_filename(ref)
+                _download_blob(ref, video_path)
 
             manifest_path = tmp_path / 'manifest.json'
             manifest_path.write_text(

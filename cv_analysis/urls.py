@@ -7,6 +7,7 @@ from django.urls import path
 
 from cv_analysis.views import (
     CVAnalyzeTriggerView,
+    CVRecordingDownloadView,
     CVRecordingUploadView,
     CVSummaryView,
 )
@@ -18,6 +19,11 @@ urlpatterns = [
         'sessions/<uuid:session_id>/cv/recording/',
         CVRecordingUploadView.as_view(),
         name='cv-recording',
+    ),
+    path(
+        'sessions/<uuid:session_id>/cv/recording/download/',
+        CVRecordingDownloadView.as_view(),
+        name='cv-recording-download',
     ),
     path(
         'sessions/<uuid:session_id>/cv/analyze/',

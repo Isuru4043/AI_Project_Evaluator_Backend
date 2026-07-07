@@ -15,8 +15,9 @@ import logging
 from urllib.parse import unquote, urlparse
 
 from django.conf import settings
+from django.urls import reverse
 from rest_framework.parsers import FormParser, MultiPartParser
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -109,14 +110,22 @@ class CVRecordingUploadView(APIView):
         if video_file.size > self.MAX_SIZE:
             return _err('File too large. Maximum recording size is 500MB.')
 
-        from AI_Evaluator_Backend.azure_storage import upload_video_to_blob
-        video_blob_url = upload_video_to_blob(
-            video_file, str(session.project_id), str(session.id),
+        from cv_analysis.services.storage import (
+            save_recording_locally,
+            storage_backend,
         )
+
+        if storage_backend() == 'azure':
+            from AI_Evaluator_Backend.azure_storage import upload_video_to_blob
+            recording_ref = upload_video_to_blob(
+                video_file, str(session.project_id), str(session.id),
+            )
+        else:
+            recording_ref = save_recording_locally(video_file, session.id)
 
         SessionRecording.objects.create(
             session=session,
-            video_file_url=video_blob_url,
+            video_file_url=recording_ref,
         )
 
         queued = enqueue_cv_analysis(session.id)
@@ -172,22 +181,9 @@ class CVSummaryView(APIView):
         if report is None:
             return _err('No CV analysis exists for this session yet.', code=404)
 
-        # Fresh short-lived SAS URL so the examiner's player can stream the
-        # recording (the stored blob URL is not publicly readable).
-        playback_url = None
-        if report.recording_url:
-            try:
-                from AI_Evaluator_Backend.azure_storage import generate_sas_url
-
-                parsed = urlparse(report.recording_url)
-                container, _, blob_path = (
-                    unquote(parsed.path).lstrip('/').partition('/')
-                )
-                playback_url = generate_sas_url(container, blob_path)
-            except Exception:
-                logger.exception(
-                    "SAS generation failed for session %s", session_id,
-                )
+        # Short-lived playback URL the examiner's <video> can stream without
+        # a bearer header: a signed local endpoint, or an Azure SAS URL.
+        playback_url = self._playback_url(request, session_id, report.recording_url)
 
         return Response({
             'success': True,
@@ -200,3 +196,63 @@ class CVSummaryView(APIView):
                 'updated_at': report.updated_at,
             },
         })
+
+    @staticmethod
+    def _playback_url(request, session_id, recording_ref):
+        if not recording_ref:
+            return None
+        from cv_analysis.services.storage import (
+            is_local_recording,
+            make_playback_token,
+        )
+        try:
+            if is_local_recording(recording_ref):
+                token = make_playback_token(session_id)
+                return request.build_absolute_uri(
+                    reverse('cv_analysis:cv-recording-download',
+                            args=[session_id]) + f'?token={token}'
+                )
+            from AI_Evaluator_Backend.azure_storage import generate_sas_url
+
+            parsed = urlparse(recording_ref)
+            container, _, blob_path = (
+                unquote(parsed.path).lstrip('/').partition('/')
+            )
+            return generate_sas_url(container, blob_path)
+        except Exception:
+            logger.exception(
+                "Playback URL generation failed for session %s", session_id,
+            )
+            return None
+
+
+class CVRecordingDownloadView(APIView):
+    """GET /api/sessions/<session_id>/cv/recording/download/?token=<token>
+
+    Streams a locally stored recording with HTTP range support so the
+    examiner's player can seek. Authenticated by a short-lived signed token
+    (the <video> element cannot send a bearer header)."""
+    permission_classes = [AllowAny]
+
+    def get(self, request, session_id):
+        from cv_analysis.services.storage import (
+            check_playback_token,
+            is_local_recording,
+            serve_file_with_range,
+        )
+        from pathlib import Path
+
+        token = request.query_params.get('token', '')
+        if not check_playback_token(token, session_id):
+            return _err('Invalid or expired playback token.', code=403)
+
+        report = CVSessionReport.objects.filter(session_id=session_id).first()
+        ref = report.recording_url if report else ''
+        if not ref or not is_local_recording(ref):
+            return _err('No local recording for this session.', code=404)
+
+        path = Path(ref)
+        if not path.exists():
+            return _err('Recording file is missing on the server.', code=404)
+
+        return serve_file_with_range(request, path)

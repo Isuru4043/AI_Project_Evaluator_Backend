@@ -72,3 +72,4 @@ tzdata==2026.2
 uritemplate==4.2.0
 urllib3==2.7.0
 websockets==16.0
+agora-token-builder==1.0.0
