@@ -14,9 +14,6 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / '.env')
 
 
-# Quick-start development settings - unsuitable for production
-# See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
-
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = 'django-insecure-2ll$i@i3@(g&rj&nlg@8+)=7dd^bw-^@vd6=$71k!7z_jlpurs'
 # SECURITY WARNING: don't run with debug turned on in production!
@@ -54,6 +51,7 @@ INSTALLED_APPS = [
     'sessions_app',
     'cloudinary',
     'cloudinary_storage',
+    'agora_service',
 ]
 
 MIDDLEWARE = [
@@ -317,3 +315,12 @@ LOGGING = {
         },
     },
 }
+
+# =============================================================================
+# Agora RTC & STT Configuration
+# =============================================================================
+AGORA_APP_ID = os.getenv('AGORA_APP_ID', '')
+AGORA_APP_CERTIFICATE = os.getenv('AGORA_APP_CERTIFICATE', '')
+AGORA_CUSTOMER_KEY = os.getenv('AGORA_CUSTOMER_KEY', '')
+AGORA_CUSTOMER_SECRET = os.getenv('AGORA_CUSTOMER_SECRET', '')
+AGORA_STT_ENABLED = os.getenv('AGORA_STT_ENABLED', 'false').lower() == 'true'
