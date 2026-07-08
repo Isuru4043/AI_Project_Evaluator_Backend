@@ -17,7 +17,8 @@ from projects.views.project_views import (
 from projects.views.rubric_views import (
     RubricCategoryCreateView, RubricCategoryDeleteView,
     RubricCategoryUpdateView, RubricCriteriaCreateView,
-    RubricCriteriaDeleteView, RubricCriteriaUpdateView, RubricListView,
+    RubricCriteriaDeleteView, RubricCriteriaUpdateView,
+    RubricExtractApplyView, RubricListView,
 )
 from projects.views.session_views import (
     AutoScheduleView, ManualScheduleView, MySessionView,
@@ -51,6 +52,7 @@ urlpatterns = [
 
     # ── Rubrics ──────────────────────────────────────────────────────────
     path('<uuid:project_id>/rubrics/', RubricListView.as_view(), name='rubric-list'),
+    path('<uuid:project_id>/rubrics/extract/', RubricExtractApplyView.as_view(), name='rubric-extract'),
     path('<uuid:project_id>/rubrics/categories/create/', RubricCategoryCreateView.as_view(), name='rubric-category-create'),
     path('<uuid:project_id>/rubrics/categories/<uuid:category_id>/update/', RubricCategoryUpdateView.as_view(), name='rubric-category-update'),
     path('<uuid:project_id>/rubrics/categories/<uuid:category_id>/delete/', RubricCategoryDeleteView.as_view(), name='rubric-category-delete'),

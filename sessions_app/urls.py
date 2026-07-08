@@ -18,6 +18,12 @@ from sessions_app.views import (
     StartDemoView,
     StudentSessionStatusView,
 )
+from sessions_app.views_live import (
+    LiveQuestionAnswerView,
+    LiveQuestionCreateView,
+    LiveQuestionListView,
+    LiveQuestionPendingView,
+)
 
 app_name = 'sessions_app'
 
@@ -78,5 +84,27 @@ urlpatterns = [
         'sessions/my-status/',
         StudentSessionStatusView.as_view(),
         name='student-session-status',
+    ),
+
+    # ── Live examiner interjection (during in-progress viva) ─────────────
+    path(
+        'sessions/<uuid:session_id>/live-questions/',
+        LiveQuestionCreateView.as_view(),
+        name='live-question-create',
+    ),
+    path(
+        'sessions/<uuid:session_id>/live-questions/list/',
+        LiveQuestionListView.as_view(),
+        name='live-question-list',
+    ),
+    path(
+        'sessions/<uuid:session_id>/live-questions/pending/',
+        LiveQuestionPendingView.as_view(),
+        name='live-question-pending',
+    ),
+    path(
+        'sessions/<uuid:session_id>/live-questions/<uuid:question_id>/answer/',
+        LiveQuestionAnswerView.as_view(),
+        name='live-question-answer',
     ),
 ]
