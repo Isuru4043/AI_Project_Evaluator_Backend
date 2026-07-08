@@ -483,9 +483,10 @@ class StudentSessionStatusView(APIView):
             except StudentProfile.DoesNotExist:
                 return _err('Student profile not found.', code=404)
 
+            from django.db.models import Q
             sessions_qs = EvaluationSession.objects.filter(
-                student=sp,
-            ).select_related('project', 'group').order_by('scheduled_start')
+                Q(student=sp) | Q(group__members__student=sp)
+            ).distinct().select_related('project', 'group').order_by('scheduled_start')
 
             sessions = list(sessions_qs)
             now = timezone.now()

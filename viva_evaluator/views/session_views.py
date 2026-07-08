@@ -92,6 +92,23 @@ class SessionStartView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+            if session.status == 'in_progress' and session.viva_questions.exists():
+                latest_q = session.viva_questions.order_by('question_order').last()
+                ext = latest_q.extension if hasattr(latest_q, 'extension') else None
+                return Response(
+                    {
+                        "message": "Session resumed.",
+                        "session_id": session_id,
+                        "question_id": str(latest_q.id),
+                        "question_text": latest_q.question_text,
+                        "blooms_level": latest_q.blooms_level,
+                        "difficulty": ext.difficulty_level if ext else "medium",
+                        "criterion": ext.criteria.criterion_name if ext and ext.criteria else "",
+                        "question_number": latest_q.question_order,
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
             next_criterion = context['next_criterion']
 
             # =================================================================
@@ -222,6 +239,7 @@ class AnswerSubmitView(APIView):
             from core.models import (
                 EvaluationSession, VivaQuestion,
                 VivaAnswer, RubricCriteria,
+                GroupMember, StudentProfile,
             )
             from viva_evaluator.models import (
                 VivaAnswerExtension, VivaQuestionExtension,
@@ -234,6 +252,18 @@ class AnswerSubmitView(APIView):
             question = VivaQuestion.objects.get(id=question_id, session=session)
 
             submission = _resolve_session_submission(session)
+            student_profile = None
+            try:
+                student_profile = request.user.student_profile
+            except AttributeError:
+                pass
+            if not student_profile:
+                student_profile = session.student
+            if not student_profile and session.group:
+                first_member = GroupMember.objects.filter(group=session.group).first()
+                if first_member:
+                    student_profile = first_member.student
+
             if not submission:
                 return Response(
                     {"error": "No submission found for this session."},
@@ -266,7 +296,7 @@ class AnswerSubmitView(APIView):
                 # Audit-only record of the (confused) response — unscored.
                 VivaAnswer.objects.create(
                     question=question,
-                    student=session.student,
+                    student=student_profile,
                     transcribed_answer=answer_text,
                     ai_answer_score=None,
                 )
@@ -332,7 +362,7 @@ class AnswerSubmitView(APIView):
             # Persist the answer + extension (audit trail).
             answer = VivaAnswer.objects.create(
                 question=question,
-                student=session.student,
+                student=student_profile,
                 transcribed_answer=answer_text,
                 # ai_answer_score is on a 0-10 scale historically; map from soft_score
                 ai_answer_score=round(soft_score * 10.0, 2),
