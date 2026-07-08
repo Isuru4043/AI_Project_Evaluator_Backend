@@ -101,7 +101,10 @@ class AgoraTokenView(APIView):
 
         # ── Ensure the session has a channel name ────────────────────────
         if not session.agora_channel_name:
-            session.agora_channel_name = str(session.id)
+            if session.group_id:
+                session.agora_channel_name = f"group_{session.group_id}"
+            else:
+                session.agora_channel_name = str(session.id)
             session.save(update_fields=['agora_channel_name'])
 
         # ── Build the RTC token ──────────────────────────────────────────

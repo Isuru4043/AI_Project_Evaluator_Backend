@@ -80,16 +80,15 @@ class ManualScheduleView(APIView):
                         if not group:
                             return _err(f'Group {gid} not found in this project.')
 
-                        members = GroupMember.objects.filter(group=group).select_related('student')
-                        for member in members:
-                            session = EvaluationSession.objects.create(
-                                project=project, student=member.student, group=group,
-                                scheduled_start=entry['scheduled_start'],
-                                scheduled_end=entry['scheduled_end'],
-                                location_room=entry.get('location_room', ''),
-                                status='scheduled',
-                            )
-                            created.append(session)
+                        session = EvaluationSession.objects.create(
+                            project=project, student=None, group=group,
+                            scheduled_start=entry['scheduled_start'],
+                            scheduled_end=entry['scheduled_end'],
+                            location_room=entry.get('location_room', ''),
+                            status='scheduled',
+                            agora_channel_name=f"group_{group.id}",
+                        )
+                        created.append(session)
 
             data = EvaluationSessionSerializer(created, many=True).data
             return _ok('Sessions scheduled successfully.', data, 201)
@@ -177,16 +176,13 @@ class AutoScheduleView(APIView):
                         )
                         created.append(session)
                     else:
-                        members = GroupMember.objects.filter(
-                            group=entity,
-                        ).select_related('student')
-                        for member in members:
-                            session = EvaluationSession.objects.create(
-                                project=project, student=member.student, group=entity,
-                                scheduled_start=s_start, scheduled_end=s_end,
-                                location_room=room, status='scheduled',
-                            )
-                            created.append(session)
+                        session = EvaluationSession.objects.create(
+                            project=project, student=None, group=entity,
+                            scheduled_start=s_start, scheduled_end=s_end,
+                            location_room=room, status='scheduled',
+                            agora_channel_name=f"group_{entity.id}",
+                        )
+                        created.append(session)
 
             data = EvaluationSessionSerializer(created, many=True).data
             return _ok('Sessions auto-scheduled successfully.', data, 201)
@@ -254,9 +250,11 @@ class MySessionView(APIView):
             if not project:
                 return _err('Project not found.', code=404)
 
+            from django.db.models import Q
             session = EvaluationSession.objects.filter(
-                project=project, student=sp,
-            ).select_related('group', 'project').first()
+                Q(student=sp) | Q(group__members__student=sp),
+                project=project,
+            ).distinct().select_related('group', 'project').first()
 
             if not session:
                 return _err('No session found for you in this project.', code=404)
@@ -384,11 +382,12 @@ class NextSessionView(APIView):
                 sp = _get_student_profile(request.user)
                 if not sp:
                     return _err('Student profile not found.', code=404)
+                from django.db.models import Q
                 next_session = EvaluationSession.objects.filter(
-                    student=sp,
+                    Q(student=sp) | Q(group__members__student=sp),
                     status='scheduled',
                     scheduled_start__gte=now
-                ).select_related('project', 'group').order_by('scheduled_start').first()
+                ).distinct().select_related('project', 'group').order_by('scheduled_start').first()
 
             elif request.user.role == 'examiner':
                 ep = _get_examiner_profile(request.user)
