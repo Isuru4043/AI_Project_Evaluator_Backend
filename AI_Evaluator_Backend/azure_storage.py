@@ -26,20 +26,23 @@ AZURE_CONNECTION_STRING = (
 AZURE_CONTAINER_REPORTS = "reports"
 AZURE_CONTAINER_VIDEOS = "videos"
 AZURE_CONTAINER_AUDIOS = "audios"
-AZURE_PUBLIC_ACCESS_LEVEL = os.getenv("AZURE_PUBLIC_ACCESS_LEVEL", "blob")
 
 
 def _get_blob_service_client():
     """Return a BlobServiceClient instance."""
+    if not AZURE_ACCOUNT_NAME or not AZURE_ACCOUNT_KEY:
+        raise RuntimeError(
+            "Azure Blob Storage credentials are not configured. "
+            "Set AZURE_ACCOUNT_NAME and AZURE_ACCOUNT_KEY in your .env file."
+        )
     return BlobServiceClient.from_connection_string(AZURE_CONNECTION_STRING)
 
 
 def _ensure_container(container_name):
     """
-    Ensure a container exists and is configured with public blob read access.
-
-    This is intentionally permissive for the current project setup where
-    frontend clients should be able to open uploaded files directly by URL.
+    Ensure a container exists.  The container is kept private (no anonymous
+    blob access) — use ``generate_sas_url()`` to hand out temporary read
+    URLs when the frontend needs to open a file.
     """
     client = _get_blob_service_client()
     container_client = client.get_container_client(container_name)
@@ -48,23 +51,6 @@ def _ensure_container(container_name):
         container_client.create_container()
     except ResourceExistsError:
         pass
-
-    access_level = (AZURE_PUBLIC_ACCESS_LEVEL or "").strip().lower()
-    if access_level in ("blob", "container"):
-        try:
-            container_client.set_container_access_policy(
-                signed_identifiers={},
-                public_access=access_level,
-            )
-        except Exception as e:
-            # Accounts created with "Allow Blob public access" disabled will
-            # reject this with PublicAccessNotPermitted. That's fine — the
-            # upload itself still works; the blob is just private. Log and
-            # continue rather than failing the whole upload.
-            print(
-                f"[AZURE WARN] Could not set public access '{access_level}' on "
-                f"'{container_name}': {str(e)}. Continuing with private access."
-            )
 
     return container_client
 

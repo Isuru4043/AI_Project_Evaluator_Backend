@@ -6,3 +6,4 @@ db.sqlite3
 .DS_Store
 create_dummy_session.py
 pyrefly.toml
+cv_recordings/

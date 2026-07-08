@@ -324,6 +324,12 @@ class EndVivaView(APIView):
                     session.status = 'completed'
                     session.save()
 
+            # Queue post-hoc CV/behavioral analysis of the recording
+            # (no-op when CV_ANALYSIS_ENABLED is off).
+            if video_blob_url:
+                from cv_analysis.services.runner import enqueue_cv_analysis
+                enqueue_cv_analysis(session.id)
+
             # Generate SAS URLs for response
             video_sas = None
             audio_sas = None

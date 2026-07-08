@@ -209,3 +209,101 @@ class RubricListView(APIView):
             return _ok('Rubrics retrieved.', RubricCategorySerializer(categories, many=True).data)
         except Exception as e:
             return _500(e)
+
+
+class RubricExtractApplyView(APIView):
+    """POST /api/projects/<project_id>/rubrics/extract/
+
+    Examiner uploads a rubric document (.pdf/.docx/.md/.txt); Gemini extracts
+    the structure and the categories + criteria are created directly on this
+    project. The examiner reviews/edits afterwards with the normal rubric
+    CRUD — this replaces typing every category and criterion by hand.
+    """
+    permission_classes = [IsAuthenticated, IsExaminer]
+
+    MAX_SIZE = 10 * 1024 * 1024  # 10 MB
+    ALLOWED_EXTS = ('pdf', 'docx', 'md', 'markdown', 'txt')
+
+    def post(self, request, project_id):
+        try:
+            project = Project.objects.filter(id=project_id).first()
+            if not project:
+                return _err('Project not found.', code=404)
+
+            ep = _get_examiner_profile(request.user)
+            if not _is_assigned(ep, project):
+                return _err('You are not assigned to this project.', code=403)
+
+            rubric_file = request.FILES.get('rubric_file')
+            if not rubric_file:
+                return _err('rubric_file is required.')
+            ext = rubric_file.name.rsplit('.', 1)[-1].lower()
+            if ext not in self.ALLOWED_EXTS:
+                return _err('Only PDF, DOCX, MD and TXT files are accepted.')
+            if rubric_file.size > self.MAX_SIZE:
+                return _err('File too large. Maximum size is 10MB.')
+
+            import os
+            import tempfile
+            from core.utils.document_parser import extract_text_from_file
+            from viva_evaluator.services.rubric_extractor import (
+                extract_rubric_from_text,
+            )
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{ext}') as tmp:
+                for chunk in rubric_file.chunks():
+                    tmp.write(chunk)
+                tmp_path = tmp.name
+            try:
+                rubric_text = extract_text_from_file(tmp_path)
+            finally:
+                os.unlink(tmp_path)
+
+            if not rubric_text.strip():
+                return _err('Could not extract any text from the uploaded file.')
+
+            extracted = extract_rubric_from_text(rubric_text)
+            if 'error' in extracted:
+                return _err(f"Extraction failed: {extracted['error']}", code=500)
+
+            categories_data = extracted.get('rubric_categories') or []
+            if not categories_data:
+                return _err('No rubric categories were found in the document.')
+
+            from viva_evaluator.models import CriteriaQuestionHint
+
+            created = []
+            for cat_data in categories_data:
+                category = RubricCategory.objects.create(
+                    project=project,
+                    category_name=str(cat_data.get('category_name', 'Untitled'))[:255],
+                    weight_percentage=cat_data.get('weight_percentage') or 0,
+                    description=cat_data.get('description') or '',
+                )
+                for cri_data in (cat_data.get('criteria') or []):
+                    criteria = RubricCriteria.objects.create(
+                        category=category,
+                        criteria_name=str(cri_data.get('criteria_name', 'Untitled'))[:255],
+                        max_score=cri_data.get('max_score') or 10,
+                        weight_in_category=cri_data.get('weight_in_category'),
+                        description=cri_data.get('description') or '',
+                        questions_to_ask=int(cri_data.get('questions_to_ask') or 3),
+                    )
+                    for hint in (cri_data.get('question_hints') or []):
+                        hint_text = (hint or {}).get('hint_text', '')
+                        if hint_text:
+                            CriteriaQuestionHint.objects.create(
+                                criteria=criteria,
+                                hint_text=hint_text,
+                                order=int((hint or {}).get('order') or 1),
+                            )
+                created.append(category)
+
+            return _ok(
+                f'Extracted {len(created)} categories from "{rubric_file.name}". '
+                'Review and edit them below.',
+                RubricCategorySerializer(created, many=True).data,
+                201,
+            )
+        except Exception as e:
+            return _500(e)
