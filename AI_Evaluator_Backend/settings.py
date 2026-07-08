@@ -14,9 +14,6 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / '.env')
 
 
-# Quick-start development settings - unsuitable for production
-# See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
-
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = 'django-insecure-2ll$i@i3@(g&rj&nlg@8+)=7dd^bw-^@vd6=$71k!7z_jlpurs'
 # SECURITY WARNING: don't run with debug turned on in production!
@@ -54,6 +51,8 @@ INSTALLED_APPS = [
     'sessions_app',
     'cloudinary',
     'cloudinary_storage',
+    'agora_service',
+    'cv_analysis',
 ]
 
 MIDDLEWARE = [
@@ -317,3 +316,33 @@ LOGGING = {
         },
     },
 }
+
+# =============================================================================
+# Agora RTC & STT Configuration
+# =============================================================================
+AGORA_APP_ID = os.getenv('AGORA_APP_ID', '')
+AGORA_APP_CERTIFICATE = os.getenv('AGORA_APP_CERTIFICATE', '')
+AGORA_CUSTOMER_KEY = os.getenv('AGORA_CUSTOMER_KEY', '')
+AGORA_CUSTOMER_SECRET = os.getenv('AGORA_CUSTOMER_SECRET', '')
+AGORA_STT_ENABLED = os.getenv('AGORA_STT_ENABLED', 'false').lower() == 'true'
+
+# =============================================================================
+# CV / Behavioral Analysis (exam-station-cv engine)
+# =============================================================================
+# Off by default: cloud deploys without the CV toolchain still store
+# recordings; analysis runs where the engine (and its venv) exists.
+CV_ANALYSIS_ENABLED = os.getenv('CV_ANALYSIS_ENABLED', 'false').lower() == 'true'
+CV_ANALYSIS_ASYNC = os.getenv('CV_ANALYSIS_ASYNC', 'true').lower() == 'true'
+# Python executable of the exam-station-cv virtualenv (heavy CV deps live
+# there, not in this venv). Default assumes the in-repo module layout.
+CV_ANALYSIS_PYTHON = os.getenv(
+    'CV_ANALYSIS_PYTHON',
+    str(BASE_DIR / 'exam-station-cv' / '.venv' / 'Scripts' / 'python.exe'),
+)
+CV_ANALYSIS_TIMEOUT = int(os.getenv('CV_ANALYSIS_TIMEOUT', '1800'))
+
+# Recording storage: 'local' (on this machine — no Azure cost) or 'azure'.
+CV_RECORDING_STORAGE = os.getenv('CV_RECORDING_STORAGE', 'local').lower()
+CV_RECORDINGS_DIR = os.getenv(
+    'CV_RECORDINGS_DIR', str(BASE_DIR / 'cv_recordings'),
+)

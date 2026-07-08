@@ -4,3 +4,6 @@ __pycache__/
 db.sqlite3
 .env
 .DS_Store
+create_dummy_session.py
+pyrefly.toml
+cv_recordings/

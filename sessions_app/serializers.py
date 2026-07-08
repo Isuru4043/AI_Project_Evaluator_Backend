@@ -51,7 +51,7 @@ class EvaluationSessionDetailSerializer(serializers.ModelSerializer):
             'session_id', 'project_name', 'student_full_name',
             'registration_number', 'group_name', 'scheduled_start',
             'scheduled_end', 'actual_start', 'demo_completed_at',
-            'location_room', 'status',
+            'location_room', 'status', 'agora_channel_name',
         ]
 
 

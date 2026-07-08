@@ -27,8 +27,19 @@ def extract_text_from_file(file_path: str) -> str:
         return _extract_from_pdf(file_path)
     elif ext in ('.docx', '.doc'):
         return _extract_from_docx(file_path)
+    elif ext in ('.md', '.markdown', '.txt'):
+        return _extract_from_text(file_path)
     else:
-        raise ValueError(f"Unsupported file type: {ext}. Only PDF and DOCX are supported.")
+        raise ValueError(
+            f"Unsupported file type: {ext}. "
+            "Only PDF, DOCX, MD and TXT are supported."
+        )
+
+
+def _extract_from_text(file_path: str) -> str:
+    """Read a Markdown/plain-text file (BOM-tolerant)."""
+    with open(file_path, 'r', encoding='utf-8-sig', errors='replace') as f:
+        return f.read()
 
 
 def _extract_from_pdf(file_path: str) -> str:

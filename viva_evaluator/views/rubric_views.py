@@ -133,9 +133,9 @@ class RubricUploadPreviewView(APIView):
             )
 
         ext = rubric_file.name.split('.')[-1].lower()
-        if ext not in ['pdf', 'docx']:
+        if ext not in ['pdf', 'docx', 'md', 'markdown', 'txt']:
             return Response(
-                {"error": "Only PDF and DOCX files are accepted."},
+                {"error": "Only PDF, DOCX, MD and TXT files are accepted."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 

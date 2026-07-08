@@ -25,6 +25,12 @@ urlpatterns = [
 
     # Sessions endpoints — /api/sessions/... and /api/projects/.../session-panel/...
     path('api/', include('sessions_app.urls')),
+
+    # Agora RTC — /api/sessions/.../agora-token/
+    path('api/', include('agora_service.urls')),
+
+    # CV/behavioral analysis — /api/sessions/<id>/cv/...
+    path('api/', include('cv_analysis.urls')),
 ]
 
 # Media file serving

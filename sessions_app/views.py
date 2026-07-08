@@ -177,13 +177,27 @@ class StartDemoView(APIView):
                 if session.group:
                     EvaluationSession.objects.filter(
                         project=session.project, group=session.group,
-                    ).update(status='in_progress', actual_start=now)
+                    ).update(
+                        status='in_progress',
+                        actual_start=now,
+                        agora_channel_name=str(session.id),
+                    )
                 else:
                     session.status = 'in_progress'
                     session.actual_start = now
+                    session.agora_channel_name = str(session.id)
                     session.save()
 
             session.refresh_from_db()
+
+            # Start Agora STT bot (non-blocking, optional)
+            import threading
+            from agora_service.stt_manager import start_stt, is_enabled as stt_enabled
+            if stt_enabled():
+                threading.Thread(
+                    target=start_stt, args=(session,), daemon=True,
+                ).start()
+
             return _ok('Demo started successfully.', EvaluationSessionDetailSerializer(session).data)
         except Exception as e:
             return _500(e)
@@ -283,6 +297,14 @@ class EndVivaView(APIView):
             if session.actual_start:
                 duration_seconds = int((timezone.now() - session.actual_start).total_seconds())
 
+            # Stop Agora STT bot if running (non-blocking)
+            from agora_service.stt_manager import stop_stt, is_enabled as stt_enabled
+            if stt_enabled() and session.agora_stt_task_id:
+                import threading
+                threading.Thread(
+                    target=stop_stt, args=(session,), daemon=True,
+                ).start()
+
             now = timezone.now()
             with transaction.atomic():
                 # Create session recording
@@ -301,6 +323,12 @@ class EndVivaView(APIView):
                 else:
                     session.status = 'completed'
                     session.save()
+
+            # Queue post-hoc CV/behavioral analysis of the recording
+            # (no-op when CV_ANALYSIS_ENABLED is off).
+            if video_blob_url:
+                from cv_analysis.services.runner import enqueue_cv_analysis
+                enqueue_cv_analysis(session.id)
 
             # Generate SAS URLs for response
             video_sas = None
