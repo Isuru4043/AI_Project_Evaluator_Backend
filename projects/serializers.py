@@ -431,6 +431,8 @@ class ManualScheduleSerializer(serializers.Serializer):
     """Validates input for manual session scheduling."""
 
     sessions = ManualSessionEntrySerializer(many=True)
+    # Whether the scheduled sessions include a demo/presentation phase.
+    demo_enabled = serializers.BooleanField(required=False, default=False)
 
 
 class DateRangeEntrySerializer(serializers.Serializer):
@@ -454,6 +456,8 @@ class AutoScheduleSerializer(serializers.Serializer):
     date_ranges = DateRangeEntrySerializer(many=True)
     duration_per_slot_minutes = serializers.IntegerField(min_value=1)
     location_room = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
+    # Whether the scheduled sessions include a demo/presentation phase.
+    demo_enabled = serializers.BooleanField(required=False, default=False)
 
 
 # =============================================================================
@@ -472,7 +476,7 @@ class EvaluationSessionSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'project', 'student_name', 'student_reg_no',
             'group_name', 'scheduled_start', 'scheduled_end',
-            'actual_start', 'location_room', 'status',
+            'actual_start', 'location_room', 'status', 'demo_enabled',
         ]
 
 

@@ -12,12 +12,26 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 
+from django.conf import settings
+
+from .cookies import clear_auth_cookies, set_auth_cookies
 from .serializers import (
     ExaminerRegisterSerializer,
     LoginSerializer,
     StudentRegisterSerializer,
     UserProfileResponseSerializer,
 )
+
+
+def build_tokens_for_user(user):
+    """
+    Create a refresh/access pair for ``user`` and embed the ``role`` claim so
+    the Next.js middleware can make role-based routing decisions by decoding
+    the access token (which lives in an HttpOnly cookie) without a DB hit.
+    """
+    refresh = RefreshToken.for_user(user)
+    refresh['role'] = user.role
+    return refresh, refresh.access_token
 
 
 # =============================================================================
@@ -150,16 +164,16 @@ class LoginView(APIView):
 
             user = serializer.validated_data['user']
 
-            # Generate JWT tokens
-            refresh = RefreshToken.for_user(user)
+            # Generate JWT tokens (with role claim for middleware routing)
+            refresh, access = build_tokens_for_user(user)
 
-            return Response(
+            # Tokens are delivered as HttpOnly cookies, never in the body, so
+            # client-side JavaScript can't read them.
+            response = Response(
                 {
                     'success': True,
                     'message': 'Login successful.',
                     'data': {
-                        'access': str(refresh.access_token),
-                        'refresh': str(refresh),
                         'user': {
                             'id': str(user.id),
                             'full_name': user.full_name,
@@ -170,6 +184,7 @@ class LoginView(APIView):
                 },
                 status=status.HTTP_200_OK,
             )
+            return set_auth_cookies(response, str(access), str(refresh))
 
         except Exception as e:
             return Response(
@@ -190,51 +205,30 @@ class LogoutView(APIView):
     """
     POST /api/auth/logout/
 
-    Blacklist the provided refresh token so it can no longer
-    be used to obtain new access tokens.
-    Requires: Bearer <access_token> in the Authorization header.
+    Blacklist the refresh token (read from the HttpOnly cookie) and clear the
+    auth cookies. Allowed even with an expired access token so the browser
+    session can always be terminated.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     def post(self, request):
+        # Read the refresh token from the cookie (falling back to the body for
+        # non-browser API clients).
+        refresh_token = (
+            request.COOKIES.get(settings.AUTH_COOKIE_REFRESH_NAME)
+            or request.data.get('refresh')
+        )
+
         try:
-            refresh_token = request.data.get('refresh')
-
-            if not refresh_token:
-                return Response(
-                    {
-                        'success': False,
-                        'message': 'Refresh token is required.',
-                        'errors': {'refresh': ['This field is required.']},
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-            token = RefreshToken(refresh_token)
-            token.blacklist()
-
-            return Response(
-                {
-                    'success': True,
-                    'message': 'Logout successful. Token has been blacklisted.',
-                    'data': None,
-                },
-                status=status.HTTP_205_RESET_CONTENT,
-            )
-
+            if refresh_token:
+                token = RefreshToken(refresh_token)
+                token.blacklist()
         except TokenError:
-            return Response(
-                {
-                    'success': False,
-                    'message': 'Token is invalid or already blacklisted.',
-                    'errors': {},
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
+            # Token already invalid/blacklisted — logging out is still success.
+            pass
         except Exception as e:
-            return Response(
+            response = Response(
                 {
                     'success': False,
                     'message': f'An unexpected error occurred: {str(e)}',
@@ -242,6 +236,18 @@ class LogoutView(APIView):
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+            return clear_auth_cookies(response)
+
+        # Always clear the cookies so the browser session ends regardless.
+        response = Response(
+            {
+                'success': True,
+                'message': 'Logout successful.',
+                'data': None,
+            },
+            status=status.HTTP_200_OK,
+        )
+        return clear_auth_cookies(response)
 
 
 # =============================================================================
@@ -281,3 +287,73 @@ class UserProfileView(APIView):
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+
+# =============================================================================
+# Token Refresh (cookie-based)
+# =============================================================================
+
+class CookieTokenRefreshView(APIView):
+    """
+    POST /api/auth/token/refresh/
+
+    Read the refresh token from the HttpOnly cookie, rotate it, and set fresh
+    access (and refresh) cookies. No tokens are read from or written to the
+    response body.
+    """
+
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        refresh_token = (
+            request.COOKIES.get(settings.AUTH_COOKIE_REFRESH_NAME)
+            or request.data.get('refresh')
+        )
+
+        if not refresh_token:
+            return Response(
+                {
+                    'success': False,
+                    'message': 'No refresh token provided.',
+                    'errors': {},
+                },
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        try:
+            refresh = RefreshToken(refresh_token)
+            access = refresh.access_token
+
+            new_refresh_value = None
+            # Honour ROTATE_REFRESH_TOKENS / BLACKLIST_AFTER_ROTATION.
+            if settings.SIMPLE_JWT.get('ROTATE_REFRESH_TOKENS'):
+                if settings.SIMPLE_JWT.get('BLACKLIST_AFTER_ROTATION'):
+                    try:
+                        refresh.blacklist()
+                    except AttributeError:
+                        pass
+                refresh.set_jti()
+                refresh.set_exp()
+                refresh.set_iat()
+                new_refresh_value = str(refresh)
+
+        except TokenError:
+            response = Response(
+                {
+                    'success': False,
+                    'message': 'Refresh token is invalid or expired.',
+                    'errors': {},
+                },
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+            return clear_auth_cookies(response)
+
+        response = Response(
+            {
+                'success': True,
+                'message': 'Token refreshed.',
+                'data': None,
+            },
+            status=status.HTTP_200_OK,
+        )
+        return set_auth_cookies(response, str(access), new_refresh_value)
