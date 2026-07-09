@@ -59,6 +59,7 @@ MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',  # Must be at the very top
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
+    'AI_Evaluator_Backend.middleware.TrailingSlashAPIMiddleware',  # Fix slashes before CommonMiddleware
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
