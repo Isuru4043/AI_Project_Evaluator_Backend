@@ -405,6 +405,11 @@ class EvaluationSession(models.Model):
     scheduled_start = models.DateTimeField()
     scheduled_end = models.DateTimeField()
     actual_start = models.DateTimeField(null=True, blank=True)
+    # Whether this session includes a demo/presentation phase. Set by the
+    # examiner when scheduling. When False the student goes straight to the AI
+    # viva; when True the room opens in demo mode until the presenting student
+    # (or the examiner) ends the demo.
+    demo_enabled = models.BooleanField(default=False)
     demo_completed_at = models.DateTimeField(null=True, blank=True)
     location_room = models.CharField(max_length=255, null=True, blank=True)
     status = models.CharField(

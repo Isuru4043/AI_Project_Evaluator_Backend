@@ -49,6 +49,7 @@ class ManualScheduleView(APIView):
             if not ser.is_valid():
                 return _err('Validation failed.', ser.errors)
 
+            demo_enabled = ser.validated_data.get('demo_enabled', False)
             created = []
             with transaction.atomic():
                 for entry in ser.validated_data['sessions']:
@@ -69,6 +70,7 @@ class ManualScheduleView(APIView):
                             scheduled_end=entry['scheduled_end'],
                             location_room=entry.get('location_room', ''),
                             status='scheduled',
+                            demo_enabled=demo_enabled,
                         )
                         created.append(session)
                     else:
@@ -87,6 +89,7 @@ class ManualScheduleView(APIView):
                             location_room=entry.get('location_room', ''),
                             status='scheduled',
                             agora_channel_name=f"group_{group.id}",
+                            demo_enabled=demo_enabled,
                         )
                         created.append(session)
 
@@ -159,6 +162,7 @@ class AutoScheduleView(APIView):
                     f'Please extend the time range or reduce the duration per slot.'
                 )
 
+            demo_enabled = ser.validated_data.get('demo_enabled', False)
             created = []
             with transaction.atomic():
                 slot_idx = 0
@@ -173,6 +177,7 @@ class AutoScheduleView(APIView):
                             project=project, student=entity.student, group=None,
                             scheduled_start=s_start, scheduled_end=s_end,
                             location_room=room, status='scheduled',
+                            demo_enabled=demo_enabled,
                         )
                         created.append(session)
                     else:
@@ -181,6 +186,7 @@ class AutoScheduleView(APIView):
                             scheduled_start=s_start, scheduled_end=s_end,
                             location_room=room, status='scheduled',
                             agora_channel_name=f"group_{entity.id}",
+                            demo_enabled=demo_enabled,
                         )
                         created.append(session)
 

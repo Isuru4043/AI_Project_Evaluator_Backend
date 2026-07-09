@@ -246,6 +246,55 @@ class CompleteDemoView(APIView):
             return _500(e)
 
 
+class StudentEndDemoView(APIView):
+    """POST /api/sessions/<session_id>/end-demo/
+
+    Lets the presenting student end the demo phase from their own screen (the
+    "End Demo & Start Viva" button). Sets demo_completed_at for the session (and
+    for all sibling group sessions), which every participant's UI polls to move
+    on to the AI viva. The examiner's Complete Demo remains available too.
+    """
+    permission_classes = [IsAuthenticated, IsStudent]
+
+    def post(self, request, session_id):
+        try:
+            try:
+                sp = request.user.student_profile
+            except StudentProfile.DoesNotExist:
+                return _err('Student profile not found.', code=404)
+
+            session = EvaluationSession.objects.filter(
+                id=session_id,
+            ).select_related('project', 'group').first()
+            if not session:
+                return _err('Session not found.', code=404)
+
+            # The requester must be a participant of this session.
+            is_participant = (
+                (session.student_id == sp.id) or
+                (session.group_id and GroupMember.objects.filter(
+                    group=session.group, student=sp,
+                ).exists())
+            )
+            if not is_participant:
+                return _err('You are not a participant of this session.', code=403)
+
+            now = timezone.now()
+            with transaction.atomic():
+                if session.group:
+                    EvaluationSession.objects.filter(
+                        project=session.project, group=session.group,
+                    ).update(demo_completed_at=now)
+                else:
+                    session.demo_completed_at = now
+                    session.save(update_fields=['demo_completed_at'])
+
+            session.refresh_from_db()
+            return _ok('Demo ended. Your viva will begin now.', EvaluationSessionDetailSerializer(session).data)
+        except Exception as e:
+            return _500(e)
+
+
 class EndVivaView(APIView):
     """POST /api/sessions/<session_id>/end-viva/"""
     permission_classes = [IsAuthenticated, IsExaminer]

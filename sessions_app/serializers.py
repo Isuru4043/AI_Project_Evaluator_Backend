@@ -50,7 +50,7 @@ class EvaluationSessionDetailSerializer(serializers.ModelSerializer):
         fields = [
             'session_id', 'project_name', 'student_full_name',
             'registration_number', 'group_name', 'scheduled_start',
-            'scheduled_end', 'actual_start', 'demo_completed_at',
+            'scheduled_end', 'actual_start', 'demo_enabled', 'demo_completed_at',
             'location_room', 'status', 'agora_channel_name',
         ]
 
@@ -113,5 +113,5 @@ class StudentSessionStatusSerializer(serializers.ModelSerializer):
         model = EvaluationSession
         fields = [
             'session_id', 'project_id', 'project_name', 'scheduled_start', 'scheduled_end',
-            'location_room', 'status', 'group_name', 'demo_completed_at',
+            'location_room', 'status', 'group_name', 'demo_enabled', 'demo_completed_at',
         ]

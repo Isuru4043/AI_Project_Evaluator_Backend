@@ -6,9 +6,9 @@ in the main project urls.py.
 """
 
 from django.urls import path
-from rest_framework_simplejwt.views import TokenRefreshView
 
 from .views import (
+    CookieTokenRefreshView,
     ExaminerRegisterView,
     LoginView,
     LogoutView,
@@ -27,8 +27,8 @@ urlpatterns = [
     path('login/', LoginView.as_view(), name='login'),
     path('logout/', LogoutView.as_view(), name='logout'),
 
-    # Token refresh (built-in SimpleJWT view)
-    path('token/refresh/', TokenRefreshView.as_view(), name='token-refresh'),
+    # Token refresh (cookie-based)
+    path('token/refresh/', CookieTokenRefreshView.as_view(), name='token-refresh'),
 
     # Current user profile
     path('me/', UserProfileView.as_view(), name='user-profile'),

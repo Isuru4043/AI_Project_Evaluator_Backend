@@ -155,7 +155,9 @@ AUTH_USER_MODEL = 'core.User'
 # =============================================================================
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        # Reads the access token from the Authorization header OR the HttpOnly
+        # cookie set at login.
+        'authentication.authentication.CookieJWTAuthentication',
     ),
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated',
@@ -177,9 +179,40 @@ SIMPLE_JWT = {
 
 
 # =============================================================================
-# CORS Configuration (development — allow all origins)
+# CORS / CSRF Configuration
+# -----------------------------------------------------------------------------
+# Auth uses HttpOnly cookies, so the browser must be allowed to send
+# credentials cross-subdomain (vivasense.tech -> api.vivasense.tech). That
+# requires explicit origins (wildcard is not allowed with credentials).
 # =============================================================================
-CORS_ALLOW_ALL_ORIGINS = True
+def _split_env(name, default=''):
+    return [o.strip() for o in os.getenv(name, default).split(',') if o.strip()]
+
+
+CORS_ALLOWED_ORIGINS = _split_env(
+    'CORS_ALLOWED_ORIGINS',
+    'http://localhost:3000,http://127.0.0.1:3000',
+)
+CORS_ALLOW_CREDENTIALS = True
+
+CSRF_TRUSTED_ORIGINS = _split_env(
+    'CSRF_TRUSTED_ORIGINS',
+    'http://localhost:3000,http://127.0.0.1:3000',
+)
+
+# =============================================================================
+# Auth Cookie Configuration
+# -----------------------------------------------------------------------------
+# Dev defaults are insecure (http, host-only) so the Next.js /api proxy makes
+# everything same-origin on localhost. In production set:
+#   AUTH_COOKIE_DOMAIN=.vivasense.tech
+#   AUTH_COOKIE_SECURE=true
+# =============================================================================
+AUTH_COOKIE_ACCESS_NAME = os.getenv('AUTH_COOKIE_ACCESS_NAME', 'access_token')
+AUTH_COOKIE_REFRESH_NAME = os.getenv('AUTH_COOKIE_REFRESH_NAME', 'refresh_token')
+AUTH_COOKIE_DOMAIN = os.getenv('AUTH_COOKIE_DOMAIN') or None
+AUTH_COOKIE_SECURE = os.getenv('AUTH_COOKIE_SECURE', 'false').lower() == 'true'
+AUTH_COOKIE_SAMESITE = os.getenv('AUTH_COOKIE_SAMESITE', 'Lax')
 
 # =============================================================================
 # Cloudinary Configuration

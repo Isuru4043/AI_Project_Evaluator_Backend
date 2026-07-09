@@ -16,6 +16,7 @@ from sessions_app.views import (
     ExaminerVivaQuestionUpdateView,
     SessionPanelOpenView,
     StartDemoView,
+    StudentEndDemoView,
     StudentSessionStatusView,
 )
 from sessions_app.views_live import (
@@ -50,6 +51,11 @@ urlpatterns = [
         'sessions/<uuid:session_id>/complete-demo/',
         CompleteDemoView.as_view(),
         name='complete-demo',
+    ),
+    path(
+        'sessions/<uuid:session_id>/end-demo/',
+        StudentEndDemoView.as_view(),
+        name='student-end-demo',
     ),
     path(
         'sessions/<uuid:session_id>/end-viva/',
