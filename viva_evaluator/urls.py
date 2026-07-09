@@ -17,6 +17,7 @@ from viva_evaluator.views import (
     StudentListView,
     SessionListView,
     SessionStatusView,
+    CurrentQuestionView,
     FinalScoreSubmitView,
     RubricCategoryUpdateView,
     RubricCriteriaUpdateView,
@@ -40,6 +41,7 @@ urlpatterns = [
     path('sessions/<uuid:session_id>/answer/', AnswerSubmitView.as_view(), name='answer-submit'),
     path('sessions/<uuid:session_id>/report/', SessionReportView.as_view(), name='session-report'),
     path('sessions/<uuid:session_id>/status/', SessionStatusView.as_view(), name='session-status'),
+    path('sessions/<uuid:session_id>/current/', CurrentQuestionView.as_view(), name='session-current'),
     path('sessions/<uuid:session_id>/final-scores/', FinalScoreSubmitView.as_view(), name='final-scores'),
 
     # Projects

@@ -34,10 +34,28 @@ _EXECUTOR = ThreadPoolExecutor(max_workers=1)
 def enqueue_cv_analysis(session_id) -> bool:
     """Queue post-hoc analysis for a session's recording.
 
-    Returns True if the job was queued/ran, False if CV analysis is disabled.
+    Returns True if this process will run it now, False if it was left as a
+    PENDING job for a separate worker (e.g. the department HPC) to claim.
+
+    When CV_ANALYSIS_ENABLED is off (e.g. the Azure App Service deploy has no
+    CV toolchain), we still create a PENDING CVSessionReport so the recording
+    becomes a claimable job for the HPC worker — it is NOT silently dropped.
     """
+    from cv_analysis.models import CVSessionReport
+
     if not getattr(settings, 'CV_ANALYSIS_ENABLED', False):
-        logger.info("CV_ANALYSIS_ENABLED is off — skipping analysis for %s", session_id)
+        report, _ = CVSessionReport.objects.get_or_create(session_id=session_id)
+        if report.status in (
+            CVSessionReport.Status.COMPLETED,
+            CVSessionReport.Status.PROCESSING,
+        ):
+            return False
+        report.status = CVSessionReport.Status.PENDING
+        report.error_message = ''
+        report.save(update_fields=['status', 'error_message', 'updated_at'])
+        logger.info(
+            "CV disabled here — session %s left PENDING for a worker.", session_id,
+        )
         return False
 
     if not getattr(settings, 'CV_ANALYSIS_ASYNC', True):

@@ -578,11 +578,62 @@ class SessionStatusView(APIView):
             {
                 "session_id": str(session.id),
                 "status": session.status,
+                "demo_completed_at": session.demo_completed_at,
                 "scheduled_start": session.scheduled_start,
                 "scheduled_end": session.scheduled_end,
                 "actual_start": session.actual_start,
                 "total_questions_asked": total_questions,
                 "total_answers_submitted": total_answers,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class CurrentQuestionView(APIView):
+    """
+    GET /api/viva/sessions/<session_id>/current/
+
+    Returns the latest AI-generated question for the session (read-only, no
+    generation). In group mode every member's viva UI polls this so that when
+    one teammate answers and the AI advances, the others' screens catch up.
+
+    Examiner-interjected questions are delivered through the separate
+    live-questions endpoints, so they are excluded here.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, session_id):
+        from core.models import EvaluationSession, VivaQuestion
+
+        session = EvaluationSession.objects.filter(id=session_id).first()
+        if not session:
+            return Response({"error": "Session not found."},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        latest_q = (
+            session.viva_questions
+            .exclude(question_source=VivaQuestion.QuestionSource.EXAMINER)
+            .order_by('question_order')
+            .last()
+        )
+        if latest_q is None:
+            return Response({"question": None, "session_complete": False},
+                            status=status.HTTP_200_OK)
+
+        ext = latest_q.extension if hasattr(latest_q, 'extension') else None
+        return Response(
+            {
+                "question": {
+                    "question_id": str(latest_q.id),
+                    "question_text": latest_q.question_text,
+                    "blooms_level": latest_q.blooms_level,
+                    "difficulty": ext.difficulty_level if ext else "medium",
+                    "criterion": (
+                        ext.criteria.criterion_name if ext and ext.criteria else ""
+                    ),
+                    "question_number": latest_q.question_order,
+                },
+                "session_complete": session.status == 'completed',
             },
             status=status.HTTP_200_OK,
         )

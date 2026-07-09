@@ -180,6 +180,11 @@ class StudentEnrollSerializer(serializers.Serializer):
     group_number = serializers.CharField(
         max_length=255, required=False, allow_null=True, allow_blank=True, default=None,
     )
+    # Group projects: the enrolling student lists teammates' emails and the
+    # whole group is enrolled in one shot.
+    member_emails = serializers.ListField(
+        child=serializers.EmailField(), required=False, default=list,
+    )
 
 
 class AvailableProjectSerializer(serializers.ModelSerializer):
@@ -292,11 +297,19 @@ class SubmitProjectSerializer(serializers.Serializer):
     """Validates input for submitting project files."""
 
     report_file = serializers.FileField(required=True)
+    presentation_file = serializers.FileField(required=False, allow_null=True, default=None)
     github_repo_url = serializers.CharField(required=False, allow_blank=True, allow_null=True, default=None)
 
     def validate_report_file(self, value):
         if not value.name.lower().endswith('.pdf'):
             raise serializers.ValidationError('Only PDF files are allowed for reports.')
+        return value
+
+    def validate_presentation_file(self, value):
+        if value and not value.name.lower().endswith(('.ppt', '.pptx')):
+            raise serializers.ValidationError(
+                'Only PPT/PPTX files are allowed for presentations.'
+            )
         return value
 
 
@@ -313,7 +326,8 @@ class ProjectSubmissionSerializer(serializers.ModelSerializer):
         model = ProjectSubmission
         fields = [
             'id', 'project', 'student_name', 'student_reg_no',
-            'group_name', 'report_file_url', 'github_repo_url', 'submitted_at',
+            'group_name', 'report_file_url', 'presentation_file_url',
+            'github_repo_url', 'submitted_at',
             'latest_code_submission_id', 'latest_code_analysis_status',
         ]
 

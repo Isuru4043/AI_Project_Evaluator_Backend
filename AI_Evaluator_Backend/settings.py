@@ -326,6 +326,14 @@ AGORA_CUSTOMER_KEY = os.getenv('AGORA_CUSTOMER_KEY', '')
 AGORA_CUSTOMER_SECRET = os.getenv('AGORA_CUSTOMER_SECRET', '')
 AGORA_STT_ENABLED = os.getenv('AGORA_STT_ENABLED', 'false').lower() == 'true'
 
+# Agora Cloud Recording — server-side channel recording into Azure Blob.
+# Metered add-on; must be enabled on the Agora project. AZURE region code is
+# Agora's storageConfig.region enum for your storage account's region.
+AGORA_CLOUD_RECORDING_ENABLED = os.getenv(
+    'AGORA_CLOUD_RECORDING_ENABLED', 'false',
+).lower() == 'true'
+AGORA_RECORDING_AZURE_REGION = int(os.getenv('AGORA_RECORDING_AZURE_REGION', '0'))
+
 # =============================================================================
 # CV / Behavioral Analysis (exam-station-cv engine)
 # =============================================================================

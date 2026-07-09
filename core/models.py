@@ -349,6 +349,7 @@ class ProjectSubmission(models.Model):
         related_name='submissions',
     )
     report_file_url = models.TextField(null=True, blank=True)
+    presentation_file_url = models.TextField(null=True, blank=True)
     github_repo_url = models.TextField(null=True, blank=True)
     submitted_at = models.DateTimeField(auto_now_add=True)
 
@@ -421,6 +422,12 @@ class EvaluationSession(models.Model):
     agora_channel_name = models.CharField(max_length=128, blank=True, default='')
     agora_stt_task_id = models.CharField(max_length=256, blank=True, default='')
     transcript_file_url = models.TextField(blank=True, default='')
+
+    # Agora Cloud Recording — server-side recording of the channel straight
+    # to Azure Blob (so recordings never depend on / persist to student
+    # laptops). Populated between StartDemo and EndViva.
+    agora_recording_resource_id = models.TextField(blank=True, default='')
+    agora_recording_sid = models.CharField(max_length=256, blank=True, default='')
 
     class Meta:
         verbose_name = 'Evaluation Session'

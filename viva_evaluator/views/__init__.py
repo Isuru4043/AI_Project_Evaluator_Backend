@@ -12,6 +12,7 @@ from viva_evaluator.views.session_views import (
     EvaluationSessionCreateView,
     SessionListView,
     SessionStatusView,
+    CurrentQuestionView,
 )
 
 from viva_evaluator.views.project_views import (
@@ -58,6 +59,7 @@ __all__ = [
     'EvaluationSessionCreateView',
     'SessionListView',
     'SessionStatusView',
+    'CurrentQuestionView',
     'ProjectCreateView',
     'ProjectDetailView',
     'ProjectListView',

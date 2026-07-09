@@ -331,6 +331,8 @@ class EnrollInProjectView(APIView):
                 return _err('Validation failed.', ser.errors)
 
             group_number = ser.validated_data.get('group_number')
+            member_emails = ser.validated_data.get('member_emails') or []
+            enrolled_count = 1
 
             with transaction.atomic():
                 if not project.is_group_project:
@@ -346,10 +348,44 @@ class EnrollInProjectView(APIView):
                     if GroupMember.objects.filter(group__project=project, student=sp).exists():
                         return _err('You are already enrolled in this project.')
 
+                    # Resolve teammates by email so the WHOLE group enrolls
+                    # in one shot (the enroller lists their team).
+                    teammates = []
+                    unknown, already_grouped = [], []
+                    for email in member_emails:
+                        email = email.strip().lower()
+                        if not email or email == request.user.email.lower():
+                            continue  # skip blanks and the enroller themselves
+                        member_sp = StudentProfile.objects.filter(
+                            user__email__iexact=email,
+                        ).select_related('user').first()
+                        if member_sp is None:
+                            unknown.append(email)
+                        elif GroupMember.objects.filter(
+                            group__project=project, student=member_sp,
+                        ).exists():
+                            already_grouped.append(email)
+                        else:
+                            teammates.append(member_sp)
+
+                    if unknown:
+                        return _err(
+                            'These emails have no student account: '
+                            + ', '.join(unknown)
+                        )
+                    if already_grouped:
+                        return _err(
+                            'These students are already in a group for this '
+                            'project: ' + ', '.join(already_grouped)
+                        )
+
                     group, _ = StudentGroup.objects.get_or_create(
                         project=project, group_name=group_number,
                     )
                     GroupMember.objects.create(group=group, student=sp)
+                    for member_sp in teammates:
+                        GroupMember.objects.create(group=group, student=member_sp)
+                    enrolled_count = 1 + len(teammates)
 
                     # One submission record per group
                     ProjectSubmission.objects.get_or_create(
@@ -357,7 +393,11 @@ class EnrollInProjectView(APIView):
                         defaults={'student': None},
                     )
 
-            return _ok('Enrolled successfully.', code=201)
+            return _ok(
+                f'Enrolled successfully ({enrolled_count} '
+                f'{"member" if enrolled_count == 1 else "members"}).',
+                code=201,
+            )
         except Exception as e:
             return _500(e)
 
@@ -441,27 +481,36 @@ class SubmitProjectView(APIView):
 
             # Handle file upload
             report_file = submission_serializer.validated_data['report_file']
+            presentation_file = submission_serializer.validated_data.get('presentation_file')
             github_repo_url = submission_serializer.validated_data.get('github_repo_url', '')
 
             report_blob_url = None
             # Validate file size
             if report_file.size > self.MAX_REPORT_SIZE:
                 return _err('File too large. Maximum report size is 50MB.')
+            if presentation_file and presentation_file.size > self.MAX_REPORT_SIZE:
+                return _err('File too large. Maximum presentation size is 50MB.')
 
             from AI_Evaluator_Backend.azure_storage import upload_report_to_blob
-            if project.is_group_project:
-                report_blob_url = upload_report_to_blob(
-                    report_file, str(project.id), group_id=str(membership.group.id),
-                )
-            else:
-                report_blob_url = upload_report_to_blob(
-                    report_file, str(project.id), student_id=str(sp.id),
+            owner_kwargs = (
+                {'group_id': str(membership.group.id)}
+                if project.is_group_project
+                else {'student_id': str(sp.id)}
+            )
+            report_blob_url = upload_report_to_blob(
+                report_file, str(project.id), **owner_kwargs,
+            )
+            presentation_blob_url = None
+            if presentation_file:
+                presentation_blob_url = upload_report_to_blob(
+                    presentation_file, str(project.id), **owner_kwargs,
                 )
 
             code_submission = None
 
             with transaction.atomic():
                 submission.report_file_url = report_blob_url
+                submission.presentation_file_url = presentation_blob_url
                 submission.github_repo_url = github_repo_url or None
                 submission.save()
 

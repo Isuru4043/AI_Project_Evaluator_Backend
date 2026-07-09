@@ -190,12 +190,20 @@ class StartDemoView(APIView):
 
             session.refresh_from_db()
 
-            # Start Agora STT bot (non-blocking, optional)
+            # Start Agora STT bot + cloud recording (non-blocking, optional)
             import threading
             from agora_service.stt_manager import start_stt, is_enabled as stt_enabled
             if stt_enabled():
                 threading.Thread(
                     target=start_stt, args=(session,), daemon=True,
+                ).start()
+
+            from agora_service.cloud_recording import (
+                start_recording, is_enabled as rec_enabled,
+            )
+            if rec_enabled():
+                threading.Thread(
+                    target=start_recording, args=(session,), daemon=True,
                 ).start()
 
             return _ok('Demo started successfully.', EvaluationSessionDetailSerializer(session).data)
@@ -304,6 +312,17 @@ class EndVivaView(APIView):
                 threading.Thread(
                     target=stop_stt, args=(session,), daemon=True,
                 ).start()
+
+            # Stop Agora Cloud Recording (synchronous — we need the resulting
+            # Azure blob URL now). This is the authoritative full-channel
+            # recording; prefer it over any client upload when present.
+            from agora_service.cloud_recording import (
+                stop_recording, is_enabled as rec_enabled,
+            )
+            if rec_enabled() and session.agora_recording_sid:
+                cloud_url = stop_recording(session)
+                if cloud_url:
+                    video_blob_url = cloud_url
 
             now = timezone.now()
             with transaction.atomic():
