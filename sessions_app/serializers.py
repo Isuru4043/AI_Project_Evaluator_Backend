@@ -18,13 +18,14 @@ class SessionPanelEntrySerializer(serializers.ModelSerializer):
     registration_number = serializers.CharField(source='student.registration_number', read_only=True, default=None)
     group_name = serializers.CharField(source='group.group_name', read_only=True, default=None)
     group_members = serializers.SerializerMethodField()
+    phase = serializers.CharField(read_only=True)
 
     class Meta:
         model = EvaluationSession
         fields = [
             'session_id', 'student_full_name', 'registration_number',
             'group_name', 'group_members', 'scheduled_start', 'scheduled_end',
-            'location_room', 'status',
+            'location_room', 'status', 'phase',
         ]
 
     def get_group_members(self, obj):
@@ -44,6 +45,7 @@ class EvaluationSessionDetailSerializer(serializers.ModelSerializer):
     registration_number = serializers.CharField(source='student.registration_number', read_only=True, default=None)
     group_name = serializers.CharField(source='group.group_name', read_only=True, default=None)
     project_name = serializers.CharField(source='project.project_name', read_only=True)
+    phase = serializers.CharField(read_only=True)
 
     class Meta:
         model = EvaluationSession
@@ -51,7 +53,7 @@ class EvaluationSessionDetailSerializer(serializers.ModelSerializer):
             'session_id', 'project_name', 'student_full_name',
             'registration_number', 'group_name', 'scheduled_start',
             'scheduled_end', 'actual_start', 'demo_enabled', 'demo_completed_at',
-            'location_room', 'status', 'agora_channel_name',
+            'location_room', 'status', 'phase', 'agora_channel_name',
         ]
 
 
@@ -108,10 +110,11 @@ class StudentSessionStatusSerializer(serializers.ModelSerializer):
     project_id = serializers.UUIDField(read_only=True)
     project_name = serializers.CharField(source='project.project_name', read_only=True)
     group_name = serializers.CharField(source='group.group_name', read_only=True, default=None)
+    phase = serializers.CharField(read_only=True)
 
     class Meta:
         model = EvaluationSession
         fields = [
             'session_id', 'project_id', 'project_name', 'scheduled_start', 'scheduled_end',
-            'location_room', 'status', 'group_name', 'demo_enabled', 'demo_completed_at',
+            'location_room', 'status', 'phase', 'group_name', 'demo_enabled', 'demo_completed_at',
         ]

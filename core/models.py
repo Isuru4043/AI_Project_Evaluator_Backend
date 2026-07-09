@@ -439,6 +439,23 @@ class EvaluationSession(models.Model):
         verbose_name_plural = 'Evaluation Sessions'
         ordering = ['scheduled_start']
 
+    @property
+    def phase(self):
+        """Fine-grained lifecycle phase derived from status + demo_completed_at.
+
+        The stored ``status`` only distinguishes scheduled / in_progress /
+        completed; the demo-vs-viva split within "in progress" is expressed by
+        whether ``demo_completed_at`` is set. This property surfaces the four
+        UI phases the front end shows and gates on:
+
+          scheduled → demo_in_progress → viva_in_progress → completed
+        """
+        if self.status == 'completed':
+            return 'completed'
+        if self.status == 'in_progress':
+            return 'viva_in_progress' if self.demo_completed_at else 'demo_in_progress'
+        return 'scheduled'
+
     def __str__(self):
         target = self.group or self.student or 'Unassigned'
         return f"Session: {self.project} — {target} ({self.status})"
