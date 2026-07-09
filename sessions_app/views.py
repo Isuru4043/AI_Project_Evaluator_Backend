@@ -55,6 +55,83 @@ def _is_assigned(examiner_profile, project):
     ).exists()
 
 
+def _start_recording_and_stt(session):
+    """Kick off the Agora STT bot + cloud recording (non-blocking, optional).
+
+    Called when a session first becomes active (start-demo / start-viva) so the
+    whole session — demo included — is captured server-side.
+    """
+    import threading
+    from agora_service.stt_manager import start_stt, is_enabled as stt_enabled
+    if stt_enabled():
+        threading.Thread(target=start_stt, args=(session,), daemon=True).start()
+
+    from agora_service.cloud_recording import (
+        start_recording, is_enabled as rec_enabled,
+    )
+    if rec_enabled():
+        threading.Thread(target=start_recording, args=(session,), daemon=True).start()
+
+
+def _activate_session(session, skip_demo):
+    """Flip a scheduled session to in_progress and start capture.
+
+    ``skip_demo=True`` also stamps ``demo_completed_at`` so the session lands
+    straight in the viva phase (used when the session has no demo). Group
+    sessions transition every sibling row together and share one Agora channel.
+    """
+    now = timezone.now()
+    updates = {
+        'status': 'in_progress',
+        'actual_start': now,
+        'agora_channel_name': str(session.id),
+    }
+    if skip_demo:
+        updates['demo_completed_at'] = now
+
+    with transaction.atomic():
+        if session.group:
+            EvaluationSession.objects.filter(
+                project=session.project, group=session.group,
+            ).update(**updates)
+        else:
+            for key, value in updates.items():
+                setattr(session, key, value)
+            session.save()
+
+    session.refresh_from_db()
+    _start_recording_and_stt(session)
+    return session
+
+
+def _student_session_or_error(request, session_id):
+    """Resolve (session, student_profile) ensuring the caller participates.
+
+    Returns (session, sp, None) on success or (None, None, error_response).
+    """
+    try:
+        sp = request.user.student_profile
+    except StudentProfile.DoesNotExist:
+        return None, None, _err('Student profile not found.', code=404)
+
+    session = EvaluationSession.objects.filter(
+        id=session_id,
+    ).select_related('project', 'group').first()
+    if not session:
+        return None, None, _err('Session not found.', code=404)
+
+    is_participant = (
+        (session.student_id == sp.id) or
+        (session.group_id and GroupMember.objects.filter(
+            group=session.group, student=sp,
+        ).exists())
+    )
+    if not is_participant:
+        return None, None, _err('You are not a participant of this session.', code=403)
+
+    return session, sp, None
+
+
 # =============================================================================
 # PART 3 — SESSION PANEL (EXAMINER)
 # =============================================================================
@@ -258,26 +335,12 @@ class StudentEndDemoView(APIView):
 
     def post(self, request, session_id):
         try:
-            try:
-                sp = request.user.student_profile
-            except StudentProfile.DoesNotExist:
-                return _err('Student profile not found.', code=404)
+            session, sp, error = _student_session_or_error(request, session_id)
+            if error:
+                return error
 
-            session = EvaluationSession.objects.filter(
-                id=session_id,
-            ).select_related('project', 'group').first()
-            if not session:
-                return _err('Session not found.', code=404)
-
-            # The requester must be a participant of this session.
-            is_participant = (
-                (session.student_id == sp.id) or
-                (session.group_id and GroupMember.objects.filter(
-                    group=session.group, student=sp,
-                ).exists())
-            )
-            if not is_participant:
-                return _err('You are not a participant of this session.', code=403)
+            if session.phase != 'demo_in_progress':
+                return _err('No demo is currently in progress for this session.')
 
             now = timezone.now()
             with transaction.atomic():
@@ -291,6 +354,57 @@ class StudentEndDemoView(APIView):
 
             session.refresh_from_db()
             return _ok('Demo ended. Your viva will begin now.', EvaluationSessionDetailSerializer(session).data)
+        except Exception as e:
+            return _500(e)
+
+
+class StudentStartDemoView(APIView):
+    """POST /api/sessions/<session_id>/student/start-demo/
+
+    A participating student starts the demo/presentation phase from the live
+    viva room ("Start Demo" button). Moves the session scheduled → in_progress
+    (demo phase) and starts the server-side recording. Only valid when the
+    examiner enabled a demo for this session.
+    """
+    permission_classes = [IsAuthenticated, IsStudent]
+
+    def post(self, request, session_id):
+        try:
+            session, sp, error = _student_session_or_error(request, session_id)
+            if error:
+                return error
+
+            if not session.demo_enabled:
+                return _err('This session has no demo phase. Use Start Viva instead.')
+            if session.phase != 'scheduled':
+                return _err('This session has already started.')
+
+            session = _activate_session(session, skip_demo=False)
+            return _ok('Demo started. You can present your work now.', EvaluationSessionDetailSerializer(session).data)
+        except Exception as e:
+            return _500(e)
+
+
+class StudentStartVivaView(APIView):
+    """POST /api/sessions/<session_id>/student/start-viva/
+
+    A participating student starts the viva directly (no demo phase) from the
+    live viva room ("Start Viva" button). Moves the session scheduled →
+    in_progress (viva phase) and starts the server-side recording.
+    """
+    permission_classes = [IsAuthenticated, IsStudent]
+
+    def post(self, request, session_id):
+        try:
+            session, sp, error = _student_session_or_error(request, session_id)
+            if error:
+                return error
+
+            if session.phase != 'scheduled':
+                return _err('This session has already started.')
+
+            session = _activate_session(session, skip_demo=True)
+            return _ok('Viva started.', EvaluationSessionDetailSerializer(session).data)
         except Exception as e:
             return _500(e)
 
@@ -563,24 +677,11 @@ class StudentSessionStatusView(APIView):
             ).distinct().select_related('project', 'group').order_by('scheduled_start')
 
             sessions = list(sessions_qs)
-            now = timezone.now()
-            changed_sessions = []
-            for session in sessions:
-                if session.status == 'completed':
-                    computed_status = 'completed'
-                elif now < session.scheduled_start:
-                    computed_status = 'scheduled'
-                elif now <= session.scheduled_end:
-                    computed_status = 'in_progress'
-                else:
-                    computed_status = 'completed'
-
-                if session.status != computed_status:
-                    session.status = computed_status
-                    changed_sessions.append(session)
-
-            if changed_sessions:
-                EvaluationSession.objects.bulk_update(changed_sessions, ['status'])
+            # NOTE: status is now driven ONLY by explicit actions (the student's
+            # Start Demo / Start Viva buttons and End Viva), never by the clock.
+            # We do not auto-advance sessions here — a scheduled session stays
+            # scheduled until the student starts it, and an in-progress viva is
+            # never silently marked completed just because its slot elapsed.
 
             status_filter = request.query_params.get('status')
             status_map = {

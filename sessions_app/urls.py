@@ -18,6 +18,8 @@ from sessions_app.views import (
     StartDemoView,
     StudentEndDemoView,
     StudentSessionStatusView,
+    StudentStartDemoView,
+    StudentStartVivaView,
 )
 from sessions_app.views_live import (
     LiveQuestionAnswerView,
@@ -51,6 +53,16 @@ urlpatterns = [
         'sessions/<uuid:session_id>/complete-demo/',
         CompleteDemoView.as_view(),
         name='complete-demo',
+    ),
+    path(
+        'sessions/<uuid:session_id>/student/start-demo/',
+        StudentStartDemoView.as_view(),
+        name='student-start-demo',
+    ),
+    path(
+        'sessions/<uuid:session_id>/student/start-viva/',
+        StudentStartVivaView.as_view(),
+        name='student-start-viva',
     ),
     path(
         'sessions/<uuid:session_id>/end-demo/',

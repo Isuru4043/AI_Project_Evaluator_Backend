@@ -578,6 +578,7 @@ class SessionStatusView(APIView):
             {
                 "session_id": str(session.id),
                 "status": session.status,
+                "phase": session.phase,
                 "demo_enabled": session.demo_enabled,
                 "demo_completed_at": session.demo_completed_at,
                 "scheduled_start": session.scheduled_start,
