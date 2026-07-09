@@ -14,6 +14,7 @@ from rest_framework.views import APIView
 from core.models import (
     EvaluationSession, ExaminerProfile, GroupMember, Project,
     ProjectExaminer, SessionRecording, StudentProfile, VivaQuestion,
+    SessionPresence,
 )
 from projects.permissions import IsExaminer, IsStudent
 from sessions_app.serializers import (
@@ -684,24 +685,56 @@ class StudentSessionStatusView(APIView):
             # never silently marked completed just because its slot elapsed.
 
             status_filter = request.query_params.get('status')
-            status_map = {
-                'upcoming': 'scheduled',
-                'scheduled': 'scheduled',
-                'ongoing': 'in_progress',
-                'in_progress': 'in_progress',
-                'completed': 'completed',
-            }
 
             if status_filter:
-                mapped_status = status_map.get(status_filter)
-                if not mapped_status:
+                if status_filter not in ('upcoming', 'ongoing', 'completed'):
                     return _err(
                         'Invalid status filter. Use upcoming, ongoing, or completed.',
                         code=400,
                     )
-                sessions = [s for s in sessions if s.status == mapped_status]
+                if status_filter == 'upcoming':
+                    sessions = [s for s in sessions if s.phase == 'scheduled']
+                elif status_filter == 'ongoing':
+                    sessions = [s for s in sessions if s.phase in ('ongoing', 'live', 'demo_in_progress', 'viva_in_progress')]
+                elif status_filter == 'completed':
+                    sessions = [s for s in sessions if s.phase == 'completed']
 
             data = StudentSessionStatusSerializer(sessions, many=True).data
             return _ok('Session status retrieved.', data)
+        except Exception as e:
+            return _500(e)
+
+
+# =============================================================================
+# PART 5b — PRESENCE HEARTBEATS
+# =============================================================================
+
+class PresencePingView(APIView):
+    """POST /api/sessions/<session_id>/presence/
+    
+    Receives a presence heartbeat from an active student or examiner in the room.
+    Updates their SessionPresence timestamp to keep them marked as active.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, session_id):
+        try:
+            session = EvaluationSession.objects.filter(id=session_id).first()
+            if not session:
+                return _err('Session not found.', code=404)
+
+            # Record or update presence ping for this user
+            presence, _ = SessionPresence.objects.get_or_create(
+                session=session,
+                user=request.user,
+            )
+            presence.save()  # Triggers auto_now update
+
+            # Return the updated phase so the client knows their current status
+            return _ok('Presence recorded.', {
+                'session_id': str(session.id),
+                'phase': session.phase,
+                'active_student_count': session.active_student_count,
+            })
         except Exception as e:
             return _500(e)

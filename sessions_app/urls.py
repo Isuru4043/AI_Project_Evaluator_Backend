@@ -20,6 +20,7 @@ from sessions_app.views import (
     StudentSessionStatusView,
     StudentStartDemoView,
     StudentStartVivaView,
+    PresencePingView,
 )
 from sessions_app.views_live import (
     LiveQuestionAnswerView,
@@ -73,6 +74,11 @@ urlpatterns = [
         'sessions/<uuid:session_id>/end-viva/',
         EndVivaView.as_view(),
         name='end-viva',
+    ),
+    path(
+        'sessions/<uuid:session_id>/presence/',
+        PresencePingView.as_view(),
+        name='presence-ping',
     ),
 
     # ── Examiner Viva Questions ──────────────────────────────────────────

@@ -1,18 +1,10 @@
 """
-Create an evaluation session DIRECTLY via the Django ORM (no API, no dev server).
-
-Unlike create_group_session.py — which registers/enrolls over the REST API and
-schedules through /sessions/schedule/manual/ — this script assumes the project
-and its group (or student) already exist and just inserts one EvaluationSession
-row. Handy for quickly spinning up a fresh, testable session for the new
-lifecycle: scheduled -> demo_in_progress -> viva_in_progress -> completed.
+Create an evaluation session directly via the Django ORM, automatically provisioning
+the project, examiner, students, submission, and a fully initialized FAISS RAG index.
 
 Run it from the backend root with the backend venv active:
 
     python create_session_direct.py
-
-Then open the printed live URL as the student to click "Start Demo" / "Start
-Viva", and the examiner panel URL to Join once the student has started.
 """
 
 import os
@@ -27,8 +19,8 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "AI_Evaluator_Backend.settings")
 django.setup()
 
 from datetime import timedelta
-
 from django.utils import timezone
+from django.db import transaction
 
 from core.models import (
     EvaluationSession,
@@ -38,156 +30,232 @@ from core.models import (
     StudentGroup,
     GroupMember,
     StudentProfile,
+    ExaminerProfile,
+    RubricCategory,
+    RubricCriteria,
     User,
 )
+from viva_evaluator.models import SubmissionIndexStatus
+from viva_evaluator.services.rag.vector_store import save_index_for_submission
 
-# ── CONFIG — edit these ──────────────────────────────────────────────────────
-TARGET_PROJECT = "Library test 2"   # project_name to attach the session to
-GROUP_NAME = None                    # group_name for group projects; None = first group
-STUDENT_EMAIL = None                 # email for individual projects; None = first submitter
-DEMO_ENABLED = True                  # examiner-set: does this session have a demo phase?
-ROOM = "Lab 204"
-START_DELAY_MIN = 1                  # scheduled_start = now + this many minutes
-DURATION_MIN = 45                    # scheduled_end = scheduled_start + this many minutes
-FRONTEND_BASE = "http://localhost:3000"
-
-# Real passwords are hashed in the DB and can't be recovered, so every account
-# printed at the end is reset to this known password.
+# ── CONFIG ──────────────────────────────────────────────────────────────────
+PROJECT_NAME = "test1"
+EXAMINER_EMAIL = "examiner_test1@vivasense.tech"
+STUDENT_1_EMAIL = "student1_test1@vivasense.tech"
+STUDENT_2_EMAIL = "student2_test1@vivasense.tech"
 KNOWN_PASSWORD = "Password123!"
+FRONTEND_BASE = "http://localhost:3000"
+ROOM = "Lab 204"
 # ─────────────────────────────────────────────────────────────────────────────
 
-
-def fail(msg):
-    print(f"  [FAIL] {msg}")
-    sys.exit(1)
-
-
-print("\n" + "=" * 60)
-print("  Create evaluation session (direct ORM insert)")
-print("=" * 60)
-
-# ── 1. Find the project ──────────────────────────────────────────────────────
-project = Project.objects.filter(project_name=TARGET_PROJECT).first()
-if not project:
-    fail(f'Project "{TARGET_PROJECT}" not found. Create/enroll it first.')
-
-print(f"  [OK] Project: {project.project_name}")
-print(f"       ID:     {project.id}")
-print(f"       Group:  {project.is_group_project}")
-
-# ── 2. Resolve the target (group or individual) + its submission ─────────────
-group = None
-student = None
-participants = []  # list of (full_name, registration_number, User)
-
-if project.is_group_project:
-    qs = StudentGroup.objects.filter(project=project)
-    group = qs.filter(group_name=GROUP_NAME).first() if GROUP_NAME else qs.first()
-    if not group:
-        fail("No group found for this project. Enroll a group first.")
-    print(f"  [OK] Group:  {group.group_name} (ID: {group.id})")
-
-    for m in GroupMember.objects.filter(group=group).select_related("student__user"):
-        participants.append((m.student.user.full_name, m.student.registration_number, m.student.user))
-
-    submission = ProjectSubmission.objects.filter(project=project, group=group).first()
-else:
-    if STUDENT_EMAIL:
-        user = User.objects.filter(email=STUDENT_EMAIL).first()
-        student = getattr(user, "student_profile", None) if user else None
+def get_or_create_user(email, password, full_name, role):
+    user = User.objects.filter(email=email).first()
+    if not user:
+        user = User.objects.create_user(
+            email=email,
+            password=password,
+            full_name=full_name,
+            role=role,
+        )
+        print(f"  [OK] Created User: {email} (role: {role})")
     else:
-        sub = ProjectSubmission.objects.filter(
-            project=project, student__isnull=False
-        ).select_related("student__user").first()
-        student = sub.student if sub else None
-    if not student:
-        fail("No student found for this project. Enroll/submit as a student first.")
-    print(f"  [OK] Student: {student.user.full_name} ({student.registration_number})")
-    participants.append((student.user.full_name, student.registration_number, student.user))
+        user.full_name = full_name
+        user.set_password(password)
+        user.save()
+        print(f"  [OK] Reset User: {email} (role: {role})")
+    return user
 
-    submission = ProjectSubmission.objects.filter(project=project, student=student).first()
 
-# ── 2b. Resolve the examiner(s) assigned to this project ────────────────────
-examiners = [
-    pe.examiner
-    for pe in ProjectExaminer.objects.filter(project=project).select_related(
-        "examiner__user"
+with transaction.atomic():
+    print("\n" + "=" * 60)
+    print("  Creating / Provisioning Test Session: 'test1'")
+    print("=" * 60)
+
+    # 1. Examiner Profile
+    ex_user = get_or_create_user(EXAMINER_EMAIL, KNOWN_PASSWORD, "Examiner Test1", User.Role.EXAMINER)
+    examiner_profile, _ = ExaminerProfile.objects.get_or_create(
+        user=ex_user,
+        defaults={
+            "employee_id": "EMP_T1_001",
+            "department": "Computer Science",
+            "designation": "Senior Lecturer",
+        }
     )
-]
-if not examiners:
-    fail("No examiner is assigned to this project. Assign one first.")
 
-if submission:
-    print(f"  [OK] Submission linked: {submission.id}")
-else:
-    print("  [WARN] No submission found — the viva can't generate questions until "
-          "a processed submission exists for this group/student.")
+    # 2. Student Profiles
+    s1_user = get_or_create_user(STUDENT_1_EMAIL, KNOWN_PASSWORD, "Student1 Test1", User.Role.STUDENT)
+    student1_profile, _ = StudentProfile.objects.get_or_create(
+        user=s1_user,
+        defaults={
+            "registration_number": "REG_T1_001",
+            "degree_program": "Software Engineering",
+            "academic_year": 4,
+            "batch": "2022",
+        }
+    )
 
-# ── 3. Create the session row directly ───────────────────────────────────────
-# NOTE: under the new lifecycle, status is button-driven (student clicks Start
-# Demo / Start Viva), not clock-driven — scheduled_start/end are just the
-# displayed window, not an auto-transition trigger.
-now = timezone.now()
-start = now + timedelta(minutes=START_DELAY_MIN)
-end = start + timedelta(minutes=DURATION_MIN)
+    s2_user = get_or_create_user(STUDENT_2_EMAIL, KNOWN_PASSWORD, "Student2 Test1", User.Role.STUDENT)
+    student2_profile, _ = StudentProfile.objects.get_or_create(
+        user=s2_user,
+        defaults={
+            "registration_number": "REG_T1_002",
+            "degree_program": "Software Engineering",
+            "academic_year": 4,
+            "batch": "2022",
+        }
+    )
 
-session = EvaluationSession.objects.create(
-    project=project,
-    group=group,
-    student=student,
-    submission=submission,
-    scheduled_start=start,
-    scheduled_end=end,
-    location_room=ROOM,
-    status="scheduled",             # student drives the transitions from here
-    demo_enabled=DEMO_ENABLED,
-    agora_channel_name="bruno",
-)
+    # 3. Project "test1" (Group Project)
+    project, created = Project.objects.get_or_create(
+        project_name=PROJECT_NAME,
+        defaults={
+            "description": "Adaptive group viva testing environment.",
+            "is_group_project": True,
+            "status": Project.Status.ACTIVE,
+            "submission_deadline": timezone.now() + timedelta(days=7),
+            "academic_year": "2026",
+        }
+    )
+    if created:
+        print(f"  [OK] Created Project: {PROJECT_NAME}")
+    else:
+        project.is_group_project = True
+        project.status = Project.Status.ACTIVE
+        project.save()
+        print(f"  [OK] Found existing Project: {PROJECT_NAME}")
+
+    # 4. Assign Examiner to Project
+    pe, _ = ProjectExaminer.objects.get_or_create(
+        project=project,
+        examiner=examiner_profile,
+        defaults={"role_in_project": ProjectExaminer.RoleInProject.LEAD}
+    )
+
+    # 5. Create Rubric Categories & Criteria (so the viva start call doesn't fail)
+    cat, _ = RubricCategory.objects.get_or_create(
+        project=project,
+        category_name="Technical Implementation",
+        defaults={"weight_percentage": 50.0, "description": "System architecture and coding patterns."}
+    )
+
+    crit1, _ = RubricCriteria.objects.get_or_create(
+        category=cat,
+        criteria_name="Secure Authentication",
+        defaults={
+            "max_score": 10.0,
+            "weight_in_category": 50.0,
+            "description": "Checks student's design of login routes, token exchange, and password storage.",
+            "questions_to_ask": 2,
+        }
+    )
+
+    crit2, _ = RubricCriteria.objects.get_or_create(
+        category=cat,
+        criteria_name="Database & Architecture",
+        defaults={
+            "max_score": 10.0,
+            "weight_in_category": 50.0,
+            "description": "Checks student's setup of database connections and schema integrity.",
+            "questions_to_ask": 2,
+        }
+    )
+
+    # 6. Create Student Group and members
+    group, _ = StudentGroup.objects.get_or_create(
+        project=project,
+        group_name="Group test1"
+    )
+    GroupMember.objects.get_or_create(group=group, student=student1_profile)
+    GroupMember.objects.get_or_create(group=group, student=student2_profile)
+    print(f"  [OK] Group and members assigned: {group.group_name}")
+
+    # 7. Project Submission
+    submission, _ = ProjectSubmission.objects.get_or_create(
+        project=project,
+        group=group,
+        defaults={
+            "submitted_at": timezone.now(),
+            "github_repo_url": "https://github.com/test1/test1-repo",
+            "report_file_url": "https://vivasense.blob.core.windows.net/media/dummy_report.pdf",
+        }
+    )
+
+    # 8. Create fully embedded FAISS Index & Report Chunks (ensures RAG retrieval works!)
+    dummy_chunks = [
+        {
+            "text": "The system implements secure authentication using bcrypt for hashing password credentials on signup and signin. JWT access tokens are stored in HttpOnly cookies to mitigate XSS risk.",
+            "source": "report",
+            "metadata": {"section": "Security Architecture", "page": 5}
+        },
+        {
+            "text": "def hash_password(password):\n    # Hashing credentials with bcrypt salt\n    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())",
+            "source": "code",
+            "metadata": {"file": "authentication/utils.py"}
+        },
+        {
+            "text": "The database uses PostgreSQL with connection pooling. It runs on a serverless Neon cloud cluster utilizing SSL modes for all active transport links.",
+            "source": "report",
+            "metadata": {"section": "Database Architecture", "page": 8}
+        },
+        {
+            "text": "DATABASES = {\n    'default': {\n        'ENGINE': 'django.db.backends.postgresql',\n        'NAME': 'neondb',\n        'OPTIONS': {'sslmode': 'require'}\n    }\n}",
+            "source": "code",
+            "metadata": {"file": "AI_Evaluator_Backend/settings.py"}
+        }
+    ]
+
+    print("  [..] Initializing FAISS Index for RAG retrieval...")
+    save_index_for_submission(submission, dummy_chunks)
+    index_status = SubmissionIndexStatus.objects.get(submission=submission)
+    index_status.status = SubmissionIndexStatus.IndexStatus.READY
+    index_status.save()
+    print("  [OK] FAISS Index & Chunks generated successfully.")
+
+    # 9. Create scheduled Evaluation Session
+    now = timezone.now()
+    start = now + timedelta(minutes=1)
+    end = start + timedelta(minutes=45)
+
+    session = EvaluationSession.objects.create(
+        project=project,
+        group=group,
+        submission=submission,
+        scheduled_start=start,
+        scheduled_end=end,
+        location_room=ROOM,
+        status=EvaluationSession.Status.SCHEDULED,
+        demo_enabled=True,
+        agora_channel_name=str(timezone.now().timestamp()),
+    )
 
 print("\n" + "=" * 60)
-print("  [DONE] Session created")
+print("  [DONE] Test session successfully created!")
 print("=" * 60)
 print(f"  Session ID:   {session.id}")
+print(f"  Project ID:   {project.id}")
 print(f"  Phase:        {session.phase}  (demo_enabled={session.demo_enabled})")
-print(f"  Created at:   {now:%Y-%m-%d %H:%M:%S}")
-print(f"  Scheduled:    {session.scheduled_start:%Y-%m-%d %H:%M} — "
-      f"{session.scheduled_end:%H:%M}  "
-      f"(starts in {START_DELAY_MIN} min, lasts {DURATION_MIN} min)")
+print(f"  Scheduled:    {session.scheduled_start:%Y-%m-%d %H:%M} — {session.scheduled_end:%H:%M}")
 print(f"  Room:         {session.location_room}")
 print(f"  Participants:")
-for name, reg, _ in participants:
-    print(f"    - {name} ({reg})")
+print(f"    - {student1_profile.user.full_name} ({student1_profile.registration_number})")
+print(f"    - {student2_profile.user.full_name} ({student2_profile.registration_number})")
 
 print("\n  Open as STUDENT (Start Demo / Start Viva):")
 print(f"    {FRONTEND_BASE}/dashboard/student/sessions/{session.id}/live")
-if group:
-    print("    (all group members open this same URL)")
-print("\n  Open as EXAMINER (Join once the student has started):")
-print(f"    {FRONTEND_BASE}/dashboard/teacher/projects/{project.id}")
+print("\n  Open as EXAMINER (Join once student has started):")
+print(f"    {FRONTEND_BASE}/dashboard/teacher")
 print("=" * 60)
-
-# ── 4. Reset + print full credentials for everyone in this session ──────────
-# Real passwords are hashed in the DB and can't be recovered, so every
-# involved account is reset to KNOWN_PASSWORD here and printed below.
-for _, _, user in participants:
-    user.set_password(KNOWN_PASSWORD)
-    user.save()
-
-for ep in examiners:
-    ep.user.set_password(KNOWN_PASSWORD)
-    ep.user.save()
 
 print("\n" + "=" * 60)
-print("  LOGIN CREDENTIALS  (passwords reset to KNOWN_PASSWORD for this run)")
+print("  LOGIN CREDENTIALS (reset to password: 'Password123!')")
 print("=" * 60)
-print("  Examiner(s):")
-for ep in examiners:
-    print(f"    - {ep.user.full_name or '(no name)'}")
-    print(f"        email:    {ep.user.email}")
-    print(f"        password: {KNOWN_PASSWORD}")
-print("\n  Student(s):")
-for name, reg, user in participants:
-    print(f"    - {name or '(no name)'} ({reg})")
-    print(f"        email:    {user.email}")
-    print(f"        password: {KNOWN_PASSWORD}")
-print("=" * 60)
+print(f"  Examiner:")
+print(f"    email:    {EXAMINER_EMAIL}")
+print(f"    password: {KNOWN_PASSWORD}")
+print(f"  Student 1:")
+print(f"    email:    {STUDENT_1_EMAIL}")
+print(f"    password: {KNOWN_PASSWORD}")
+print(f"  Student 2:")
+print(f"    email:    {STUDENT_2_EMAIL}")
+print(f"    password: {KNOWN_PASSWORD}")
+print("=" * 60 + "\n")

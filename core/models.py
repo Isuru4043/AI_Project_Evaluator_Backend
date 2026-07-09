@@ -440,25 +440,64 @@ class EvaluationSession(models.Model):
         ordering = ['scheduled_start']
 
     @property
+    def active_student_count(self):
+        """Number of active students who have pinged within the last 20 seconds."""
+        from django.utils import timezone
+        from datetime import timedelta
+        threshold = timezone.now() - timedelta(seconds=20)
+        return self.presences.filter(last_ping__gt=threshold, user__role='student').count()
+
+    @property
     def phase(self):
-        """Fine-grained lifecycle phase derived from status + demo_completed_at.
+        """Fine-grained lifecycle phase derived from status + presence + demo_completed_at.
 
-        The stored ``status`` only distinguishes scheduled / in_progress /
-        completed; the demo-vs-viva split within "in progress" is expressed by
-        whether ``demo_completed_at`` is set. This property surfaces the four
-        UI phases the front end shows and gates on:
-
-          scheduled → demo_in_progress → viva_in_progress → completed
+        Surfaces the dynamic phases:
+          scheduled → ongoing / live → demo_in_progress → viva_in_progress → completed
         """
         if self.status == 'completed':
             return 'completed'
         if self.status == 'in_progress':
             return 'viva_in_progress' if self.demo_completed_at else 'demo_in_progress'
+        
+        # If status is scheduled, check if the scheduled time has arrived/passed
+        from django.utils import timezone
+        if timezone.now() >= self.scheduled_start:
+            return 'live' if self.active_student_count > 0 else 'ongoing'
+            
         return 'scheduled'
 
     def __str__(self):
         target = self.group or self.student or 'Unassigned'
         return f"Session: {self.project} — {target} ({self.status})"
+
+
+# =============================================================================
+# 11b. SESSION PRESENCE HEARTBEATS
+# =============================================================================
+
+class SessionPresence(models.Model):
+    """Tracks real-time heartbeats of active users inside a session."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    session = models.ForeignKey(
+        EvaluationSession,
+        on_delete=models.CASCADE,
+        related_name='presences',
+    )
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='presences',
+    )
+    last_ping = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Session Presence'
+        verbose_name_plural = 'Session Presences'
+        unique_together = ('session', 'user')
+
+    def __str__(self):
+        return f"{self.user} in {self.session.id} (last ping: {self.last_ping})"
 
 
 # =============================================================================
