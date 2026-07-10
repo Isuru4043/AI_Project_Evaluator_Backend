@@ -6,6 +6,7 @@ Student Enrollment, and Submissions (Features 1-3).
 import logging
 
 from django.db import transaction
+from django.db.models import Prefetch, Q
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.parsers import FormParser, MultiPartParser
@@ -127,7 +128,18 @@ class ProjectListView(APIView):
             project_ids = ProjectExaminer.objects.filter(
                 examiner=ep,
             ).values_list('project_id', flat=True)
-            projects = Project.objects.filter(id__in=project_ids)
+
+            projects = Project.objects.filter(
+                id__in=project_ids,
+            ).prefetch_related(
+                Prefetch(
+                    'project_examiners',
+                    queryset=ProjectExaminer.objects.select_related('examiner__user'),
+                ),
+                'submissions',
+                'student_groups__members',
+                'evaluation_sessions',
+            )
             return _ok('Projects retrieved.', ProjectSerializer(projects, many=True).data)
         except Exception as e:
             return _500(e)
@@ -290,7 +302,15 @@ class ListExaminersView(APIView):
 # =============================================================================
 
 class AvailableProjectsView(APIView):
-    """GET /api/projects/available/"""
+    """GET /api/projects/available/
+
+    Returns only active projects the student has NOT enrolled in,
+    paginated (9 per page), sorted by newest created_at.
+    Query parameters:
+    - type: 'individual' | 'group' | 'all' (default: 'all')
+    - search: text matching project name or description
+    - page: page number
+    """
     permission_classes = [IsAuthenticated, IsStudent]
 
     def get(self, request):
@@ -299,11 +319,61 @@ class AvailableProjectsView(APIView):
             if not sp:
                 return _err('Student profile not found.', code=404)
 
-            projects = Project.objects.filter(status='active')
-            data = AvailableProjectSerializer(
-                projects, many=True, context={'student_profile': sp},
-            ).data
-            return _ok('Available projects retrieved.', data)
+            # 1. Filter out enrolled projects
+            enrolled_ids = set(
+                ProjectSubmission.objects.filter(student=sp)
+                .values_list('project_id', flat=True)
+            ) | set(
+                GroupMember.objects.filter(student=sp)
+                .values_list('group__project_id', flat=True)
+            )
+
+            projects = Project.objects.filter(
+                status='active',
+            ).exclude(
+                id__in=enrolled_ids,
+            )
+
+            # 2. Filter by project type (individual vs group)
+            type_param = request.query_params.get('type', 'all')
+            if type_param == 'individual':
+                projects = projects.filter(is_group_project=False)
+            elif type_param == 'group':
+                projects = projects.filter(is_group_project=True)
+
+            # 3. Filter by search query
+            search_param = request.query_params.get('search', '').strip()
+            if search_param:
+                projects = projects.filter(
+                    Q(project_name__icontains=search_param) |
+                    Q(description__icontains=search_param)
+                )
+
+            # 4. Order by created_at (latest first)
+            projects = projects.order_by('-created_at')
+
+            # 5. Paginate (9 per page)
+            from rest_framework.pagination import PageNumberPagination
+            paginator = PageNumberPagination()
+            paginator.page_size = 9
+            paginated_queryset = paginator.paginate_queryset(projects, request)
+
+            # 6. Prefetch lead examiners only for the current page subset
+            # Let's perform prefetch on the paginated slice
+            from django.db.models import Prefetch
+            prefetch_obj = Prefetch(
+                'project_examiners',
+                queryset=ProjectExaminer.objects.filter(
+                    role_in_project='lead',
+                ).select_related('examiner__user'),
+                to_attr='_lead_examiners',
+            )
+            # Use Django's prefetch_related_objects to prefetch on the list/slice
+            from django.db.models import prefetch_related_objects
+            prefetch_related_objects(paginated_queryset, prefetch_obj)
+
+            data = AvailableProjectSerializer(paginated_queryset, many=True).data
+            return paginator.get_paginated_response(data)
         except Exception as e:
             return _500(e)
 
@@ -422,11 +492,60 @@ class MyEnrollmentsView(APIView):
             ).values_list('group__project_id', flat=True)
 
             project_ids = set(list(ind_ids) + list(grp_ids))
-            projects = Project.objects.filter(id__in=project_ids)
+            projects = Project.objects.filter(id__in=project_ids).order_by('-created_at')
+
+            # 5. Paginate (9 per page)
+            from rest_framework.pagination import PageNumberPagination
+            paginator = PageNumberPagination()
+            paginator.page_size = 9
+            paginated_queryset = paginator.paginate_queryset(projects, request)
+
+            # Get the IDs of projects on this page to optimize prefetches
+            paginated_ids = [p.id for p in paginated_queryset]
+
+            # ── Batch all lookups the serializer needs for the paginated subset ──
+            # 1. Submissions keyed by project_id
+            all_subs = ProjectSubmission.objects.filter(
+                project_id__in=paginated_ids,
+            ).select_related('group')
+            sub_by_project = {}
+            for s in all_subs:
+                sub_by_project.setdefault(s.project_id, []).append(s)
+
+            # 2. Group memberships for this student, keyed by project_id
+            memberships = GroupMember.objects.filter(
+                student=sp, group__project_id__in=paginated_ids,
+            ).select_related('group')
+            membership_by_project = {m.group.project_id: m for m in memberships}
+
+            # 3. Group members (names) keyed by group_id
+            group_ids_set = {m.group_id for m in memberships}
+            all_members = GroupMember.objects.filter(
+                group_id__in=group_ids_set,
+            ).select_related('student__user')
+            members_by_group = {}
+            for gm in all_members:
+                members_by_group.setdefault(gm.group_id, []).append(
+                    gm.student.user.full_name
+                )
+
+            # 4. Sessions keyed by project_id (for this student)
+            sessions = EvaluationSession.objects.filter(
+                project_id__in=paginated_ids, student=sp,
+            )
+            session_by_project = {s.project_id: s for s in sessions}
+
             data = MyEnrollmentSerializer(
-                projects, many=True, context={'student_profile': sp},
+                paginated_queryset, many=True,
+                context={
+                    'student_profile': sp,
+                    'sub_by_project': sub_by_project,
+                    'membership_by_project': membership_by_project,
+                    'members_by_group': members_by_group,
+                    'session_by_project': session_by_project,
+                },
             ).data
-            return _ok('Enrolled projects retrieved.', data)
+            return paginator.get_paginated_response(data)
         except Exception as e:
             return _500(e)
 
