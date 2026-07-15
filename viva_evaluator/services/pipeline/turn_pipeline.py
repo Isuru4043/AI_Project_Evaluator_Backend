@@ -245,6 +245,7 @@ def process_answer_and_pick_next(
                 is_first_question=False,
                 clarify_mode=True,
                 clarify_reason=triage.get('rationale', ''),
+                session_id=str(session.id),
             ))
             question_data['blooms_level'] = prev_bloom
 
@@ -525,6 +526,7 @@ def process_answer_and_pick_next(
         is_first_question=is_first_for_criterion,
         question_number_in_criterion=state.coverage[str(next_criterion['id'])].turns + 1,
         weak_grounding=_grounding_is_weak(retrieval['chunks']),
+        session_id=str(session.id),
     ))
     _mark('F:questioner(LLM+critic)')
 

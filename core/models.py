@@ -968,3 +968,66 @@ class GeneratedVivaQuestion(models.Model):
 
     def __str__(self):
         return f"Generated Question {self.id}"
+
+
+# =============================================================================
+# DEMO CAPTURED SEGMENTS — presentation audio/slide timeline
+# =============================================================================
+
+class DemoCapturedSegment(models.Model):
+    """Stores chunks of audio transcripts or slide analysis captured during
+    a student's live presentation demo phase.
+
+    Each row represents either a 20-second audio slice (transcribed by
+    Canary-Qwen on Modal) or a slide screenshot that changed (analysed by
+    Qwen2.5-VL on Modal).  The ``is_processed`` flag doubles as a
+    lightweight queue tracker: background workers set it to True once
+    the Modal result is saved.
+    """
+
+    class SegmentType(models.TextChoices):
+        AUDIO = 'audio', 'Audio Transcript'
+        SLIDE = 'slide', 'Slide Analysis'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    session = models.ForeignKey(
+        EvaluationSession,
+        on_delete=models.CASCADE,
+        related_name='demo_segments',
+    )
+    student = models.ForeignKey(
+        StudentProfile,
+        on_delete=models.CASCADE,
+        related_name='demo_segments',
+    )
+    segment_type = models.CharField(
+        max_length=10,
+        choices=SegmentType.choices,
+    )
+    sequence_number = models.IntegerField(default=1)
+
+    # Timing relative to the demo start (seconds elapsed)
+    start_time = models.FloatField(default=0.0)
+    end_time = models.FloatField(default=0.0)
+    timestamp = models.DateTimeField(auto_now_add=True)
+
+    # Media file — Django uploads to Azure Blob via the default storage backend
+    file = models.FileField(upload_to='demo_chunks/', null=True, blank=True)
+
+    # Output from Modal processing
+    processed_text = models.TextField(blank=True, default='')
+
+    # Queue tracking
+    is_processed = models.BooleanField(default=False)
+    error_message = models.TextField(blank=True, default='')
+
+    class Meta:
+        verbose_name = 'Demo Captured Segment'
+        verbose_name_plural = 'Demo Captured Segments'
+        ordering = ['sequence_number', 'timestamp']
+
+    def __str__(self):
+        return (
+            f"{self.get_segment_type_display()} #{self.sequence_number} "
+            f"— {self.session_id} ({'✓' if self.is_processed else '…'})"
+        )
