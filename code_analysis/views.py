@@ -129,3 +129,28 @@ class CodeSubmissionQuestionsView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class CodeSubmissionReportView(APIView):
+    """
+    GET /api/code-analysis/submissions/<code_submission_id>/report/
+    Returns the finalized AI-generated code analysis report.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, code_submission_id):
+        from core.models import CodeSubmission
+        try:
+            submission = CodeSubmission.objects.get(id=code_submission_id)
+        except CodeSubmission.DoesNotExist:
+            return Response({"error": "Submission not found."}, status=404)
+
+        if not submission.final_report:
+            return Response({"error": "Report not yet generated."}, status=400)
+
+        return Response({
+            "code_submission_id": str(submission.id),
+            "quality_status": submission.quality_status,
+            "report": submission.final_report,
+            "generated_at": submission.report_generated_at,
+        }, status=200)

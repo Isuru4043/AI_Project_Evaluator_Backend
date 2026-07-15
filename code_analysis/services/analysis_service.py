@@ -8,6 +8,7 @@ from django.utils import timezone
 from requests import HTTPError
 
 from core.models import CodeSubmission, GeneratedVivaQuestion
+from code_analysis.services.report_agent import CodeAnalysisReportAgent
 from .gemini_service import GeminiService
 from .repo_service import cleanup_path, clone_repo, iter_code_files, safe_extract_zip
 from .sonarqube_service import SonarQubeService
@@ -19,6 +20,7 @@ class CodeAnalysisService:
     def __init__(self):
         self.sonar = SonarQubeService()
         self.gemini = GeminiService()
+        self.report_agent = CodeAnalysisReportAgent()
 
     def analyze_submission(self, code_submission_id):
         logger.info(f"Starting analyze_submission for code_submission_id: {code_submission_id}")
@@ -121,7 +123,13 @@ class CodeAnalysisService:
             logger.error(f"Error during analysis for submission {submission.id}: {exc}", exc_info=True)
             submission.analysis_status = CodeSubmission.AnalysisStatus.FAILED
             submission.analysis_error = str(exc)
-            submission.save(update_fields=["analysis_status", "analysis_error"])
+            submission.save(update_fields=[
+                "analysis_status",
+                "analysis_error",
+                "sonar_task_id",
+                "sonar_project_key",
+                "sonar_report_url",
+            ])
         finally:
             logger.info(f"Cleaning up repo path {repo_path}")
             cleanup_path(repo_path)
@@ -129,8 +137,13 @@ class CodeAnalysisService:
     def refresh_submission(self, code_submission_id):
         submission = CodeSubmission.objects.get(id=code_submission_id)
         needs_summary_refresh = _summary_needs_refresh(submission.sonar_summary)
+        needs_report = submission.sonar_summary and not submission.final_report
 
-        if submission.analysis_status != CodeSubmission.AnalysisStatus.SCANNING and not needs_summary_refresh:
+        if (
+            submission.analysis_status != CodeSubmission.AnalysisStatus.SCANNING
+            and not needs_summary_refresh
+            and not needs_report
+        ):
             return submission
 
         if submission.analysis_status == CodeSubmission.AnalysisStatus.SCANNING and not submission.sonar_task_id:
@@ -164,12 +177,29 @@ class CodeAnalysisService:
             submission.quality_status = quality_status
             submission.quality_reason = quality_reason
 
+            if submission.sonar_summary and not submission.final_report:
+                try:
+                    submission.final_report = self.report_agent.generate_report(
+                        sonar_summary=submission.sonar_summary,
+                        code_summary=submission.code_summary,
+                        quality_status=submission.quality_status,
+                        quality_reason=submission.quality_reason,
+                    )
+                    submission.report_generated_at = timezone.now()
+                except Exception as exc:
+                    logger.error(
+                        "Failed to generate final report for submission %s: %s",
+                        submission.id, exc, exc_info=True,
+                    )
+
         if submission.analysis_status == CodeSubmission.AnalysisStatus.COMPLETED:
             submission.save(update_fields=[
                 "sonar_summary",
                 "analyzed_at",
                 "quality_status",
                 "quality_reason",
+                "final_report",           
+                "report_generated_at", 
             ])
             return submission
 
@@ -180,6 +210,8 @@ class CodeAnalysisService:
             "quality_status",
             "quality_reason",
             "analysis_status",
+            "final_report",           
+            "report_generated_at",  
         ])
 
         return submission
@@ -476,3 +508,5 @@ def read_sonar_task_id(repo_path):
             return line.split("=", 1)[-1].strip()
 
     return None
+
+
