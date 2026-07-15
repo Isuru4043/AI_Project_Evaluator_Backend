@@ -2,6 +2,7 @@ from django.urls import path
 
 from .views import (
     CodeSubmissionCreateView,
+    CodeSubmissionReportView,
     CodeSubmissionStatusView,
     CodeSubmissionQuestionsView,
     CodeSubmissionSonarSummaryView,
@@ -26,4 +27,9 @@ urlpatterns = [
         CodeSubmissionQuestionsView.as_view(),
         name="code-questions",
     ),
+    path(
+    "submissions/<uuid:code_submission_id>/report/",
+    CodeSubmissionReportView.as_view(),
+    name="code-report",
+),
 ]

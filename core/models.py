@@ -911,6 +911,9 @@ class CodeSubmission(models.Model):
     analyzed_at = models.DateTimeField(null=True, blank=True)
     questions_generated_at = models.DateTimeField(null=True, blank=True)
 
+    final_report = models.JSONField(null=True, blank=True)
+    report_generated_at = models.DateTimeField(null=True, blank=True)
+
     class Meta:
         verbose_name = 'Code Submission'
         verbose_name_plural = 'Code Submissions'
