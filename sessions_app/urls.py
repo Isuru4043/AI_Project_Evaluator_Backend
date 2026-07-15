@@ -28,6 +28,12 @@ from sessions_app.views_live import (
     LiveQuestionListView,
     LiveQuestionPendingView,
 )
+from sessions_app.views_demo import (
+    DemoAudioUploadView,
+    DemoQueueStatusView,
+    DemoScreenshotUploadView,
+    StartWarmupView,
+)
 
 app_name = 'sessions_app'
 
@@ -131,4 +137,27 @@ urlpatterns = [
         LiveQuestionAnswerView.as_view(),
         name='live-question-answer',
     ),
+
+    # ── Demo Capture (presentation monitoring) ───────────────────────────
+    path(
+        'sessions/<uuid:session_id>/start-warmup/',
+        StartWarmupView.as_view(),
+        name='demo-start-warmup',
+    ),
+    path(
+        'sessions/<uuid:session_id>/demo-audio/',
+        DemoAudioUploadView.as_view(),
+        name='demo-audio-upload',
+    ),
+    path(
+        'sessions/<uuid:session_id>/demo-screenshot/',
+        DemoScreenshotUploadView.as_view(),
+        name='demo-screenshot-upload',
+    ),
+    path(
+        'sessions/<uuid:session_id>/demo-queue-status/',
+        DemoQueueStatusView.as_view(),
+        name='demo-queue-status',
+    ),
 ]
+

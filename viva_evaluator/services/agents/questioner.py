@@ -62,6 +62,7 @@ class QuestionerInput:
     # specific material on this criterion, so ask a BROADER conceptual question
     # instead of inventing specific details the student may never have written.
     weak_grounding: bool = False
+    session_id: Optional[str] = None
 
 
 # =============================================================================
@@ -181,10 +182,12 @@ HARD RULES — your question MUST follow ALL of these:
        "your choice of X", "your approach to Y", "your <module> architecture"
    (c) A specific code element from the retrieved sources:
        "your <function/class/module name>", "looking at your <component>"
+   (d) A claim or diagram from their presentation slides or spoken transcript:
+       "during your demo, you showed ...", "you explained in your presentation that ...", "your slide on <topic>"
 
    The question must NOT be a generic question that could be asked of any
    student on this topic. It must reference something concrete that this
-   specific student wrote or built, drawn from the retrieved sources below.
+   specific student wrote, built, showed, or said, drawn from the retrieved sources below.
 
 2. NEVER reference document locations. The student is in an oral exam and
    does NOT have the report in front of them. You MUST NOT mention:
@@ -290,13 +293,62 @@ def _build_prompt(
 ) -> str:
     sources_block = format_chunks_for_prompt(inp.retrieved_chunks, max_chars=2400)
 
-    # Week 3: render KG signals (CONTRADICTS_CODE alerts, dependencies)
+    # Hybrid retrieval - KG signals
     kg_block = ''
     if inp.kg_signals:
         from viva_evaluator.services.rag.retrieval import format_kg_signals_for_prompt
         kg_text = format_kg_signals_for_prompt(inp.kg_signals)
         if kg_text:
             kg_block = f"\nKNOWLEDGE GRAPH SIGNALS:\n{kg_text}\n"
+
+    # Presentation Demo Context (Canary-Qwen + Qwen2.5-VL alignment)
+    demo_block = ''
+    if inp.session_id:
+        try:
+            from core.models import DemoCapturedSegment, EvaluationSession
+            session = EvaluationSession.objects.select_related('student').get(id=inp.session_id)
+            segments = DemoCapturedSegment.objects.filter(
+                session=session,
+                student=session.student,
+                is_processed=True
+            ).order_by('sequence_number', 'timestamp')
+
+            audio_segs = [s for s in segments if s.segment_type == DemoCapturedSegment.SegmentType.AUDIO]
+            slide_segs = [s for s in segments if s.segment_type == DemoCapturedSegment.SegmentType.SLIDE]
+
+            if audio_segs or slide_segs:
+                demo_lines = []
+                for audio in audio_segs:
+                    # Find the slide whose relative timestamp is closest to but <= audio.end_time
+                    matched_slide = None
+                    for slide in slide_segs:
+                        if slide.start_time <= audio.end_time:
+                            matched_slide = slide
+                    
+                    slide_context = "(No slide showing)"
+                    if matched_slide:
+                        slide_context = f"Slide {matched_slide.sequence_number}: {matched_slide.processed_text}"
+                    
+                    demo_lines.append(
+                        f"- [{audio.start_time:.1f}s - {audio.end_time:.1f}s] {slide_context}\n"
+                        f"  Student said: \"{audio.processed_text}\""
+                    )
+                
+                # If there are only slide segments (e.g. no audio segments processed yet)
+                if not audio_segs and slide_segs:
+                    for slide in slide_segs:
+                        demo_lines.append(
+                            f"- Slide {slide.sequence_number} [offset {slide.start_time:.1f}s]: {slide.processed_text}"
+                        )
+
+                if demo_lines:
+                    demo_block = (
+                        "\nPRESENTATION DEMO CONTEXT (What the student actually showed and said in their presentation):\n"
+                        + "\n".join(demo_lines) + "\n"
+                    )
+        except Exception as e:
+            logger.exception("Failed to build presentation demo context in questioner prompt.")
+
 
     if inp.is_first_question or not inp.previous_question:
         conversation_block = '(This is the opening question for this criterion.)'
@@ -365,6 +417,7 @@ their project — every concrete reference must come from here):
 
 {sources_block}
 {kg_block}
+{demo_block}
 CONVERSATION CONTEXT:
 {conversation_block}
 {hints_block}{retry_block}{clarify_block}{weak_grounding_block}

@@ -103,7 +103,7 @@ class SessionStartView(APIView):
                         "question_text": latest_q.question_text,
                         "blooms_level": latest_q.blooms_level,
                         "difficulty": ext.difficulty_level if ext else "medium",
-                        "criterion": ext.criteria.criterion_name if ext and ext.criteria else "",
+                        "criterion": ext.criteria.criteria_name if ext and ext.criteria else "",
                         "question_number": latest_q.question_order,
                     },
                     status=status.HTTP_200_OK,
@@ -139,6 +139,7 @@ class SessionStartView(APIView):
                 is_first_question=True,
                 question_number_in_criterion=1,
                 weak_grounding=_grounding_is_weak(retrieved),
+                session_id=str(session.id),
             ))
 
             # Save the question to DB
@@ -631,7 +632,7 @@ class CurrentQuestionView(APIView):
                     "blooms_level": latest_q.blooms_level,
                     "difficulty": ext.difficulty_level if ext else "medium",
                     "criterion": (
-                        ext.criteria.criterion_name if ext and ext.criteria else ""
+                        ext.criteria.criteria_name if ext and ext.criteria else ""
                     ),
                     "question_number": latest_q.question_order,
                 },

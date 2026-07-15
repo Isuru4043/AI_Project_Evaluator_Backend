@@ -377,7 +377,7 @@ class StudentStartDemoView(APIView):
 
             if not session.demo_enabled:
                 return _err('This session has no demo phase. Use Start Viva instead.')
-            if session.phase != 'scheduled':
+            if session.status != 'scheduled':
                 return _err('This session has already started.')
 
             session = _activate_session(session, skip_demo=False)
@@ -401,7 +401,7 @@ class StudentStartVivaView(APIView):
             if error:
                 return error
 
-            if session.phase != 'scheduled':
+            if session.status != 'scheduled':
                 return _err('This session has already started.')
 
             session = _activate_session(session, skip_demo=True)

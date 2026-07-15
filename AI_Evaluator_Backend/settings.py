@@ -53,6 +53,7 @@ INSTALLED_APPS = [
     'cloudinary_storage',
     'agora_service',
     'cv_analysis',
+    'django_q',
 ]
 
 MIDDLEWARE = [
@@ -388,3 +389,20 @@ CV_RECORDING_STORAGE = os.getenv('CV_RECORDING_STORAGE', 'local').lower()
 CV_RECORDINGS_DIR = os.getenv(
     'CV_RECORDINGS_DIR', str(BASE_DIR / 'cv_recordings'),
 )
+
+# =============================================================================
+# Modal Serverless GPU Endpoints
+# =============================================================================
+MODAL_CANARY_URL = os.getenv('MODAL_CANARY_URL', '')
+MODAL_QWEN_VL_URL = os.getenv('MODAL_QWEN_VL_URL', '')
+
+# =============================================================================
+# Django-Q2 Background Task Queue
+# =============================================================================
+Q_CLUSTER = {
+    'name': 'viva_queue',
+    'workers': 4,
+    'timeout': 120,
+    'retry': 150,
+    'orm': 'default',
+}
