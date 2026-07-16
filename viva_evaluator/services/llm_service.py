@@ -106,9 +106,9 @@ def _chain_from_env(var: str, default: list) -> list:
 
 
 MODEL_REGISTRY = {
-    'default':   _chain_from_env('LLM_DEFAULT_MODEL',   DEFAULT_MODEL_CHAIN),
-    'fast':      _chain_from_env('LLM_FAST_MODEL',      DEFAULT_MODEL_CHAIN),
-    'reasoning': _chain_from_env('LLM_REASONING_MODEL', DEFAULT_MODEL_CHAIN),
+    'default':   os.getenv('LLM_DEFAULT_MODEL',   settings.GEMINI_MODEL),
+    'fast':      os.getenv('LLM_FAST_MODEL',      settings.GEMINI_MODEL),
+    'reasoning': os.getenv('LLM_REASONING_MODEL', settings.GEMINI_MODEL),
 }
 
 
@@ -123,7 +123,11 @@ def _get_client():
     global _client
     if _client is None:
         from google import genai
-        _client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        _client = genai.Client(
+            vertexai=True,
+            project=settings.GOOGLE_CLOUD_PROJECT,
+            location=settings.GOOGLE_CLOUD_LOCATION,
+        )
     return _client
 
 
