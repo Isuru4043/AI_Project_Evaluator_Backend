@@ -146,11 +146,16 @@ def start_recording(session) -> Optional[dict]:
         return None
 
 
-def stop_recording(session) -> Optional[str]:
-    """Stop recording; return the Azure blob URL of the composite mp4, or None.
+def stop_recording(session) -> Optional[dict]:
+    """Stop recording; return {'url', 'started_at'} for the composite mp4.
 
-    The returned URL matches the format azure_storage upload helpers produce,
-    so the CV runner's blob download works unchanged.
+    ``url`` matches the format azure_storage upload helpers produce, so the CV
+    runner's blob download works unchanged. ``started_at`` is an aware datetime
+    built from Agora's ``sliceStartTime`` — the wall-clock instant that maps to
+    video position 00:00:00, which is what makes question timecodes seekable.
+    It is None when Agora omits it.
+
+    Returns None when nothing was recorded.
     """
     if not is_enabled():
         return None
@@ -172,7 +177,7 @@ def stop_recording(session) -> Optional[str]:
             },
             headers=_auth_header(), timeout=30,
         )
-        blob_url = None
+        result = None
         if resp.status_code in (200, 201):
             server_response = resp.json().get('serverResponse', {})
             file_list = server_response.get('fileList', [])
@@ -181,8 +186,12 @@ def stop_recording(session) -> Optional[str]:
                 file_list[0] if file_list else None,
             )
             if mp4:
-                blob_url = _blob_url_for(mp4['fileName'])
-            logger.info('cloud_recording: stopped sid=%s file=%s', sid, blob_url)
+                result = {
+                    'url': _blob_url_for(mp4['fileName']),
+                    'started_at': _slice_start_to_datetime(mp4.get('sliceStartTime')),
+                }
+            logger.info('cloud_recording: stopped sid=%s file=%s', sid,
+                        result['url'] if result else None)
         else:
             logger.error('cloud_recording: stop failed %d %s',
                          resp.status_code, resp.text[:400])
@@ -192,11 +201,24 @@ def stop_recording(session) -> Optional[str]:
         session.save(update_fields=[
             'agora_recording_resource_id', 'agora_recording_sid',
         ])
-        return blob_url
+        return result
 
     except Exception:
         logger.exception('cloud_recording: stop error for session %s', session.id)
         return None
+
+
+def _slice_start_to_datetime(slice_start_time) -> Optional['datetime']:
+    """Agora sliceStartTime (epoch ms) → aware datetime, or None if unusable."""
+    from datetime import datetime, timezone
+
+    try:
+        ms = int(slice_start_time)
+    except (TypeError, ValueError):
+        return None
+    if ms <= 0:
+        return None
+    return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
 
 
 def _blob_url_for(file_name: str) -> str:

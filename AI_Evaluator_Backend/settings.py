@@ -383,16 +383,30 @@ AGORA_RECORDING_AZURE_REGION = int(os.getenv('AGORA_RECORDING_AZURE_REGION', '0'
 # recordings; analysis runs where the engine (and its venv) exists.
 CV_ANALYSIS_ENABLED = os.getenv('CV_ANALYSIS_ENABLED', 'false').lower() == 'true'
 CV_ANALYSIS_ASYNC = os.getenv('CV_ANALYSIS_ASYNC', 'true').lower() == 'true'
+
+# Where the engine runs:
+#   'modal'      — Modal CPU containers (cloud default; see cv_analyze_modal.py)
+#   'subprocess' — the exam-station-cv venv on this machine (local dev)
+CV_ANALYSIS_BACKEND = os.getenv('CV_ANALYSIS_BACKEND', 'modal').lower()
+
+# Modal endpoints from `modal deploy cv_analyze_modal.py`. Analysis is
+# submit/poll: a 20-min viva takes ~5-10 min to process.
+MODAL_CV_SUBMIT_URL = os.getenv('MODAL_CV_SUBMIT_URL', '')
+MODAL_CV_RESULT_URL = os.getenv('MODAL_CV_RESULT_URL', '')
+MODAL_CV_TOKEN = os.getenv('MODAL_CV_TOKEN', '')
+
 # Python executable of the exam-station-cv virtualenv (heavy CV deps live
-# there, not in this venv). Default assumes the in-repo module layout.
+# there, not in this venv). Only used by the 'subprocess' backend.
 CV_ANALYSIS_PYTHON = os.getenv(
     'CV_ANALYSIS_PYTHON',
     str(BASE_DIR / 'exam-station-cv' / '.venv' / 'Scripts' / 'python.exe'),
 )
-CV_ANALYSIS_TIMEOUT = int(os.getenv('CV_ANALYSIS_TIMEOUT', '1800'))
+CV_ANALYSIS_TIMEOUT = int(os.getenv('CV_ANALYSIS_TIMEOUT', '3600'))
 
-# Recording storage: 'local' (on this machine — no Azure cost) or 'azure'.
-CV_RECORDING_STORAGE = os.getenv('CV_RECORDING_STORAGE', 'local').lower()
+# Recording storage for the legacy client-upload endpoint: 'azure' or 'local'.
+# The live path no longer uses it — Agora Cloud Recording writes the session
+# recording straight to blob (see agora_service/cloud_recording.py).
+CV_RECORDING_STORAGE = os.getenv('CV_RECORDING_STORAGE', 'azure').lower()
 CV_RECORDINGS_DIR = os.getenv(
     'CV_RECORDINGS_DIR', str(BASE_DIR / 'cv_recordings'),
 )

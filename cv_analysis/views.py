@@ -30,6 +30,7 @@ from core.models import (
 )
 from cv_analysis.models import CVSessionReport
 from cv_analysis.services.runner import enqueue_cv_analysis
+from cv_analysis.services.timeline import build_question_timeline
 from projects.permissions import IsExaminer
 
 logger = logging.getLogger(__name__)
@@ -181,6 +182,19 @@ class CVSummaryView(APIView):
         if report is None:
             return _err('No CV analysis exists for this session yet.', code=404)
 
+        # Resume a Modal job whose polling thread died with its gunicorn
+        # worker. The examiner UI polls this endpoint, so a stuck PROCESSING
+        # report heals itself without anyone re-triggering the analysis.
+        if report.status == CVSessionReport.Status.PROCESSING and report.modal_call_id:
+            from cv_analysis.services.runner import poll_modal_result
+            try:
+                if poll_modal_result(report):
+                    report.refresh_from_db()
+            except Exception:
+                logger.exception(
+                    "Resume poll failed for session %s", session_id,
+                )
+
         # Short-lived playback URL the examiner's <video> can stream without
         # a bearer header: a signed local endpoint, or an Azure SAS URL.
         playback_url = self._playback_url(request, session_id, report.recording_url)
@@ -192,6 +206,7 @@ class CVSummaryView(APIView):
                 'artifact': report.artifact,
                 'recording_url': report.recording_url,
                 'playback_url': playback_url,
+                'question_timeline': build_question_timeline(session),
                 'error_message': report.error_message,
                 'updated_at': report.updated_at,
             },

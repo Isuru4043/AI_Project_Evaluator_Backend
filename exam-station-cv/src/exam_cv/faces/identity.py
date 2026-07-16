@@ -67,6 +67,37 @@ class EnrollmentGallery:
         return set(self._gallery.keys())
 
 
+def build_gallery_from_photos(
+    photos: dict[str, np.ndarray],
+    mesh,
+    embedder: FaceEmbedder,
+) -> tuple["EnrollmentGallery", list[str]]:
+    """Enroll students from their reference face photos.
+
+    ``photos`` maps student_id → a decoded BGR image. ``mesh`` must be a
+    throwaway MeshPipeline (its tracker state is mutated here and would
+    otherwise pollute the video pass); it is the sole detector, so ArcFace
+    still never runs its own detection (rule 1).
+
+    Returns (gallery, skipped_ids). A photo is skipped when it shows no face
+    or more than one — an ambiguous reference is left unenrolled so the
+    student resolves to unknown rather than being guessed (HITL invariant).
+    """
+    gallery = EnrollmentGallery()
+    skipped: list[str] = []
+    for student_id, image in photos.items():
+        observations = mesh.process_frame(image)
+        if len(observations) != 1:
+            skipped.append(student_id)
+            continue
+        crop = mesh.crop(image, observations[0])
+        if crop.size == 0:
+            skipped.append(student_id)
+            continue
+        gallery.enroll(student_id, embedder.embed(crop))
+    return gallery, skipped
+
+
 @dataclass
 class _TrackIdentity:
     student_id: Optional[str]  # None = unknown face
