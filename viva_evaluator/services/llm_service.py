@@ -65,9 +65,9 @@ def _extract_retry_after(exc: Exception) -> Optional[int]:
 # =============================================================================
 
 MODEL_REGISTRY = {
-    'default':   os.getenv('LLM_DEFAULT_MODEL',   'gemini-flash-latest'),
-    'fast':      os.getenv('LLM_FAST_MODEL',      'gemini-flash-latest'),
-    'reasoning': os.getenv('LLM_REASONING_MODEL', 'gemini-flash-latest'),
+    'default':   os.getenv('LLM_DEFAULT_MODEL',   settings.GEMINI_MODEL),
+    'fast':      os.getenv('LLM_FAST_MODEL',      settings.GEMINI_MODEL),
+    'reasoning': os.getenv('LLM_REASONING_MODEL', settings.GEMINI_MODEL),
 }
 
 
