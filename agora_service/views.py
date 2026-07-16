@@ -109,12 +109,19 @@ class AgoraTokenView(APIView):
 
         # ── Build the RTC token ──────────────────────────────────────────
         uid = _uid_from_user_id(user.id)
+        screen_share_uid = uid + 1000000000
         channel = session.agora_channel_name
 
         try:
             token = build_rtc_token(
                 channel_name=channel,
                 uid=uid,
+                role=ROLE_PUBLISHER,
+                expire_seconds=86400,   # 24 hours
+            )
+            screen_share_token = build_rtc_token(
+                channel_name=channel,
+                uid=screen_share_uid,
                 role=ROLE_PUBLISHER,
                 expire_seconds=86400,   # 24 hours
             )
@@ -133,5 +140,63 @@ class AgoraTokenView(APIView):
                 'channel': channel,
                 'token': token,
                 'uid': uid,
+                'screen_share_token': screen_share_token,
+                'screen_share_uid': screen_share_uid,
             },
         })
+
+
+class AgoraRosterView(APIView):
+    """
+    GET /api/sessions/<session_id>/agora-roster/
+
+    Returns a map of {agora_numeric_uid: user_full_name} for all potential
+    participants in the session call (students, group members, examiners).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def _get_display_name(self, user) -> str:
+        # Custom User model has no first_name, last_name, or username. It uses full_name and email.
+        if user.full_name and user.full_name.strip() and user.full_name.lower() != "none":
+            return user.full_name.strip()
+        return user.email
+
+    def get(self, request, session_id):
+        session = (
+            EvaluationSession.objects
+            .filter(id=session_id)
+            .select_related('project', 'student__user', 'group')
+            .first()
+        )
+        if not session:
+            return Response(
+                {'success': False, 'message': 'Session not found.'},
+                status=404,
+            )
+
+        roster = {}
+
+        # 1. Main student
+        if session.student:
+            uid = _uid_from_user_id(session.student.user_id)
+            name = self._get_display_name(session.student.user)
+            roster[uid] = name
+
+        # 2. Group members (if group project)
+        if session.group:
+            for member in GroupMember.objects.filter(group=session.group).select_related('student__user'):
+                uid = _uid_from_user_id(member.student.user_id)
+                name = self._get_display_name(member.student.user)
+                roster[uid] = name
+
+        # 3. Examiners assigned to this project
+        for pe in ProjectExaminer.objects.filter(project=session.project).select_related('examiner__user'):
+            uid = _uid_from_user_id(pe.examiner.user_id)
+            name = self._get_display_name(pe.examiner.user)
+            roster[uid] = f"{name} (Examiner)"
+
+        return Response({
+            'success': True,
+            'roster': roster
+        })
+
