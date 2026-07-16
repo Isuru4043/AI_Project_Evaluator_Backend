@@ -243,17 +243,85 @@ MEDIA_ROOT = BASE_DIR / 'media'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # =============================================================================
-# Gemini API
+# Google Cloud / Vertex AI (ADC authentication)
 # =============================================================================
 
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
+GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "geminikeyaccess")
+GOOGLE_CLOUD_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "us")
+
+# ── Credential resolution ───────────────────────────────────────────
+# Priority:
+#   1. GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 — Azure App Service (production).
+#      Decoded to /tmp/google-service-account.json at startup.
+#   2. GOOGLE_APPLICATION_CREDENTIALS    — local .env file path (dev).
+#   3. ADC metadata server               — GCE / Cloud Run / GKE workloads.
+
+import base64
+import logging as _logging
+import stat
+
+_gcp_logger = _logging.getLogger("google_adc_setup")
+
+_b64_cred = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_BASE64", "")
+
+if _b64_cred:
+    # ── Production (Azure App Service) ──────────────────────────────
+    _tmp_cred_path = "/tmp/google-service-account.json"
+    try:
+        _decoded = base64.b64decode(_b64_cred, validate=True)
+    except Exception:
+        from django.core.exceptions import ImproperlyConfigured
+        raise ImproperlyConfigured(
+            "GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 is invalid. "
+            "Ensure it contains valid Base64-encoded service-account JSON."
+        )
+
+    with open(_tmp_cred_path, "wb") as _f:
+        _f.write(_decoded)
+    os.chmod(_tmp_cred_path, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = _tmp_cred_path
+    GOOGLE_APPLICATION_CREDENTIALS = _tmp_cred_path
+
+    _gcp_logger.info("Google ADC credentials configured for Vertex AI.")
+
+    # Clean up references to decoded content
+    del _decoded, _b64_cred
+else:
+    # ── Local development (.env path) ───────────────────────────────
+    GOOGLE_APPLICATION_CREDENTIALS = os.getenv(
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "",
+    )
+
+    if GOOGLE_APPLICATION_CREDENTIALS:
+        os.environ.setdefault(
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            GOOGLE_APPLICATION_CREDENTIALS,
+        )
+        _gcp_logger.info("Google ADC credentials configured for Vertex AI.")
+
 GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-3.5-flash')
 
-if not GEMINI_API_KEY:
-    from django.core.exceptions import ImproperlyConfigured
+# ── Startup validation (Vertex AI) ──────────────────────────────────
+from django.core.exceptions import ImproperlyConfigured  # noqa: E402
+
+if not GOOGLE_CLOUD_PROJECT:
     raise ImproperlyConfigured(
-        "GEMINI_API_KEY environment variable is not set. "
-        "Please add it to your .env file or environment."
+        "GOOGLE_CLOUD_PROJECT is not configured. "
+        "Set it in your .env file or environment."
+    )
+
+if not GOOGLE_CLOUD_LOCATION:
+    raise ImproperlyConfigured(
+        "GOOGLE_CLOUD_LOCATION is not configured. "
+        "Set it in your .env file or environment."
+    )
+
+if GOOGLE_APPLICATION_CREDENTIALS and not Path(GOOGLE_APPLICATION_CREDENTIALS).exists():
+    raise ImproperlyConfigured(
+        f"GOOGLE_APPLICATION_CREDENTIALS points to "
+        f"'{GOOGLE_APPLICATION_CREDENTIALS}' but the file does not exist."
     )
 
 GROQ_API_KEY = ''
@@ -383,16 +451,30 @@ AGORA_RECORDING_AZURE_REGION = int(os.getenv('AGORA_RECORDING_AZURE_REGION', '0'
 # recordings; analysis runs where the engine (and its venv) exists.
 CV_ANALYSIS_ENABLED = os.getenv('CV_ANALYSIS_ENABLED', 'false').lower() == 'true'
 CV_ANALYSIS_ASYNC = os.getenv('CV_ANALYSIS_ASYNC', 'true').lower() == 'true'
+
+# Where the engine runs:
+#   'modal'      — Modal CPU containers (cloud default; see cv_analyze_modal.py)
+#   'subprocess' — the exam-station-cv venv on this machine (local dev)
+CV_ANALYSIS_BACKEND = os.getenv('CV_ANALYSIS_BACKEND', 'modal').lower()
+
+# Modal endpoints from `modal deploy cv_analyze_modal.py`. Analysis is
+# submit/poll: a 20-min viva takes ~5-10 min to process.
+MODAL_CV_SUBMIT_URL = os.getenv('MODAL_CV_SUBMIT_URL', '')
+MODAL_CV_RESULT_URL = os.getenv('MODAL_CV_RESULT_URL', '')
+MODAL_CV_TOKEN = os.getenv('MODAL_CV_TOKEN', '')
+
 # Python executable of the exam-station-cv virtualenv (heavy CV deps live
-# there, not in this venv). Default assumes the in-repo module layout.
+# there, not in this venv). Only used by the 'subprocess' backend.
 CV_ANALYSIS_PYTHON = os.getenv(
     'CV_ANALYSIS_PYTHON',
     str(BASE_DIR / 'exam-station-cv' / '.venv' / 'Scripts' / 'python.exe'),
 )
-CV_ANALYSIS_TIMEOUT = int(os.getenv('CV_ANALYSIS_TIMEOUT', '1800'))
+CV_ANALYSIS_TIMEOUT = int(os.getenv('CV_ANALYSIS_TIMEOUT', '3600'))
 
-# Recording storage: 'local' (on this machine — no Azure cost) or 'azure'.
-CV_RECORDING_STORAGE = os.getenv('CV_RECORDING_STORAGE', 'local').lower()
+# Recording storage for the legacy client-upload endpoint: 'azure' or 'local'.
+# The live path no longer uses it — Agora Cloud Recording writes the session
+# recording straight to blob (see agora_service/cloud_recording.py).
+CV_RECORDING_STORAGE = os.getenv('CV_RECORDING_STORAGE', 'azure').lower()
 CV_RECORDINGS_DIR = os.getenv(
     'CV_RECORDINGS_DIR', str(BASE_DIR / 'cv_recordings'),
 )

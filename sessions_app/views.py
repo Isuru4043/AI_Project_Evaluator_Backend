@@ -5,6 +5,7 @@ End-Viva media upload, and Student Session Status.
 
 from datetime import date
 
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
@@ -57,21 +58,64 @@ def _is_assigned(examiner_profile, project):
 
 
 def _start_recording_and_stt(session):
-    """Kick off the Agora STT bot + cloud recording (non-blocking, optional).
+    """Kick off the Agora STT bot (non-blocking, optional).
 
-    Called when a session first becomes active (start-demo / start-viva) so the
-    whole session — demo included — is captured server-side.
+    Called when a session first becomes active (start-demo / start-viva). The
+    STT transcript covers the whole session; the cloud RECORDING deliberately
+    does not — see _start_viva_recording.
     """
     import threading
     from agora_service.stt_manager import start_stt, is_enabled as stt_enabled
     if stt_enabled():
         threading.Thread(target=start_stt, args=(session,), daemon=True).start()
 
+
+def _recording_owner(session):
+    """The row that holds this channel's cloud-recording handles.
+
+    A group viva is N session rows sharing ONE Agora channel, so the recording
+    resource_id/sid must live on a single deterministic row — otherwise a start
+    triggered from one member's row and the stop issued against another's would
+    never pair up, and the recording would run until Agora's idle timeout with
+    nobody collecting the file URL. _activate_session sets
+    agora_channel_name = str(<id>) of the row that opened the channel, so that
+    row owns the recording for every sibling.
+    """
+    if not session.group_id or not session.agora_channel_name:
+        return session
+    try:
+        owner = EvaluationSession.objects.filter(
+            id=session.agora_channel_name,
+        ).first()
+    except (ValueError, ValidationError):
+        return session  # channel name isn't a session id (legacy row)
+    return owner or session
+
+
+def _start_viva_recording(session):
+    """Start Agora Cloud Recording of the channel (non-blocking, optional).
+
+    Called at the VIVA transition, not at session activation: the examiner's
+    behavioral report is about how students answered, so the demo/presentation
+    phase is deliberately excluded from the recording. The demo is captured
+    separately (audio chunks + slide screenshots) by the demo pipeline.
+
+    Group sessions share one channel and one recording, so this is a no-op once
+    a sibling row has already started it.
+    """
+    import threading
+
     from agora_service.cloud_recording import (
         start_recording, is_enabled as rec_enabled,
     )
-    if rec_enabled():
-        threading.Thread(target=start_recording, args=(session,), daemon=True).start()
+    if not rec_enabled():
+        return
+
+    owner = _recording_owner(session)
+    if owner.agora_recording_sid:
+        return  # already recording this channel
+
+    threading.Thread(target=start_recording, args=(owner,), daemon=True).start()
 
 
 def _activate_session(session, skip_demo):
@@ -102,6 +146,9 @@ def _activate_session(session, skip_demo):
 
     session.refresh_from_db()
     _start_recording_and_stt(session)
+    if skip_demo:
+        # No demo phase — the viva starts now, so the recording does too.
+        _start_viva_recording(session)
     return session
 
 
@@ -268,21 +315,10 @@ class StartDemoView(APIView):
 
             session.refresh_from_db()
 
-            # Start Agora STT bot + cloud recording (non-blocking, optional)
-            import threading
-            from agora_service.stt_manager import start_stt, is_enabled as stt_enabled
-            if stt_enabled():
-                threading.Thread(
-                    target=start_stt, args=(session,), daemon=True,
-                ).start()
-
-            from agora_service.cloud_recording import (
-                start_recording, is_enabled as rec_enabled,
-            )
-            if rec_enabled():
-                threading.Thread(
-                    target=start_recording, args=(session,), daemon=True,
-                ).start()
+            # Start the Agora STT bot (non-blocking, optional). Cloud recording
+            # deliberately waits for the viva transition — the demo phase is
+            # not part of the examiner's behavioral recording.
+            _start_recording_and_stt(session)
 
             return _ok('Demo started successfully.', EvaluationSessionDetailSerializer(session).data)
         except Exception as e:
@@ -319,6 +355,7 @@ class CompleteDemoView(APIView):
                     session.save()
 
             session.refresh_from_db()
+            _start_viva_recording(session)
             return _ok('Demo completed. Viva session will begin now.', EvaluationSessionDetailSerializer(session).data)
         except Exception as e:
             return _500(e)
@@ -354,6 +391,7 @@ class StudentEndDemoView(APIView):
                     session.save(update_fields=['demo_completed_at'])
 
             session.refresh_from_db()
+            _start_viva_recording(session)
             return _ok('Demo ended. Your viva will begin now.', EvaluationSessionDetailSerializer(session).data)
         except Exception as e:
             return _500(e)
@@ -483,10 +521,21 @@ class EndVivaView(APIView):
             from agora_service.cloud_recording import (
                 stop_recording, is_enabled as rec_enabled,
             )
-            if rec_enabled() and session.agora_recording_sid:
-                cloud_url = stop_recording(session)
-                if cloud_url:
-                    video_blob_url = cloud_url
+            recording_started_at = None
+            # Group vivas: the handles live on the channel-owning sibling row,
+            # which may not be the row this request ended.
+            recording_owner = _recording_owner(session)
+            if rec_enabled() and recording_owner.agora_recording_sid:
+                cloud = stop_recording(recording_owner)
+                if cloud and cloud.get('url'):
+                    video_blob_url = cloud['url']
+                    # True video t0 — what question timecodes are measured
+                    # against. If Agora didn't report sliceStartTime, fall back
+                    # to the viva transition: recording starts within a few
+                    # seconds of it, so chapters stay usable but approximate.
+                    recording_started_at = (
+                        cloud.get('started_at') or session.demo_completed_at
+                    )
 
             now = timezone.now()
             with transaction.atomic():
@@ -496,6 +545,7 @@ class EndVivaView(APIView):
                     video_file_url=video_blob_url,
                     audio_file_url=audio_blob_url,
                     duration_seconds=duration_seconds,
+                    recording_started_at=recording_started_at,
                 )
 
                 # Update session status

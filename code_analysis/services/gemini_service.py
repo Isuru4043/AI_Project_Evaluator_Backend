@@ -7,18 +7,20 @@ from google import genai
 
 class GeminiService:
     def __init__(self):
-        self.api_key = settings.GEMINI_API_KEY
         self.model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
         self._client = None
 
-        if self.api_key:
-            try:
-                self._client = genai.Client(
-                    vertexai=True,
-                    api_key=self.api_key,
-                )
-            except Exception:
-                return
+        import logging
+        _logger = logging.getLogger(__name__)
+        try:
+            self._client = genai.Client(
+                vertexai=True,
+                project=settings.GOOGLE_CLOUD_PROJECT,
+                location=settings.GOOGLE_CLOUD_LOCATION,
+            )
+        except Exception as exc:
+            _logger.error("Failed to initialize Vertex AI client: %s", exc)
+            raise
 
     def is_enabled(self):
         return self._client is not None

@@ -26,6 +26,7 @@ AZURE_CONNECTION_STRING = (
 AZURE_CONTAINER_REPORTS = "reports"
 AZURE_CONTAINER_VIDEOS = "videos"
 AZURE_CONTAINER_AUDIOS = "audios"
+AZURE_CONTAINER_FACES = "faces"
 
 
 def _get_blob_service_client():
@@ -149,6 +150,43 @@ def upload_audio_to_blob(file, project_id, session_id):
     except Exception as e:
         print(f"[AZURE ERROR] Audio upload failed: {str(e)}")
         raise Exception(f"Audio upload failed: {str(e)}")
+
+
+# =============================================================================
+# 3b. Upload Face Enrollment Photo
+# =============================================================================
+
+def upload_face_photo_to_blob(file, student_id):
+    """
+    Upload a student's enrollment face photo to the (private) faces container.
+
+    Blob path: <student_id>/face_<uuid8>.<ext>
+
+    The photo is biometric reference data used only to identify who is speaking
+    in a group viva recording. The container is private; hand it out solely via
+    short-lived ``generate_sas_url()`` links. A random filename per upload keeps
+    a replaced photo from being served from any cached URL.
+
+    Returns the blob URL on success.
+    """
+    import uuid as _uuid
+
+    try:
+        ext = os.path.splitext(file.name)[1].lower() or '.jpg'
+        blob_path = f"{student_id}/face_{_uuid.uuid4().hex[:8]}{ext}"
+        client = _get_blob_service_client()
+        _ensure_container(AZURE_CONTAINER_FACES)
+
+        blob_client = client.get_blob_client(
+            container=AZURE_CONTAINER_FACES, blob=blob_path,
+        )
+        blob_client.upload_blob(file.read(), overwrite=True)
+        url = blob_client.url
+        print(f"[AZURE] Face photo uploaded successfully: {url}")
+        return url
+    except Exception as e:
+        print(f"[AZURE ERROR] Face photo upload failed: {str(e)}")
+        raise Exception(f"Face photo upload failed: {str(e)}")
 
 
 # =============================================================================
