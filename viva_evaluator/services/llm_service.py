@@ -82,7 +82,10 @@ def _get_client():
     global _client
     if _client is None:
         from google import genai
-        _client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        _client = genai.Client(
+            vertexai=True,
+            api_key=settings.GEMINI_API_KEY,
+        )
     return _client
 
 

@@ -39,7 +39,10 @@ class CodeAnalysisReportAgent:
 
     def __init__(self, model=None):
         self.model = model or settings.GEMINI_MODEL
-        self.client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        self.client = genai.Client(
+            vertexai=True,
+            api_key=settings.GEMINI_API_KEY,
+        )
 
     def generate_report(self, sonar_summary: dict, code_summary: str,
                          quality_status: str, quality_reason: str) -> dict:

@@ -249,6 +249,13 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
 GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash-lite')
 
+if not GEMINI_API_KEY:
+    from django.core.exceptions import ImproperlyConfigured
+    raise ImproperlyConfigured(
+        "GEMINI_API_KEY environment variable is not set. "
+        "Please add it to your .env file or environment."
+    )
+
 GROQ_API_KEY = ''
 # =============================================================================
 # Code Analysis Configuration

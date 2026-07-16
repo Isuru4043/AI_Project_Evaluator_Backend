@@ -2,7 +2,10 @@ import json
 from google import genai
 from django.conf import settings
 
-client = genai.Client(api_key=settings.GEMINI_API_KEY)
+client = genai.Client(
+    vertexai=True,
+    api_key=settings.GEMINI_API_KEY,
+)
 MODEL = "gemini-2.5-flash"
 
 

@@ -1,24 +1,27 @@
 import json
 import os
 
+from django.conf import settings
+from google import genai
+
 
 class GeminiService:
     def __init__(self):
-        self.api_key = os.getenv("GEMINI_API_KEY")
+        self.api_key = settings.GEMINI_API_KEY
         self.model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
-        self._model = None
+        self._client = None
 
         if self.api_key:
             try:
-                import google.generativeai as genai
-            except ImportError:
+                self._client = genai.Client(
+                    vertexai=True,
+                    api_key=self.api_key,
+                )
+            except Exception:
                 return
 
-            genai.configure(api_key=self.api_key)
-            self._model = genai.GenerativeModel(self.model_name)
-
     def is_enabled(self):
-        return self._model is not None
+        return self._client is not None
 
     def summarize_code(self, code_excerpt):
         if not self.is_enabled():
@@ -31,7 +34,10 @@ class GeminiService:
             f"{code_excerpt}\n\n"
             "Return 2-3 paragraphs."
         )
-        response = self._model.generate_content(prompt)
+        response = self._client.models.generate_content(
+            model=self.model_name,
+            contents=prompt,
+        )
         return response.text.strip()
 
     def generate_questions(self, code_excerpt, max_questions=8):
@@ -49,7 +55,10 @@ class GeminiService:
             f"Return a JSON array of up to {max_questions} objects with keys: "
             "question, blooms_level, source, code_reference, reasoning."
         )
-        response = self._model.generate_content(prompt)
+        response = self._client.models.generate_content(
+            model=self.model_name,
+            contents=prompt,
+        )
         raw_text = response.text.strip()
         return _parse_questions(raw_text)
 
@@ -63,3 +72,4 @@ def _parse_questions(raw_text):
         return json.loads(raw_text[start : end + 1])
     except (ValueError, json.JSONDecodeError):
         return []
+
