@@ -127,6 +127,11 @@ class StudentProfile(models.Model):
     academic_year = models.IntegerField(null=True, blank=True)
     batch = models.CharField(max_length=100, null=True, blank=True)
 
+    # Enrollment face photo (private 'faces' blob container). Used only to
+    # identify which member is speaking in a GROUP viva recording, so answers
+    # route to the right student. Never shown to other students.
+    face_photo_url = models.TextField(null=True, blank=True)
+
     class Meta:
         verbose_name = 'Student Profile'
         verbose_name_plural = 'Student Profiles'
@@ -517,6 +522,11 @@ class SessionRecording(models.Model):
     audio_file_url = models.TextField(null=True, blank=True)
     duration_seconds = models.IntegerField(null=True, blank=True)
     recorded_at = models.DateTimeField(auto_now_add=True)
+    # True t0 of the video — Agora's sliceStartTime for the composite file,
+    # i.e. the wall-clock instant that maps to video position 00:00:00.
+    # Question/answer offsets into the recording are computed against this;
+    # NULL means offsets are unknown (chapters are then omitted).
+    recording_started_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         verbose_name = 'Session Recording'

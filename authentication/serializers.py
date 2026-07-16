@@ -220,9 +220,20 @@ class ExaminerProfileSerializer(serializers.ModelSerializer):
 class StudentProfileSerializer(serializers.ModelSerializer):
     """Serializes student profile details."""
 
+    # Whether an enrollment face photo exists — drives the setup prompt. The
+    # URL itself is never exposed here (it's private biometric reference data;
+    # the face-photo endpoint hands out a short SAS to the owner only).
+    has_face_photo = serializers.SerializerMethodField()
+
     class Meta:
         model = StudentProfile
-        fields = ['registration_number', 'degree_program', 'academic_year', 'batch']
+        fields = [
+            'registration_number', 'degree_program', 'academic_year', 'batch',
+            'has_face_photo',
+        ]
+
+    def get_has_face_photo(self, obj):
+        return bool(obj.face_photo_url)
 
 
 class UserProfileResponseSerializer(serializers.ModelSerializer):
