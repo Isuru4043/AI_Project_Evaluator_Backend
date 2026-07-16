@@ -243,17 +243,85 @@ MEDIA_ROOT = BASE_DIR / 'media'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # =============================================================================
-# Gemini API
+# Google Cloud / Vertex AI (ADC authentication)
 # =============================================================================
 
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
+GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "geminikeyaccess")
+GOOGLE_CLOUD_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "us")
+
+# ── Credential resolution ───────────────────────────────────────────
+# Priority:
+#   1. GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 — Azure App Service (production).
+#      Decoded to /tmp/google-service-account.json at startup.
+#   2. GOOGLE_APPLICATION_CREDENTIALS    — local .env file path (dev).
+#   3. ADC metadata server               — GCE / Cloud Run / GKE workloads.
+
+import base64
+import logging as _logging
+import stat
+
+_gcp_logger = _logging.getLogger("google_adc_setup")
+
+_b64_cred = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_BASE64", "")
+
+if _b64_cred:
+    # ── Production (Azure App Service) ──────────────────────────────
+    _tmp_cred_path = "/tmp/google-service-account.json"
+    try:
+        _decoded = base64.b64decode(_b64_cred, validate=True)
+    except Exception:
+        from django.core.exceptions import ImproperlyConfigured
+        raise ImproperlyConfigured(
+            "GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 is invalid. "
+            "Ensure it contains valid Base64-encoded service-account JSON."
+        )
+
+    with open(_tmp_cred_path, "wb") as _f:
+        _f.write(_decoded)
+    os.chmod(_tmp_cred_path, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = _tmp_cred_path
+    GOOGLE_APPLICATION_CREDENTIALS = _tmp_cred_path
+
+    _gcp_logger.info("Google ADC credentials configured for Vertex AI.")
+
+    # Clean up references to decoded content
+    del _decoded, _b64_cred
+else:
+    # ── Local development (.env path) ───────────────────────────────
+    GOOGLE_APPLICATION_CREDENTIALS = os.getenv(
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "",
+    )
+
+    if GOOGLE_APPLICATION_CREDENTIALS:
+        os.environ.setdefault(
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            GOOGLE_APPLICATION_CREDENTIALS,
+        )
+        _gcp_logger.info("Google ADC credentials configured for Vertex AI.")
+
 GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-3.5-flash')
 
-if not GEMINI_API_KEY:
-    from django.core.exceptions import ImproperlyConfigured
+# ── Startup validation (Vertex AI) ──────────────────────────────────
+from django.core.exceptions import ImproperlyConfigured  # noqa: E402
+
+if not GOOGLE_CLOUD_PROJECT:
     raise ImproperlyConfigured(
-        "GEMINI_API_KEY environment variable is not set. "
-        "Please add it to your .env file or environment."
+        "GOOGLE_CLOUD_PROJECT is not configured. "
+        "Set it in your .env file or environment."
+    )
+
+if not GOOGLE_CLOUD_LOCATION:
+    raise ImproperlyConfigured(
+        "GOOGLE_CLOUD_LOCATION is not configured. "
+        "Set it in your .env file or environment."
+    )
+
+if GOOGLE_APPLICATION_CREDENTIALS and not Path(GOOGLE_APPLICATION_CREDENTIALS).exists():
+    raise ImproperlyConfigured(
+        f"GOOGLE_APPLICATION_CREDENTIALS points to "
+        f"'{GOOGLE_APPLICATION_CREDENTIALS}' but the file does not exist."
     )
 
 GROQ_API_KEY = ''
