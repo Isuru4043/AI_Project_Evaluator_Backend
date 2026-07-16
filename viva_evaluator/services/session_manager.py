@@ -6,7 +6,8 @@ from django.conf import settings
 
 client = genai.Client(
     vertexai=True,
-    api_key=settings.GEMINI_API_KEY,
+    project=settings.GOOGLE_CLOUD_PROJECT,
+    location=settings.GOOGLE_CLOUD_LOCATION,
 )
 MODEL = settings.GEMINI_MODEL
 logger = logging.getLogger(__name__)

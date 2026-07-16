@@ -243,17 +243,47 @@ MEDIA_ROOT = BASE_DIR / 'media'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # =============================================================================
-# Gemini API
+# Google Cloud / Vertex AI (ADC authentication)
 # =============================================================================
 
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
+GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "geminikeyaccess")
+GOOGLE_CLOUD_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "global")
+
+# ADC credential file — set in .env for local development, e.g.:
+#   GOOGLE_APPLICATION_CREDENTIALS=secrets/google-service-account.json
+# In production the metadata server or workload identity handles this.
+GOOGLE_APPLICATION_CREDENTIALS = os.getenv(
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "",
+)
+
+if GOOGLE_APPLICATION_CREDENTIALS:
+    os.environ.setdefault(
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        GOOGLE_APPLICATION_CREDENTIALS,
+    )
+
 GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-3.5-flash')
 
-if not GEMINI_API_KEY:
-    from django.core.exceptions import ImproperlyConfigured
+# ── Startup validation (Vertex AI) ──────────────────────────────────
+from django.core.exceptions import ImproperlyConfigured  # noqa: E402
+
+if not GOOGLE_CLOUD_PROJECT:
     raise ImproperlyConfigured(
-        "GEMINI_API_KEY environment variable is not set. "
-        "Please add it to your .env file or environment."
+        "GOOGLE_CLOUD_PROJECT is not configured. "
+        "Set it in your .env file or environment."
+    )
+
+if not GOOGLE_CLOUD_LOCATION:
+    raise ImproperlyConfigured(
+        "GOOGLE_CLOUD_LOCATION is not configured. "
+        "Set it in your .env file or environment."
+    )
+
+if GOOGLE_APPLICATION_CREDENTIALS and not Path(GOOGLE_APPLICATION_CREDENTIALS).exists():
+    raise ImproperlyConfigured(
+        f"GOOGLE_APPLICATION_CREDENTIALS points to "
+        f"'{GOOGLE_APPLICATION_CREDENTIALS}' but the file does not exist."
     )
 
 GROQ_API_KEY = ''
