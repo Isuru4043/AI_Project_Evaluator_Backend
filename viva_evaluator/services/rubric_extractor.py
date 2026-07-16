@@ -6,7 +6,7 @@ client = genai.Client(
     vertexai=True,
     api_key=settings.GEMINI_API_KEY,
 )
-MODEL = "gemini-2.5-flash"
+MODEL = settings.GEMINI_MODEL
 
 
 def extract_rubric_from_text(rubric_text: str) -> dict:
