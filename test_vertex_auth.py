@@ -29,7 +29,7 @@ import sys
 def main():
     project = os.getenv("GOOGLE_CLOUD_PROJECT", "geminikeyaccess")
     location = os.getenv("GOOGLE_CLOUD_LOCATION", "global")
-    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
 
     creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
 

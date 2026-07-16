@@ -7,7 +7,7 @@ from google import genai
 
 class GeminiService:
     def __init__(self):
-        self.model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+        self.model_name = settings.GEMINI_MODEL
         self._client = None
 
         import logging
