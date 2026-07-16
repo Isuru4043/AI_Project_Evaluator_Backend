@@ -1,9 +1,4 @@
-import json
-from google import genai
-from django.conf import settings
-
-client = genai.Client(api_key=settings.GEMINI_API_KEY)
-MODEL = "gemini-2.5-flash"
+from viva_evaluator.services.llm_service import llm_call
 
 
 def extract_rubric_from_text(rubric_text: str) -> dict:
@@ -64,27 +59,17 @@ Respond in this exact JSON format with no extra text or markdown:
 }}
 """
 
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=prompt,
+    # Extraction is a one-shot action the examiner is waiting on, so it gets
+    # more retries than the default: a transient 503 here costs them the whole
+    # upload. LLMQuotaError is left to propagate — retrying it is pointless.
+    result = llm_call(
+        prompt,
+        model='reasoning',
+        expect_json=True,
+        max_retries=4,
     )
 
-    return _parse_json_response(response.text)
+    if not isinstance(result, dict):
+        return {"error": "Could not parse rubric structure from document."}
 
-
-def _parse_json_response(response_text: str) -> dict:
-    """Safely parses JSON response from Gemini."""
-    text = response_text.strip()
-
-    if text.startswith("```"):
-        lines = text.split("\n")
-        lines = [l for l in lines if not l.strip().startswith("```")]
-        text = "\n".join(lines).strip()
-
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return {
-            "error": "Could not parse rubric structure from document.",
-            "raw_response": text,
-        }
+    return result

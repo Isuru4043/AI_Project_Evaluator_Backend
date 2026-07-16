@@ -262,7 +262,24 @@ class RubricExtractApplyView(APIView):
             if not rubric_text.strip():
                 return _err('Could not extract any text from the uploaded file.')
 
-            extracted = extract_rubric_from_text(rubric_text)
+            from viva_evaluator.services.llm_service import LLMQuotaError
+            try:
+                extracted = extract_rubric_from_text(rubric_text)
+            except LLMQuotaError:
+                return _err(
+                    'The AI service has hit its quota limit. Please try again '
+                    'in a few minutes.',
+                    code=503,
+                )
+            except RuntimeError:
+                # llm_call exhausted its retries — provider is down or
+                # overloaded. Nothing the examiner did wrong.
+                return _err(
+                    'The AI service is temporarily unavailable. Please try '
+                    'uploading again in a moment.',
+                    code=503,
+                )
+
             if 'error' in extracted:
                 return _err(f"Extraction failed: {extracted['error']}", code=500)
 

@@ -43,6 +43,20 @@ def _is_quota_error(exc: Exception) -> bool:
     )
 
 
+def _is_model_unavailable(exc: Exception) -> bool:
+    """A 404 for the model itself — retired, or closed to new projects.
+
+    Retrying is pointless; the next model in the chain is the only way out.
+    """
+    text = str(exc).lower()
+    return (
+        '404' in text
+        or 'not_found' in text
+        or 'no longer available' in text
+        or 'is not found' in text
+    )
+
+
 def _extract_retry_after(exc: Exception) -> Optional[int]:
     import re as _re
     m = _re.search(r'retry in ([\d.]+)\s*s', str(exc), _re.IGNORECASE)
@@ -62,12 +76,39 @@ def _extract_retry_after(exc: Exception) -> Optional[int]:
 #   flash-lite ~ 1s/call   |   flash ~ 6s/call
 #   reasoning = Analyzer + Questioner (latency hotspot)
 #   fast      = Critic, code summaries, image captions
+#
+# Each purpose maps to a CHAIN, tried in order. A model is skipped when it is
+# out of quota (429) or unavailable to this project (404); the next one takes
+# over. The free-tier request cap is counted per project *per model*, so a
+# fallback gets a genuinely separate allowance rather than the same wall.
+#
+# Set an env var to a comma-separated list to override a chain, e.g.
+#   LLM_DEFAULT_MODEL=gemini-3.5-flash,gemini-flash-latest
 # =============================================================================
 
+# Ordered best-first, then degrading to lite. Every entry is verified reachable
+# on our key: a model that always 404s would burn a round trip on every call
+# before falling through, so dead rungs are worse than no rung. Notably the
+# gemini-2.5-* family is closed to new projects ("no longer available to new
+# users") and must not be used as a fallback.
+DEFAULT_MODEL_CHAIN = [
+    'gemini-3.5-flash',
+    'gemini-3-flash-preview',
+    'gemini-3.1-flash-lite',
+    'gemini-flash-lite-latest',
+]
+
+
+def _chain_from_env(var: str, default: list) -> list:
+    raw = os.getenv(var, '')
+    models = [m.strip() for m in raw.split(',') if m.strip()]
+    return models or list(default)
+
+
 MODEL_REGISTRY = {
-    'default':   os.getenv('LLM_DEFAULT_MODEL',   'gemini-flash-latest'),
-    'fast':      os.getenv('LLM_FAST_MODEL',      'gemini-flash-latest'),
-    'reasoning': os.getenv('LLM_REASONING_MODEL', 'gemini-flash-latest'),
+    'default':   _chain_from_env('LLM_DEFAULT_MODEL',   DEFAULT_MODEL_CHAIN),
+    'fast':      _chain_from_env('LLM_FAST_MODEL',      DEFAULT_MODEL_CHAIN),
+    'reasoning': _chain_from_env('LLM_REASONING_MODEL', DEFAULT_MODEL_CHAIN),
 }
 
 
@@ -159,80 +200,104 @@ def _llm_call_internal(
     image_bytes: Optional[bytes] = None,
     image_mime: str = 'image/png',
 ) -> Any:
-    model_id = MODEL_REGISTRY.get(model, MODEL_REGISTRY['default'])
+    chain = MODEL_REGISTRY.get(model) or MODEL_REGISTRY['default']
     client = _get_client()
 
     last_error = None
-    for attempt in range(max_retries + 1):
-        try:
-            t0 = time.time()
+    quota_error = None
 
-            # Build contents: text-only or [image, text] for multimodal
-            if image_bytes is not None:
-                from google.genai import types
-                contents = [
-                    types.Part.from_bytes(data=image_bytes, mime_type=image_mime),
-                    prompt,
-                ]
-            else:
-                contents = prompt
+    for model_id in chain:
+        for attempt in range(max_retries + 1):
+            try:
+                t0 = time.time()
 
-            response = client.models.generate_content(
-                model=model_id,
-                contents=contents,
-            )
-            latency_ms = int((time.time() - t0) * 1000)
-            raw_text = (response.text or '').strip()
+                # Build contents: text-only or [image, text] for multimodal
+                if image_bytes is not None:
+                    from google.genai import types
+                    contents = [
+                        types.Part.from_bytes(data=image_bytes, mime_type=image_mime),
+                        prompt,
+                    ]
+                else:
+                    contents = prompt
 
-            logger.info(
-                'llm_call ok model=%s latency=%dms chars_in=%d chars_out=%d image=%s',
-                model_id, latency_ms, len(prompt), len(raw_text),
-                'yes' if image_bytes else 'no',
-            )
-
-            if not expect_json:
-                return raw_text
-
-            parsed = _parse_json(raw_text)
-            if parsed is not None:
-                return parsed
-
-            # JSON parse failed — count as a retryable error
-            last_error = ValueError('LLM returned malformed JSON')
-            logger.warning(
-                'llm_call json_parse_failed attempt=%d model=%s preview=%r',
-                attempt, model_id, raw_text[:200],
-            )
-
-        except Exception as exc:
-            last_error = exc
-
-            # Quota / rate-limit (429): retrying within this request is
-            # pointless — the daily cap won't clear in milliseconds. Raise
-            # a typed error so the caller can show a clean message.
-            if _is_quota_error(exc):
-                logger.error(
-                    'llm_call QUOTA error model=%s: %s', model_id, str(exc)[:200],
+                response = client.models.generate_content(
+                    model=model_id,
+                    contents=contents,
                 )
-                raise LLMQuotaError(
-                    'AI service quota exceeded.',
-                    retry_after_seconds=_extract_retry_after(exc),
+                latency_ms = int((time.time() - t0) * 1000)
+                raw_text = (response.text or '').strip()
+
+                logger.info(
+                    'llm_call ok model=%s latency=%dms chars_in=%d chars_out=%d image=%s',
+                    model_id, latency_ms, len(prompt), len(raw_text),
+                    'yes' if image_bytes else 'no',
                 )
 
-            logger.warning(
-                'llm_call error attempt=%d model=%s err=%s',
-                attempt, model_id, exc,
-            )
-            # Exponential backoff: 0.5s, 1s, 2s
-            if attempt < max_retries:
-                time.sleep(0.5 * (2 ** attempt))
+                if not expect_json:
+                    return raw_text
 
-    # All retries exhausted
+                parsed = _parse_json(raw_text)
+                if parsed is not None:
+                    return parsed
+
+                # JSON parse failed — count as a retryable error
+                last_error = ValueError('LLM returned malformed JSON')
+                logger.warning(
+                    'llm_call json_parse_failed attempt=%d model=%s preview=%r',
+                    attempt, model_id, raw_text[:200],
+                )
+
+            except Exception as exc:
+                last_error = exc
+
+                # Quota (429) and model-unavailable (404) are properties of the
+                # model, not of this attempt — no amount of retrying clears
+                # them. Abandon this model and let the chain move on.
+                if _is_quota_error(exc):
+                    quota_error = exc
+                    logger.warning(
+                        'llm_call QUOTA on model=%s, falling through: %s',
+                        model_id, str(exc)[:160],
+                    )
+                    break
+
+                if _is_model_unavailable(exc):
+                    logger.warning(
+                        'llm_call model=%s unavailable, falling through: %s',
+                        model_id, str(exc)[:160],
+                    )
+                    break
+
+                logger.warning(
+                    'llm_call error attempt=%d model=%s err=%s',
+                    attempt, model_id, exc,
+                )
+                # Exponential backoff: 0.5s, 1s, 2s
+                if attempt < max_retries:
+                    time.sleep(0.5 * (2 ** attempt))
+
+    # Every model in the chain failed.
     if fallback is not None:
-        logger.error('llm_call exhausted retries, using fallback. last_error=%s', last_error)
+        logger.error(
+            'llm_call chain exhausted (%s), using fallback. last_error=%s',
+            ','.join(chain), last_error,
+        )
         return fallback
 
-    raise RuntimeError(f'LLM call failed after {max_retries + 1} attempts: {last_error}')
+    # A quota wall anywhere in the chain is the more actionable diagnosis:
+    # surface it as the typed error so views show "try again later" rather
+    # than a generic failure.
+    if quota_error is not None:
+        logger.error('llm_call QUOTA exhausted across chain=%s', ','.join(chain))
+        raise LLMQuotaError(
+            'AI service quota exceeded.',
+            retry_after_seconds=_extract_retry_after(quota_error),
+        )
+
+    raise RuntimeError(
+        f'LLM call failed on every model in chain ({",".join(chain)}): {last_error}'
+    )
 
 
 # =============================================================================

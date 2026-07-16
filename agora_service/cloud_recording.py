@@ -54,7 +54,14 @@ def _storage_config(session) -> dict:
         AZURE_ACCOUNT_KEY,
         AZURE_ACCOUNT_NAME,
         AZURE_CONTAINER_VIDEOS,
+        _ensure_container,
     )
+
+    # Agora's servers write the file to Azure themselves using these
+    # credentials — they never touch our upload helpers, and they do NOT
+    # create the container. If it is missing, Agora's upload fails after the
+    # session (nothing here would report it), so make sure it exists first.
+    _ensure_container(AZURE_CONTAINER_VIDEOS)
 
     return {
         'vendor': _VENDOR_AZURE,
