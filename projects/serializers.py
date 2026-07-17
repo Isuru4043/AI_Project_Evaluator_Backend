@@ -113,18 +113,22 @@ class ProjectSerializer(serializers.ModelSerializer):
         ]
 
     def get_examiners(self, obj):
-        qs = obj.project_examiners.select_related('examiner__user').all()
+        # project_examiners is prefetched with select_related in the view
+        qs = obj.project_examiners.all()
         return ProjectExaminerSerializer(qs, many=True).data
 
     def get_enrolled_students_count(self, obj):
         if obj.is_group_project:
-            return GroupMember.objects.filter(
-                group__project=obj,
-            ).count()
-        return obj.submissions.filter(student__isnull=False).count()
+            # student_groups__members is prefetched
+            return sum(
+                len(list(g.members.all())) for g in obj.student_groups.all()
+            )
+        # submissions is prefetched
+        return sum(1 for s in obj.submissions.all() if s.student_id is not None)
 
     def get_sessions_count(self, obj):
-        return obj.evaluation_sessions.count()
+        # evaluation_sessions is prefetched
+        return len(obj.evaluation_sessions.all())
 
 
 class ProjectDetailSerializer(serializers.ModelSerializer):
@@ -188,30 +192,23 @@ class StudentEnrollSerializer(serializers.Serializer):
 
 
 class AvailableProjectSerializer(serializers.ModelSerializer):
-    """Serializes active projects for the student available projects list."""
+    """Serializes active projects the student has NOT enrolled in."""
 
-    enrolled = serializers.SerializerMethodField()
     lead_examiner_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Project
         fields = [
             'id', 'project_name', 'description', 'is_group_project',
-            'submission_deadline', 'lead_examiner_name', 'enrolled',
+            'submission_deadline', 'lead_examiner_name',
         ]
 
-    def get_enrolled(self, obj):
-        student_profile = self.context.get('student_profile')
-        if not student_profile:
-            return False
-        if obj.is_group_project:
-            return GroupMember.objects.filter(
-                group__project=obj,
-                student=student_profile,
-            ).exists()
-        return obj.submissions.filter(student=student_profile).exists()
-
     def get_lead_examiner_name(self, obj):
+        # Use prefetched list if available (no DB hit)
+        leads = getattr(obj, '_lead_examiners', None)
+        if leads is not None:
+            return leads[0].examiner.user.full_name if leads else None
+        # Fallback
         lead = obj.project_examiners.filter(role_in_project='lead').select_related('examiner__user').first()
         if lead:
             return lead.examiner.user.full_name
@@ -234,6 +231,24 @@ class MyEnrollmentSerializer(serializers.ModelSerializer):
         ]
 
     def get_submission_status(self, obj):
+        # Use pre-built lookup from view context (0 queries)
+        sub_by_project = self.context.get('sub_by_project')
+        if sub_by_project is not None:
+            subs = sub_by_project.get(obj.id, [])
+            if obj.is_group_project:
+                membership = self.context.get('membership_by_project', {}).get(obj.id)
+                if membership:
+                    for s in subs:
+                        if s.group_id == membership.group_id and (s.report_file_url or s.github_repo_url):
+                            return 'submitted'
+            else:
+                sp = self.context.get('student_profile')
+                for s in subs:
+                    if s.student_id == (sp.id if sp else None) and (s.report_file_url or s.github_repo_url):
+                        return 'submitted'
+            return 'not_submitted'
+
+        # Fallback (original per-project queries)
         student_profile = self.context.get('student_profile')
         if obj.is_group_project:
             membership = GroupMember.objects.filter(
@@ -254,10 +269,17 @@ class MyEnrollmentSerializer(serializers.ModelSerializer):
         return 'not_submitted'
 
     def get_session_details(self, obj):
-        student_profile = self.context.get('student_profile')
-        session = EvaluationSession.objects.filter(
-            project=obj, student=student_profile,
-        ).first()
+        # Use pre-built lookup from view context (0 queries)
+        session_by_project = self.context.get('session_by_project')
+        if session_by_project is not None:
+            session = session_by_project.get(obj.id)
+        else:
+            # Fallback
+            student_profile = self.context.get('student_profile')
+            session = EvaluationSession.objects.filter(
+                project=obj, student=student_profile,
+            ).first()
+
         if session:
             return {
                 'session_id': str(session.id),
@@ -271,6 +293,21 @@ class MyEnrollmentSerializer(serializers.ModelSerializer):
     def get_group_info(self, obj):
         if not obj.is_group_project:
             return None
+
+        # Use pre-built lookup from view context (0 queries)
+        membership_by_project = self.context.get('membership_by_project')
+        if membership_by_project is not None:
+            membership = membership_by_project.get(obj.id)
+            if membership:
+                members = self.context.get('members_by_group', {}).get(membership.group_id, [])
+                return {
+                    'group_id': str(membership.group.id),
+                    'group_name': membership.group.group_name,
+                    'members': members,
+                }
+            return None
+
+        # Fallback
         student_profile = self.context.get('student_profile')
         membership = GroupMember.objects.filter(
             group__project=obj, student=student_profile,

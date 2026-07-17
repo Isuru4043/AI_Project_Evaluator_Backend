@@ -2,8 +2,12 @@ import json
 from google import genai
 from django.conf import settings
 
-client = genai.Client(api_key=settings.GEMINI_API_KEY)
-MODEL = "gemini-2.5-flash"
+client = genai.Client(
+    vertexai=True,
+    project=settings.GOOGLE_CLOUD_PROJECT,
+    location=settings.GOOGLE_CLOUD_LOCATION,
+)
+MODEL = settings.GEMINI_MODEL
 
 
 def extract_rubric_from_text(rubric_text: str) -> dict:

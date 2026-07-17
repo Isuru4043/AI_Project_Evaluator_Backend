@@ -65,9 +65,9 @@ def _extract_retry_after(exc: Exception) -> Optional[int]:
 # =============================================================================
 
 MODEL_REGISTRY = {
-    'default':   os.getenv('LLM_DEFAULT_MODEL',   'gemini-2.5-flash-lite'),
-    'fast':      os.getenv('LLM_FAST_MODEL',      'gemini-2.5-flash-lite'),
-    'reasoning': os.getenv('LLM_REASONING_MODEL', 'gemini-2.5-flash-lite'),
+    'default':   os.getenv('LLM_DEFAULT_MODEL',   settings.GEMINI_MODEL),
+    'fast':      os.getenv('LLM_FAST_MODEL',      settings.GEMINI_MODEL),
+    'reasoning': os.getenv('LLM_REASONING_MODEL', settings.GEMINI_MODEL),
 }
 
 
@@ -82,7 +82,11 @@ def _get_client():
     global _client
     if _client is None:
         from google import genai
-        _client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        _client = genai.Client(
+            vertexai=True,
+            project=settings.GOOGLE_CLOUD_PROJECT,
+            location=settings.GOOGLE_CLOUD_LOCATION,
+        )
     return _client
 
 

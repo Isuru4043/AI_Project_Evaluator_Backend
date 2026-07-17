@@ -15,11 +15,14 @@ Timecodes: frame t_ms is derived from the real frame index / file fps, so
 every event timestamp and integrity-flag timecode is directly seekable in
 the analyzed recording (video_offset_ms = 0).
 
-Group identity (single-camera recordings): there is no enrollment step
-post-hoc, so v1 uses SEATING ORDER — students sit left→right in roster
-order. When the number of visible faces doesn't match the roster the
-mapping is left sticky/unknown rather than guessed (HITL invariant).
-Enrollment-snapshot identity can replace this behind the same interface.
+Group identity: pass ``--enrollment-dir`` holding one reference photo per
+student (``<student_id>.jpg``) and faces are matched by ArcFace against
+that gallery — the identity path for Agora cloud recordings, where all
+participants are composited into one frame and tile positions shift as
+people join or leave. Without it (or when no photo yields a usable face)
+group mode falls back to SEATING ORDER — students sit left→right in roster
+order, valid only for a fixed single-camera view. Either way, faces that
+don't resolve are left unknown rather than guessed (HITL invariant).
 """
 
 from __future__ import annotations
@@ -177,6 +180,75 @@ class SeatingMesh:
         self._mesh.close()
 
 
+_PHOTO_SUFFIXES = {'.jpg', '.jpeg', '.png'}
+
+
+def load_enrollment_photos(
+    enrollment_dir: Path, roster_ids: set[str]
+) -> dict[str, "object"]:
+    """Read ``<student_id>.jpg`` reference photos for roster members.
+
+    Filenames that aren't roster student_ids, and files that don't decode,
+    are ignored — an absent photo simply means that student is never matched
+    by face (they resolve to unknown, which the examiner sees as a flag).
+    """
+    import cv2  # lazy
+
+    photos = {}
+    if not enrollment_dir.is_dir():
+        return photos
+    for path in sorted(enrollment_dir.iterdir()):
+        if path.suffix.lower() not in _PHOTO_SUFFIXES:
+            continue
+        if path.stem not in roster_ids:
+            continue
+        image = cv2.imread(str(path))
+        if image is not None and image.size:
+            photos[path.stem] = image
+    return photos
+
+
+def _build_enrollment_identity(manifest, enrollment_dir: Path):
+    """Gallery-backed IdentityResolver, or None to fall back to seating order."""
+    from .faces.identity import (
+        ArcFaceEmbedder,
+        IdentityResolver,
+        build_gallery_from_photos,
+    )
+    from .faces.mesh import MeshPipeline
+
+    photos = load_enrollment_photos(enrollment_dir, manifest.student_ids())
+    if not photos:
+        # ASCII only: this is read back through a pipe by the Django runner,
+        # whose console encoding on Windows is not UTF-8.
+        print(
+            f"enrollment: no usable photos in {enrollment_dir} - "
+            "falling back to seating order",
+            flush=True,
+        )
+        return None
+
+    embedder = ArcFaceEmbedder()
+    # Separate detector instance: build_gallery_from_photos advances the
+    # tracker, which must not leak into the video pass.
+    enroll_mesh = MeshPipeline(max_faces=2)
+    try:
+        gallery, skipped = build_gallery_from_photos(photos, enroll_mesh, embedder)
+    finally:
+        enroll_mesh.close()
+
+    if skipped:
+        print(
+            f"enrollment: no single clear face in photos for {sorted(skipped)} - "
+            "those students will resolve as unknown",
+            flush=True,
+        )
+    if not gallery.enrolled_ids():
+        return None
+    print(f"enrollment: enrolled {sorted(gallery.enrolled_ids())}", flush=True)
+    return IdentityResolver(gallery, embedder)
+
+
 def extract_audio(video_path: Path, out_dir: Path) -> Optional[Path]:
     """Extract mono 16 kHz wav; returns None when there's no audio stream."""
     from .capture.recorder import resolve_ffmpeg
@@ -197,6 +269,7 @@ def analyze(
     manifest_path: Path,
     output_dir: Path,
     target_fps: float = 12.0,
+    enrollment_dir: Optional[Path] = None,
 ):
     from .faces.mesh import MeshPipeline
 
@@ -215,8 +288,14 @@ def analyze(
     mesh = MeshPipeline(max_faces=max(5, len(manifest.roster) + 1))
 
     if manifest.mode == SessionMode.GROUP:
-        identity = PositionalIdentity([r.student_id for r in manifest.roster])
-        mesh = SeatingMesh(mesh, identity)
+        identity = (
+            _build_enrollment_identity(manifest, Path(enrollment_dir))
+            if enrollment_dir
+            else None
+        )
+        if identity is None:
+            identity = PositionalIdentity([r.student_id for r in manifest.roster])
+            mesh = SeatingMesh(mesh, identity)
     else:
         from .faces.identity import EnrollmentGallery, IdentityResolver
 
@@ -245,9 +324,17 @@ def main() -> None:
     parser.add_argument('--manifest', type=Path, required=True)
     parser.add_argument('--output-dir', type=Path, required=True)
     parser.add_argument('--target-fps', type=float, default=12.0)
+    parser.add_argument(
+        '--enrollment-dir', type=Path, default=None,
+        help='Directory of <student_id>.jpg reference photos. Group mode only; '
+             'without it identity falls back to seating order.',
+    )
     args = parser.parse_args()
 
-    summary = analyze(args.video, args.manifest, args.output_dir, args.target_fps)
+    summary = analyze(
+        args.video, args.manifest, args.output_dir, args.target_fps,
+        enrollment_dir=args.enrollment_dir,
+    )
     print(f"analysis complete: session {summary.session_id}", flush=True)
     for s in summary.per_student:
         print(

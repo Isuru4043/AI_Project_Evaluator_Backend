@@ -40,6 +40,10 @@ class CVSessionReport(models.Model):
     artifact = models.JSONField(null=True, blank=True)
     # Blob URL of the recording that was analyzed.
     recording_url = models.TextField(blank=True, default='')
+    # Modal FunctionCall id of the in-flight analysis. Persisted so a result
+    # can still be claimed after the worker thread that spawned it dies
+    # (gunicorn recycling) — see runner.poll_modal_result.
+    modal_call_id = models.CharField(max_length=128, blank=True, default='')
     error_message = models.TextField(blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

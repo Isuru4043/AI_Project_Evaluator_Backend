@@ -15,6 +15,7 @@ from .views import (
     StudentRegisterView,
     UserProfileView,
 )
+from .views_face import FacePhotoView
 
 app_name = 'authentication'
 
@@ -32,4 +33,7 @@ urlpatterns = [
 
     # Current user profile
     path('me/', UserProfileView.as_view(), name='user-profile'),
+
+    # Face enrollment photo (students; used for group-viva speaker identity)
+    path('me/face-photo/', FacePhotoView.as_view(), name='face-photo'),
 ]
