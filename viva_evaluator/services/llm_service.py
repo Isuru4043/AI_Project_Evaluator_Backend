@@ -6,7 +6,7 @@ DESIGN GOAL:
     When we swap providers (Gemini → OpenAI/Claude/local), only this file changes.
     Agent code stays untouched.
 
-CURRENT BACKEND: Gemini Developer API via Google AI Studio (google-genai SDK)
+CURRENT BACKEND: Vertex AI Gemini via the google-genai SDK
 """
 
 import json
@@ -17,6 +17,8 @@ import time
 from typing import Any, Optional
 
 from django.conf import settings
+
+from AI_Evaluator_Backend.llm import get_llm
 
 logger = logging.getLogger(__name__)
 
@@ -72,18 +74,11 @@ MODEL_REGISTRY = {
 
 
 # =============================================================================
-# Lazy-loaded client — avoid initialization cost at import time.
+# Shared client — initialized lazily and cached by AI_Evaluator_Backend.llm.
 # =============================================================================
 
-_client = None
-
-
 def _get_client():
-    global _client
-    if _client is None:
-        from google import genai
-        _client = genai.Client(api_key=settings.GEMINI_API_KEY)
-    return _client
+    return get_llm()
 
 
 # =============================================================================

@@ -243,13 +243,35 @@ MEDIA_ROOT = BASE_DIR / 'media'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # =============================================================================
-# Gemini Developer API (Google AI Studio API-key authentication)
+# Vertex AI Gemini (service-account / ADC authentication)
 # =============================================================================
 
-# Keep the key in the environment. It is passed explicitly to google-genai so
-# the SDK uses the Gemini Developer API instead of Vertex AI.
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '').strip()
-GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-3.5-flash')
+GOOGLE_CLOUD_PROJECT = os.getenv('GOOGLE_CLOUD_PROJECT', '').strip()
+GOOGLE_CLOUD_LOCATION = os.getenv('GOOGLE_CLOUD_LOCATION', 'global').strip()
+GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-3.1-flash-lite').strip()
+
+# Resolve relative credential paths from the repository root so authentication
+# works consistently under manage.py, Gunicorn, background workers, and scripts.
+GOOGLE_APPLICATION_CREDENTIALS = os.getenv(
+    'GOOGLE_APPLICATION_CREDENTIALS',
+    '',
+).strip()
+
+if GOOGLE_APPLICATION_CREDENTIALS:
+    _google_credentials_path = Path(GOOGLE_APPLICATION_CREDENTIALS).expanduser()
+    if not _google_credentials_path.is_absolute():
+        _google_credentials_path = BASE_DIR / _google_credentials_path
+    _google_credentials_path = _google_credentials_path.resolve()
+
+    if not _google_credentials_path.is_file():
+        from django.core.exceptions import ImproperlyConfigured
+        raise ImproperlyConfigured(
+            'GOOGLE_APPLICATION_CREDENTIALS points to a file that does not exist: '
+            f'{_google_credentials_path}'
+        )
+
+    GOOGLE_APPLICATION_CREDENTIALS = str(_google_credentials_path)
+    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = GOOGLE_APPLICATION_CREDENTIALS
 
 GROQ_API_KEY = ''
 # =============================================================================

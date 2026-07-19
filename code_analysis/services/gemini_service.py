@@ -1,6 +1,7 @@
 import json
 from django.conf import settings
-from google import genai
+
+from AI_Evaluator_Backend.llm import get_llm
 
 
 class GeminiService:
@@ -11,9 +12,9 @@ class GeminiService:
         import logging
         _logger = logging.getLogger(__name__)
         try:
-            self._client = genai.Client(api_key=settings.GEMINI_API_KEY)
+            self._client = get_llm()
         except Exception as exc:
-            _logger.error("Failed to initialize Gemini Developer API client: %s", exc)
+            _logger.error("Failed to initialize Vertex AI Gemini client: %s", exc)
             raise
 
     def is_enabled(self):

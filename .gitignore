@@ -7,6 +7,6 @@ db.sqlite3
 create_dummy_session.py
 pyrefly.toml
 cv_recordings/
-secrets/
+credentials/
 *service-account*.json
 google-service-account.json
