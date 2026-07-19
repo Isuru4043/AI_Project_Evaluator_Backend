@@ -1,14 +1,11 @@
 import json
 import logging
 
-from google import genai
 from django.conf import settings
 
-client = genai.Client(
-    vertexai=True,
-    project=settings.GOOGLE_CLOUD_PROJECT,
-    location=settings.GOOGLE_CLOUD_LOCATION,
-)
+from AI_Evaluator_Backend.llm import get_llm
+
+
 MODEL = settings.GEMINI_MODEL
 logger = logging.getLogger(__name__)
 
@@ -210,7 +207,7 @@ Respond in this exact JSON format with no extra text or markdown:
 """
 
     try:
-        response = client.models.generate_content(
+        response = get_llm().models.generate_content(
             model=MODEL,
             contents=prompt,
         )

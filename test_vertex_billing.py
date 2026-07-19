@@ -3,34 +3,39 @@ r"""
 Vertex AI billing verification script.
 
 Generates synthetic input (~30 000 tokens), sends 3 sequential requests via
-standard Vertex AI ADC, and reports exact token usage with an estimated cost.
+the centralized Vertex AI client, and reports token usage with an estimated cost.
 
 Prerequisites:
     pip install google-genai google-auth
 
 Usage (PowerShell):
-    $env:GOOGLE_APPLICATION_CREDENTIALS = (Resolve-Path ".\secrets\google-service-account.json").Path
-    $env:GOOGLE_CLOUD_PROJECT   = "geminikeyaccess"
-    $env:GOOGLE_CLOUD_LOCATION  = "global"
-    $env:GEMINI_MODEL           = "gemini-3.5-flash"
+    $env:GOOGLE_APPLICATION_CREDENTIALS = "credentials/google-service-account.json"
+    $env:GOOGLE_CLOUD_PROJECT    = "geminikeyaccess"
+    $env:GOOGLE_CLOUD_LOCATION   = "global"
+    $env:GEMINI_MODEL            = "gemini-3.1-flash-lite"
     $env:RUN_VERTEX_BILLING_TEST = "YES"
     python test_vertex_billing.py
 
 Usage (bash / zsh):
-    export GOOGLE_APPLICATION_CREDENTIALS=secrets/google-service-account.json
+    export GOOGLE_APPLICATION_CREDENTIALS=credentials/google-service-account.json
     export GOOGLE_CLOUD_PROJECT=geminikeyaccess
     export GOOGLE_CLOUD_LOCATION=global
-    export GEMINI_MODEL=gemini-3.5-flash
+    export GEMINI_MODEL=gemini-3.1-flash-lite
     export RUN_VERTEX_BILLING_TEST=YES
     python test_vertex_billing.py
 
-Never prints: credential contents, private keys, access tokens, or full
-credential paths.
+Never prints credential contents, private keys, access tokens, or full paths.
 """
 
 import os
 import sys
 import time
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -105,10 +110,10 @@ def main() -> None:
         sys.exit(0)
 
     # ── validate environment ─────────────────────────────────────────────
-    creds_path = _require_env("GOOGLE_APPLICATION_CREDENTIALS")
+    credentials_path = _require_env("GOOGLE_APPLICATION_CREDENTIALS")
     project_id = _require_env("GOOGLE_CLOUD_PROJECT")
-    location = _require_env("GOOGLE_CLOUD_LOCATION")
-    model = _env("GEMINI_MODEL", "gemini-3.5-flash")
+    location = _env("GOOGLE_CLOUD_LOCATION", "global")
+    model = _env("GEMINI_MODEL", "gemini-3.1-flash-lite")
 
     input_price = float(_env("VERTEX_INPUT_PRICE_PER_MILLION", "1.50"))
     output_price = float(_env("VERTEX_OUTPUT_PRICE_PER_MILLION", "9.00"))
@@ -120,7 +125,7 @@ def main() -> None:
     print(f"  Project        : {project_id}")
     print(f"  Location       : {location}")
     print(f"  Model          : {model}")
-    print(f"  Credentials    : {'configured' if creds_path else 'not set'}")
+    print(f"  Credentials    : {'configured' if credentials_path else 'not set'}")
     print(f"  Requests       : {num_requests}")
     print(f"  Input $/1M     : ${input_price:.2f}")
     print(f"  Output $/1M    : ${output_price:.2f}")
@@ -144,18 +149,21 @@ def main() -> None:
 
     # ── initialise client ────────────────────────────────────────────────
     try:
-        from google import genai
+        os.environ.setdefault(
+            "DJANGO_SETTINGS_MODULE",
+            "AI_Evaluator_Backend.settings",
+        )
+        import django
+        django.setup()
+
+        from AI_Evaluator_Backend.llm import get_llm
         from google.genai import types
     except ImportError:
         print("ERROR: google-genai is not installed. Run: pip install google-genai")
         sys.exit(1)
 
     try:
-        client = genai.Client(
-            vertexai=True,
-            project=project_id,
-            location=location,
-        )
+        client = get_llm()
         print("  Client         : initialised ✓")
     except Exception as exc:
         print(f"  Client         : FAILED — {type(exc).__name__}: {exc}")

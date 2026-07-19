@@ -1,8 +1,7 @@
 import json
-import os
-
 from django.conf import settings
-from google import genai
+
+from AI_Evaluator_Backend.llm import get_llm
 
 
 class GeminiService:
@@ -13,13 +12,9 @@ class GeminiService:
         import logging
         _logger = logging.getLogger(__name__)
         try:
-            self._client = genai.Client(
-                vertexai=True,
-                project=settings.GOOGLE_CLOUD_PROJECT,
-                location=settings.GOOGLE_CLOUD_LOCATION,
-            )
+            self._client = get_llm()
         except Exception as exc:
-            _logger.error("Failed to initialize Vertex AI client: %s", exc)
+            _logger.error("Failed to initialize Vertex AI Gemini client: %s", exc)
             raise
 
     def is_enabled(self):
@@ -74,4 +69,3 @@ def _parse_questions(raw_text):
         return json.loads(raw_text[start : end + 1])
     except (ValueError, json.JSONDecodeError):
         return []
-
