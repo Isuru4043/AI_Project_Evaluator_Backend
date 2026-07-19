@@ -6,6 +6,7 @@ from datetime import timedelta
 
 
 from dotenv import load_dotenv
+from core.services.google_auth import configure_google_credentials
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -13,7 +14,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Load environment variables from .env if present.
 load_dotenv(BASE_DIR / '.env')
 
-
+configure_google_credentials()
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = 'django-insecure-2ll$i@i3@(g&rj&nlg@8+)=7dd^bw-^@vd6=$71k!7z_jlpurs'
 # SECURITY WARNING: don't run with debug turned on in production!
