@@ -2,11 +2,7 @@ import json
 from google import genai
 from django.conf import settings
 
-client = genai.Client(
-    vertexai=True,
-    project=settings.GOOGLE_CLOUD_PROJECT,
-    location=settings.GOOGLE_CLOUD_LOCATION,
-)
+client = genai.Client(api_key=settings.GEMINI_API_KEY)
 MODEL = settings.GEMINI_MODEL
 
 

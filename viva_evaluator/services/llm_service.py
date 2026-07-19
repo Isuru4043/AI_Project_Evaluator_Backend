@@ -6,7 +6,7 @@ DESIGN GOAL:
     When we swap providers (Gemini → OpenAI/Claude/local), only this file changes.
     Agent code stays untouched.
 
-CURRENT BACKEND: Google Gemini (google-genai SDK)
+CURRENT BACKEND: Gemini Developer API via Google AI Studio (google-genai SDK)
 """
 
 import json
@@ -82,11 +82,7 @@ def _get_client():
     global _client
     if _client is None:
         from google import genai
-        _client = genai.Client(
-            vertexai=True,
-            project=settings.GOOGLE_CLOUD_PROJECT,
-            location=settings.GOOGLE_CLOUD_LOCATION,
-        )
+        _client = genai.Client(api_key=settings.GEMINI_API_KEY)
     return _client
 
 

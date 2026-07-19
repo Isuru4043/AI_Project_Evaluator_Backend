@@ -1,31 +1,26 @@
 #!/usr/bin/env python
 r"""
-Vertex AI billing verification script.
+Gemini Developer API billing verification script.
 
 Generates synthetic input (~30 000 tokens), sends 3 sequential requests via
-standard Vertex AI ADC, and reports exact token usage with an estimated cost.
+the Google AI Studio API key, and reports token usage with an estimated cost.
 
 Prerequisites:
     pip install google-genai google-auth
 
 Usage (PowerShell):
-    $env:GOOGLE_APPLICATION_CREDENTIALS = (Resolve-Path ".\secrets\google-service-account.json").Path
-    $env:GOOGLE_CLOUD_PROJECT   = "geminikeyaccess"
-    $env:GOOGLE_CLOUD_LOCATION  = "global"
-    $env:GEMINI_MODEL           = "gemini-3.5-flash"
-    $env:RUN_VERTEX_BILLING_TEST = "YES"
-    python test_vertex_billing.py
+    $env:GEMINI_API_KEY          = "your_google_ai_studio_api_key"
+    $env:GEMINI_MODEL            = "gemini-3.5-flash"
+    $env:RUN_GEMINI_BILLING_TEST = "YES"
+    python test_gemini_billing.py
 
 Usage (bash / zsh):
-    export GOOGLE_APPLICATION_CREDENTIALS=secrets/google-service-account.json
-    export GOOGLE_CLOUD_PROJECT=geminikeyaccess
-    export GOOGLE_CLOUD_LOCATION=global
+    export GEMINI_API_KEY=your_google_ai_studio_api_key
     export GEMINI_MODEL=gemini-3.5-flash
-    export RUN_VERTEX_BILLING_TEST=YES
-    python test_vertex_billing.py
+    export RUN_GEMINI_BILLING_TEST=YES
+    python test_gemini_billing.py
 
-Never prints: credential contents, private keys, access tokens, or full
-credential paths.
+Never prints the API key.
 """
 
 import os
@@ -90,37 +85,33 @@ def build_synthetic_input(target_chars: int = 120_000) -> str:
 
 def main() -> None:
     # ── confirmation guard ───────────────────────────────────────────────
-    guard = _env("RUN_VERTEX_BILLING_TEST", "")
+    guard = _env("RUN_GEMINI_BILLING_TEST", "")
     if guard != "YES":
         print("=" * 70)
-        print("VERTEX AI BILLING TEST — NOT EXECUTED")
+        print("GEMINI API BILLING TEST — NOT EXECUTED")
         print("=" * 70)
         print()
-        print("This script makes BILLABLE Vertex AI requests.")
+        print("This script makes BILLABLE Gemini Developer API requests.")
         print("To confirm you want to proceed, set:")
         print()
-        print("    RUN_VERTEX_BILLING_TEST=YES")
+        print("    RUN_GEMINI_BILLING_TEST=YES")
         print()
         print("The estimated cost for a default run is well below US$1.")
         sys.exit(0)
 
     # ── validate environment ─────────────────────────────────────────────
-    creds_path = _require_env("GOOGLE_APPLICATION_CREDENTIALS")
-    project_id = _require_env("GOOGLE_CLOUD_PROJECT")
-    location = _require_env("GOOGLE_CLOUD_LOCATION")
+    api_key = _require_env("GEMINI_API_KEY")
     model = _env("GEMINI_MODEL", "gemini-3.5-flash")
 
-    input_price = float(_env("VERTEX_INPUT_PRICE_PER_MILLION", "1.50"))
-    output_price = float(_env("VERTEX_OUTPUT_PRICE_PER_MILLION", "9.00"))
+    input_price = float(_env("GEMINI_INPUT_PRICE_PER_MILLION", "1.50"))
+    output_price = float(_env("GEMINI_OUTPUT_PRICE_PER_MILLION", "9.00"))
     num_requests = 3
 
     print("=" * 70)
-    print("VERTEX AI BILLING VERIFICATION")
+    print("GEMINI API BILLING VERIFICATION")
     print("=" * 70)
-    print(f"  Project        : {project_id}")
-    print(f"  Location       : {location}")
     print(f"  Model          : {model}")
-    print(f"  Credentials    : {'configured' if creds_path else 'not set'}")
+    print("  API key        : configured")
     print(f"  Requests       : {num_requests}")
     print(f"  Input $/1M     : ${input_price:.2f}")
     print(f"  Output $/1M    : ${output_price:.2f}")
@@ -151,11 +142,7 @@ def main() -> None:
         sys.exit(1)
 
     try:
-        client = genai.Client(
-            vertexai=True,
-            project=project_id,
-            location=location,
-        )
+        client = genai.Client(api_key=api_key)
         print("  Client         : initialised ✓")
     except Exception as exc:
         print(f"  Client         : FAILED — {type(exc).__name__}: {exc}")
@@ -236,7 +223,7 @@ def main() -> None:
             if "401" in err_text or "403" in err_text:
                 category = "Authentication / IAM / API not enabled"
             elif "404" in err_text:
-                category = "Model or location not found"
+                category = "Model not found"
             elif "429" in err_text or "quota" in err_text or "resource_exhausted" in err_text:
                 category = "Quota / rate limit / capacity"
             else:
@@ -274,9 +261,9 @@ def main() -> None:
     print(f"  Total estimated cost : ${estimated_cost:.6f}")
     print()
     print("  ⚠  This is an ESTIMATE based on list prices you provided.")
-    print("     Actual charges depend on your billing agreement, committed-")
-    print("     use discounts, and the pricing tier of your project.")
-    print("     Check the Google Cloud Billing console for official costs.")
+    print("     Actual charges depend on the pricing tier and billing account")
+    print("     associated with the Google AI Studio API key.")
+    print("     Check Google's billing console for official costs.")
     print()
     print("Done.")
 
