@@ -86,9 +86,10 @@ def retrieve_for_turn(
         return dense_hits[:top_k]
 
     # 4. Cross-encoder rerank the fused candidates → final top_k
+    # Skip reranking for small submissions (<=10 chunks) to eliminate CPU overhead
     try:
         from viva_evaluator.services.rag.rerank import rerank_chunks, reranker_enabled
-        if reranker_enabled():
+        if reranker_enabled() and len(fused) > 10:
             return rerank_chunks(query, fused[:candidate_k], top_k)
     except Exception as exc:
         logger.warning('retrieve_for_turn: rerank stage failed (%s); fused order.', exc)
