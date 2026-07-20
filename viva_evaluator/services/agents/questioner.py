@@ -138,7 +138,16 @@ def generate_anchored_question(
     critic_data = None
     critic_ran = False
 
-    if enable_critic and result.passed and question_text:
+    # Optimization: if Tier 1 passed with high confidence (spoken length 18-45 words, low similarity),
+    # skip Critic LLM call to save ~1.4s latency.
+    is_high_confidence_tier1 = (
+        result.passed
+        and 18 <= result.word_count <= 45
+        and result.similarity_to_recent < 0.65
+        and not inp.clarify_mode
+    )
+
+    if enable_critic and result.passed and question_text and not is_high_confidence_tier1:
         critic_ran = True
         critic_passed, critic_critique, attempts, response, question_text, result, critic_data = (
             _run_critic_loop(
@@ -200,9 +209,9 @@ HARD RULES — your question MUST follow ALL of these:
    Instead, refer to the CONTENT itself: "you described your encryption
    approach", "in your threat model", "your zero trust design".
 
-3. KEEP IT SHORT AND SPOKEN. Target length: 20-40 words. Maximum 60.
+3. KEEP IT SHORT AND SPOKEN. Target length: 15-25 words. Maximum 35.
    This is an ORAL exam — the student must hold the entire question in
-   their head. Long, written-style questions are bad. Examples:
+   their head in ONE breath. Ask the core question directly in 1 short sentence. Examples:
        BAD  (too long, written-style):
          "Considering your Zero Trust goal and the problem of compromised
           servers, how complete and architecturally sound is this single
@@ -217,31 +226,41 @@ HARD RULES — your question MUST follow ALL of these:
    idea in plain words instead of pasting their wording back at them.
    At most quote 3-5 words, not full sentences.
 
-5. PLAIN LANGUAGE. Phrase it as a real examiner SPEAKS aloud, not as
-   they would write in a paper. The student is a final-year CS student
-   so technical terms from THEIR project are fine ("encryption",
-   "authentication", "API"). What you must avoid is academic register
-   in the question itself.
+5. PLAIN CONVERSATIONAL LANGUAGE. Phrase it as a real examiner SPEAKS aloud across a coffee table.
+   The student is a final-year CS student, so technical terms from THEIR project are fine ("encryption",
+   "authentication", "API"). What you MUST avoid is academic paper register in the question itself.
 
-   THE READ-ALOUD TEST: Imagine asking the question across a table while
-   drinking coffee. If it sounds stiff, rewrite it.
+   THE READ-ALOUD TEST: Imagine asking the question across a table while drinking coffee.
+   If it sounds stiff or requires re-reading to understand, IT IS TOO COMPLEX. Rewrite it into plain English.
 
-       AVOID (stiff/written):              PREFER (spoken/natural):
-         "exfiltrate"                        "steal" / "leak" / "take"
-         "mitigate"                          "reduce" / "handle" / "fix"
-         "ascertain"                         "check" / "figure out"
-         "elucidate"                         "explain" / "walk through"
-         "ramifications"                     "effects" / "consequences"
-         "architecturally sound"             "good design" / "the right call"
-         "in totality"                       "overall"
-         "vis-à-vis"                         "compared to" / "against"
-         "considering the implications of"   "given" / "with"
-         "particularly those involving"      "especially when"
-         "as it pertains to"                 "for"
-         "in the context of"                 "for" / "when"
+       BANNED STIFF PHRASES (DO NOT USE):         PREFER CONVERSATIONAL PLAIN WORDS:
+         "facilitating the exchange"               "sharing files" / "sending data"
+         "remains untrusted"                       "stays out of the loop" / "can't read it"
+         "lifecycle of a file"                     "when a file is uploaded"
+         "scrambled ciphertext"                    "encrypted files"
+         "exfiltrate"                              "steal" / "leak" / "take"
+         "mitigate"                                "reduce" / "handle" / "fix"
+         "ascertain"                               "check" / "figure out"
+         "elucidate"                               "explain" / "walk through"
+         "ramifications"                            "effects" / "consequences"
+         "architecturally sound"                    "good design" / "the right call"
+         "in totality"                              "overall"
+         "vis-à-vis"                                "compared to" / "against"
+         "considering the implications of"          "given" / "with"
+         "particularly those involving"             "especially when"
+         "as it pertains to"                        "for"
+         "in the context of"                        "for" / "when"
 
-   General rule: a 1-syllable verb beats a 4-syllable verb when both
-   carry the same meaning.
+       FEW-SHOT EXAMPLES:
+         BAD (Stiff / Paper-style):
+           "You described a system where the server only handles scrambled ciphertext. Could you
+            walk me through the lifecycle of a file to explain how the server remains untrusted
+            while still facilitating the exchange?"
+         GOOD (Conversational / Spoken):
+           "You mentioned the server only receives encrypted files — walk me through how a user
+            uploads a file without the server reading its content?"
+
+   General rule: a 1-syllable verb beats a 4-syllable verb when both carry the same meaning.
 
 6. PUNCTUATION: end with exactly one '?'. No compound questions.
 

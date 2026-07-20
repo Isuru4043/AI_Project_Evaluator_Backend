@@ -174,6 +174,8 @@ class LoginView(APIView):
                     'success': True,
                     'message': 'Login successful.',
                     'data': {
+                        'access': str(access),
+                        'refresh': str(refresh),
                         'user': {
                             'id': str(user.id),
                             'full_name': user.full_name,

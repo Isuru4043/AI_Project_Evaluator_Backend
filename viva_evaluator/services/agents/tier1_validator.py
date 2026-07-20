@@ -29,7 +29,7 @@ MAX_QUESTION_MARKS = 1
 SIMILARITY_THRESHOLD = 0.82
 
 ANCHOR_PATTERNS = [
-    # Direct references to student's words/work
+    # Direct references to student's words/work/choices
     r'\byou mentioned\b',
     r'\byou said\b',
     r'\byou described\b',
@@ -37,6 +37,7 @@ ANCHOR_PATTERNS = [
     r'\byou explained\b',
     r'\byou stated\b',
     r'\byou (?:claim|claimed|argue|argued|note|noted)\b',
+    r'\byou (?:chose|choose|chosen|used|use|using|selected|select|implemented|implement|decided|decide|built|build|created|create)\b',
 
     # References to student's report/document/work
     r'\bin your\b',                # "in your section / report / methodology / code"
