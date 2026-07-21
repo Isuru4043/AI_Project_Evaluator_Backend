@@ -6,7 +6,7 @@ DESIGN GOAL:
     When we swap providers (Gemini → OpenAI/Claude/local), only this file changes.
     Agent code stays untouched.
 
-CURRENT BACKEND: Google Gemini (google-genai SDK)
+CURRENT BACKEND: Vertex AI Gemini via the google-genai SDK
 """
 
 import json
@@ -17,6 +17,8 @@ import time
 from typing import Any, Optional
 
 from django.conf import settings
+
+from AI_Evaluator_Backend.llm import get_llm
 
 logger = logging.getLogger(__name__)
 
@@ -72,22 +74,11 @@ MODEL_REGISTRY = {
 
 
 # =============================================================================
-# Lazy-loaded client — avoid initialization cost at import time.
+# Shared client — initialized lazily and cached by AI_Evaluator_Backend.llm.
 # =============================================================================
 
-_client = None
-
-
 def _get_client():
-    global _client
-    if _client is None:
-        from google import genai
-        _client = genai.Client(
-            vertexai=True,
-            project=settings.GOOGLE_CLOUD_PROJECT,
-            location=settings.GOOGLE_CLOUD_LOCATION,
-        )
-    return _client
+    return get_llm()
 
 
 # =============================================================================
@@ -139,9 +130,6 @@ def llm_call_with_image(
 ) -> Any:
     """
     Multimodal call — same contract as llm_call, but with one image attached.
-
-    Used by the image captioner during indexing. Gemini handles the vision
-    part natively; if you swap providers later, only this function changes.
     """
     return _llm_call_internal(
         prompt=prompt,
@@ -151,6 +139,30 @@ def llm_call_with_image(
         fallback=fallback,
         image_bytes=image_bytes,
         image_mime=image_mime,
+    )
+
+
+def llm_call_with_media(
+    prompt: str,
+    media_bytes: bytes,
+    mime_type: str = 'image/png',
+    model: str = 'default',
+    expect_json: bool = False,
+    max_retries: int = 2,
+    fallback: Optional[Any] = None,
+) -> Any:
+    """
+    Multimodal call — accepts any image or audio bytes (e.g. audio/webm, audio/mp3, image/png)
+    and processes them using Google GenAI SDK.
+    """
+    return _llm_call_internal(
+        prompt=prompt,
+        model=model,
+        expect_json=expect_json,
+        max_retries=max_retries,
+        fallback=fallback,
+        image_bytes=media_bytes,
+        image_mime=mime_type,
     )
 
 
