@@ -136,6 +136,16 @@ class CodeAnalysisService:
 
     def refresh_submission(self, code_submission_id):
         submission = CodeSubmission.objects.get(id=code_submission_id)
+
+        # If the analysis pipeline hasn't started yet (or is still fetching/
+        # cloning the repo), there's no Sonar project key to query. Bail out
+        # early instead of calling SonarCloud with component=None.
+        if submission.analysis_status in (
+            CodeSubmission.AnalysisStatus.PENDING,
+            CodeSubmission.AnalysisStatus.FETCHING,
+        ) or not submission.sonar_project_key:
+            return submission
+
         needs_summary_refresh = _summary_needs_refresh(submission.sonar_summary)
         needs_report = submission.sonar_summary and not submission.final_report
 
@@ -363,12 +373,19 @@ def run_build_command(command, repo_path):
     if not command:
         return
 
-    subprocess.run(
-        command,
-        cwd=repo_path,
-        shell=True,
-        check=True,
-    )
+    build_timeout = int(os.getenv("CODE_ANALYSIS_BUILD_TIMEOUT", "300"))
+    try:
+        subprocess.run(
+            command,
+            cwd=repo_path,
+            shell=True,
+            check=True,
+            timeout=build_timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"Build command timed out after {build_timeout}s: {command}"
+        ) from exc
 
 
 def _scanner_extra_args():
@@ -508,5 +525,3 @@ def read_sonar_task_id(repo_path):
             return line.split("=", 1)[-1].strip()
 
     return None
-
-

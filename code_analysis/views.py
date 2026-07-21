@@ -145,6 +145,12 @@ class CodeSubmissionReportView(APIView):
         except CodeSubmission.DoesNotExist:
             return Response({"error": "Submission not found."}, status=404)
 
+        # Poll SonarCloud task status, compute quality, and generate the
+        # final AI report if it isn't ready yet. Without this call, the
+        # submission can stay stuck at SCANNING forever since nothing else
+        # advances it to COMPLETED.
+        submission = CodeAnalysisService().refresh_submission(code_submission_id)
+
         if not submission.final_report:
             return Response({"error": "Report not yet generated."}, status=400)
 
