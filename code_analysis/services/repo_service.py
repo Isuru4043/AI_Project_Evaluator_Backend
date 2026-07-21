@@ -45,15 +45,27 @@ EXCLUDED_DIRS = {
 }
 
 
-def clone_repo(repo_url):
+def clone_repo(repo_url, timeout_seconds=None):
+    if timeout_seconds is None:
+        timeout_seconds = int(os.getenv("CODE_ANALYSIS_CLONE_TIMEOUT", "120"))
     temp_dir = tempfile.mkdtemp(prefix="code_repo_")
     git_bin = os.getenv("GIT_BIN", "git")
-    subprocess.run(
-        [git_bin, "clone", "--depth", "1", repo_url, temp_dir],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    try:
+        subprocess.run(
+            [git_bin, "clone", "--depth", "1", repo_url, temp_dir],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"git clone timed out after {timeout_seconds}s. The repo may be "
+            f"private or unreachable (GIT_TERMINAL_PROMPT is disabled, so a "
+            f"credential prompt would otherwise hang forever)."
+        ) from exc
     return temp_dir
 
 
