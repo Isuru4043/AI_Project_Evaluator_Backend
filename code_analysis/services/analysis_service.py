@@ -159,29 +159,48 @@ class CodeAnalysisService:
         if submission.analysis_status == CodeSubmission.AnalysisStatus.SCANNING and not submission.sonar_task_id:
             return submission
 
-        if submission.analysis_status == CodeSubmission.AnalysisStatus.SCANNING:
-            task = self.sonar.get_task_status(submission.sonar_task_id)
-            task_status = task.get("status")
-            if task_status in ("PENDING", "IN_PROGRESS"):
-                return submission
-
-            if task_status != "SUCCESS":
-                submission.analysis_status = CodeSubmission.AnalysisStatus.FAILED
-                submission.analysis_error = f"SonarCloud task {task_status}"
-                submission.save(update_fields=["analysis_status", "analysis_error"])
-                return submission
-
         try:
-            submission.sonar_summary = self.sonar.get_summary(submission.sonar_project_key)
-        except HTTPError as exc:
-            response = getattr(exc, "response", None)
-            if response is not None and response.status_code == 404:
-                submission.sonar_summary = {}
-                submission.quality_status = CodeSubmission.QualityStatus.UNKNOWN
-                submission.quality_reason = "SonarCloud metrics not yet available; retry later."
-            else:
+            if submission.analysis_status == CodeSubmission.AnalysisStatus.SCANNING:
+                try:
+                    task = self.sonar.get_task_status(submission.sonar_task_id)
+                except Exception as exc:
+                    # SonarCloud can take a moment to register the CE task
+                    # right after the scanner finishes. Treat a transient
+                    # error here as "not ready yet" and retry on the next
+                    # poll, rather than permanently failing the submission.
+                    logger.warning(
+                        "Transient error checking Sonar task status for submission %s (will retry): %s",
+                        submission.id, exc,
+                    )
+                    return submission
+
+                task_status = task.get("status")
+                if task_status in ("PENDING", "IN_PROGRESS"):
+                    return submission
+
+                if task_status != "SUCCESS":
+                    error_detail = task.get("errorMessage") or "no additional details from SonarCloud"
+                    submission.analysis_status = CodeSubmission.AnalysisStatus.FAILED
+                    submission.analysis_error = f"SonarCloud task {task_status}: {error_detail}"
+                    submission.save(update_fields=["analysis_status", "analysis_error"])
+                    return submission
+
+            try:
+                submission.sonar_summary = self.sonar.get_summary(submission.sonar_project_key)
+            except HTTPError as exc:
+                response = getattr(exc, "response", None)
+                if response is not None and response.status_code == 404:
+                    # Metrics genuinely aren't computed yet on SonarCloud's
+                    # side. This is transient, not a failure - stay in
+                    # SCANNING so the next poll retries, instead of
+                    # silently finalizing with an empty report.
+                    logger.info(
+                        "SonarCloud metrics not yet available for submission %s (404); will retry.",
+                        submission.id,
+                    )
+                    return submission
                 raise
-        else:
+
             submission.analyzed_at = timezone.now()
             quality_status, quality_reason = compute_quality_status(submission.sonar_summary)
             submission.quality_status = quality_status
@@ -202,29 +221,30 @@ class CodeAnalysisService:
                         submission.id, exc, exc_info=True,
                     )
 
-        if submission.analysis_status == CodeSubmission.AnalysisStatus.COMPLETED:
+            submission.analysis_status = CodeSubmission.AnalysisStatus.COMPLETED
             submission.save(update_fields=[
                 "sonar_summary",
                 "analyzed_at",
                 "quality_status",
                 "quality_reason",
-                "final_report",           
-                "report_generated_at", 
+                "analysis_status",
+                "final_report",
+                "report_generated_at",
             ])
             return submission
 
-        submission.analysis_status = CodeSubmission.AnalysisStatus.COMPLETED
-        submission.save(update_fields=[
-            "sonar_summary",
-            "analyzed_at",
-            "quality_status",
-            "quality_reason",
-            "analysis_status",
-            "final_report",           
-            "report_generated_at",  
-        ])
-
-        return submission
+        except Exception as exc:
+            # Never let a SonarCloud/report-generation error crash the
+            # request as an unhandled 500. Record it cleanly so the
+            # frontend shows "Analysis Failed" with a real reason instead.
+            logger.error(
+                "refresh_submission failed for submission %s: %s",
+                submission.id, exc, exc_info=True,
+            )
+            submission.analysis_status = CodeSubmission.AnalysisStatus.FAILED
+            submission.analysis_error = str(exc)
+            submission.save(update_fields=["analysis_status", "analysis_error"])
+            return submission
 
     def _prepare_repo(self, submission):
         if submission.source_type == CodeSubmission.SourceType.GITHUB:
