@@ -147,18 +147,25 @@ def _aggregate_per_criterion(questions, rubric_meta: List[Dict]) -> List[Dict]:
     by_crit: Dict[str, Dict] = {}
 
     for q in questions:
-        try:
-            ext = q.extension
-            crit_id = str(ext.criteria_id) if ext.criteria_id else None
-        except Exception:
-            crit_id = None
-        if not crit_id:
+        crit_ids = []
+        if getattr(q, 'source_criteria_ids', None):
+            crit_ids = [str(x) for x in q.source_criteria_ids]
+        else:
+            try:
+                ext = getattr(q, 'extension', None)
+                if ext and ext.criteria_id:
+                    crit_ids.append(str(ext.criteria_id))
+            except Exception:
+                pass
+                
+        if not crit_ids:
             continue
 
-        slot = by_crit.setdefault(crit_id, {
-            'criterion_id':  crit_id,
-            'samples':       [],
-        })
+        for crit_id in crit_ids:
+            slot = by_crit.setdefault(crit_id, {
+                'criterion_id':  crit_id,
+                'samples':       [],
+            })
 
         answer = q.answers.order_by('-answered_at').first()
         if not answer:
@@ -179,11 +186,13 @@ def _aggregate_per_criterion(questions, rubric_meta: List[Dict]) -> List[Dict]:
         depth_est = max(0.0, min(1.0, soft * 0.95))
         consistency_est = max(0.0, min(1.0, 0.6 + soft * 0.4))
 
-        slot['samples'].append({
-            'correctness':  soft,
-            'depth':        depth_est,
-            'consistency':  consistency_est,
-        })
+        for crit_id in crit_ids:
+            slot = by_crit[crit_id]
+            slot['samples'].append({
+                'correctness':  soft,
+                'depth':        depth_est,
+                'consistency':  consistency_est,
+            })
 
     out: List[Dict] = []
     for meta in rubric_meta:
@@ -252,6 +261,11 @@ def _compute_overall_score(per_crit_data: List[Dict], rubric_meta: List[Dict]) -
     for cat_name, items in by_category.items():
         if not items:
             continue
+            
+        valid_items = [(entry, meta) for entry, meta in items if entry['samples'] > 0]
+        if not valid_items:
+            continue
+            
         cat_weight = float(items[0][1].get('category_weight_pct') or 0) / 100.0
         if cat_weight <= 0:
             continue
@@ -259,24 +273,30 @@ def _compute_overall_score(per_crit_data: List[Dict], rubric_meta: List[Dict]) -
         # Aggregate within-category
         within_weights = [
             float(meta.get('weight_in_category_pct') or 0)
-            for _, meta in items
+            for _, meta in valid_items
         ]
         within_sum = sum(within_weights)
         cat_score = 0.0
-        if within_sum > 99.0:  # the rubric specifies sensible weights
-            for (entry, meta), w in zip(items, within_weights):
-                cat_score += _per_criterion_soft(entry) * (w / 100.0)
+        
+        # We renormalize weights among the sampled criteria so that missing criteria
+        # don't implicitly drag down the score to zero.
+        if within_sum > 0:  
+            for (entry, _), w in zip(valid_items, within_weights):
+                cat_score += _per_criterion_soft(entry) * (w / within_sum)
         else:
-            n = len(items)
-            for entry, _ in items:
+            n = len(valid_items)
+            for entry, _ in valid_items:
                 cat_score += _per_criterion_soft(entry) / n
 
         total += cat_score * cat_weight
         weight_used += cat_weight
 
     if weight_used <= 0:
-        # Fallback: simple mean across all criteria
-        return sum(_per_criterion_soft(e) for e in per_crit_data) / max(len(per_crit_data), 1)
+        # Fallback: simple mean across all sampled criteria
+        valid_entries = [e for e in per_crit_data if e['samples'] > 0]
+        if not valid_entries:
+            return 0.0
+        return sum(_per_criterion_soft(e) for e in valid_entries) / len(valid_entries)
 
     return total / weight_used
 

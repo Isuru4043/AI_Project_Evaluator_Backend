@@ -105,9 +105,30 @@ def generate_anchored_question(
     )
     question_text = (response.get('question_text') or '').strip()
 
-    # ---- Tier 1 validation -------------------------------------------------
-    result = validate_question(question_text, recent_questions=inp.recent_questions)
-    attempts = 1
+    # ---- Tier 1 and Tier 2 (Critic) parallel execution ---------------------
+    import concurrent.futures
+    from viva_evaluator.services.agents.critic import critique_question, CriticInput
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        future_tier1 = executor.submit(validate_question, question_text, recent_questions=inp.recent_questions)
+
+        future_critic = None
+        if enable_critic:
+            critic_inp = CriticInput(
+                question_text=question_text,
+                target_bloom=blooms,
+                target_intent=_intent_label_from_kg(inp.kg_signals),
+                retrieved_chunks=inp.retrieved_chunks,
+                student_last_answer=inp.previous_answer,
+            )
+            future_critic = executor.submit(critique_question, critic_inp)
+
+        result = future_tier1.result()
+        attempts = 1
+
+        initial_critic_result = None
+        if future_critic:
+            initial_critic_result = future_critic.result()
 
     # One Tier 1 retry with failure reasons fed back into the prompt
     if not result.passed and max_retries > 0:
@@ -131,6 +152,7 @@ def generate_anchored_question(
             question_text = retry_text
             result = retry_result
             response = retry_response
+            initial_critic_result = None  # Invalidated since question text changed
 
     # ---- Tier 2 (Critic) — only if Tier 1 passed --------------------------
     critic_passed = True
@@ -148,6 +170,7 @@ def generate_anchored_question(
                 response=response,
                 tier1_result=result,
                 attempts=attempts,
+                initial_critic_result=initial_critic_result,
             )
         )
 
@@ -465,6 +488,7 @@ def _run_critic_loop(
     response: Dict,
     tier1_result: 'Tier1Result',
     attempts: int,
+    initial_critic_result: Optional[Dict] = None,
 ):
     """
     Run the Critic on the candidate question. On fail, regenerate with the
@@ -492,13 +516,16 @@ def _run_critic_loop(
     current_tier1 = tier1_result
 
     for attempt_idx in range(CRITIC_MAX_RETRIES + 1):
-        critic_result = critique_question(CriticInput(
-            question_text=current_text,
-            target_bloom=blooms,
-            target_intent=_intent_label_from_kg(inp.kg_signals),
-            retrieved_chunks=inp.retrieved_chunks,
-            student_last_answer=inp.previous_answer,
-        ))
+        if attempt_idx == 0 and initial_critic_result:
+            critic_result = initial_critic_result
+        else:
+            critic_result = critique_question(CriticInput(
+                question_text=current_text,
+                target_bloom=blooms,
+                target_intent=_intent_label_from_kg(inp.kg_signals),
+                retrieved_chunks=inp.retrieved_chunks,
+                student_last_answer=inp.previous_answer,
+            ))
 
         critic_score = (
             critic_result['specificity_score']

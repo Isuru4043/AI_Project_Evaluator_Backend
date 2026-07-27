@@ -470,6 +470,9 @@ class ManualScheduleSerializer(serializers.Serializer):
     sessions = ManualSessionEntrySerializer(many=True)
     # Whether the scheduled sessions include a demo/presentation phase.
     demo_enabled = serializers.BooleanField(required=False, default=False)
+    
+    # Adaptive Viva fields
+    max_total_questions = serializers.IntegerField(default=20, min_value=1)
 
 
 class DateRangeEntrySerializer(serializers.Serializer):
@@ -495,6 +498,9 @@ class AutoScheduleSerializer(serializers.Serializer):
     location_room = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
     # Whether the scheduled sessions include a demo/presentation phase.
     demo_enabled = serializers.BooleanField(required=False, default=False)
+
+    # Adaptive Viva fields
+    max_total_questions = serializers.IntegerField(default=20, min_value=1)
 
 
 # =============================================================================

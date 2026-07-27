@@ -28,7 +28,8 @@ from viva_evaluator.services.pipeline.termination import (
 from viva_evaluator.services.pipeline.turn_pipeline import (
     process_answer_and_pick_next,
     load_rubric,
-    pick_next_criterion,
+    pick_next_topic,
+    load_viva_topics,
 )
 
 __all__ = [
@@ -39,5 +40,6 @@ __all__ = [
     'TerminationDecision',
     'process_answer_and_pick_next',
     'load_rubric',
-    'pick_next_criterion',
+    'pick_next_topic',
+    'load_viva_topics',
 ]
