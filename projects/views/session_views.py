@@ -19,6 +19,7 @@ from projects.serializers import (
     ManualScheduleSerializer, SessionUpdateSerializer, RubricCategorySerializer,
 )
 from projects.views.project_views import _err, _get_examiner_profile, _get_student_profile, _is_assigned, _ok, _500
+from viva_evaluator.services.rubric_extractor import generate_viva_grouping
 
 
 class ManualScheduleView(APIView):
@@ -40,6 +41,14 @@ class ManualScheduleView(APIView):
                 return _err('Validation failed.', ser.errors)
 
             demo_enabled = ser.validated_data.get('demo_enabled', False)
+            max_total_questions = ser.validated_data.get('max_total_questions', 20)
+
+            # Generate or fetch adaptive viva grouping cache
+            try:
+                grouping_cache = generate_viva_grouping(project, max_total_questions)
+            except Exception as e:
+                return _err(f"Failed to generate viva grouping: {str(e)}")
+
             created = []
             with transaction.atomic():
                 for entry in ser.validated_data['sessions']:
@@ -61,6 +70,8 @@ class ManualScheduleView(APIView):
                             location_room=entry.get('location_room', ''),
                             status='scheduled',
                             demo_enabled=demo_enabled,
+                            max_total_questions=max_total_questions,
+                            grouping_cache=grouping_cache,
                         )
                         created.append(session)
                     else:
@@ -80,6 +91,8 @@ class ManualScheduleView(APIView):
                             status='scheduled',
                             agora_channel_name=f"group_{group.id}",
                             demo_enabled=demo_enabled,
+                            max_total_questions=max_total_questions,
+                            grouping_cache=grouping_cache,
                         )
                         created.append(session)
 
@@ -153,6 +166,14 @@ class AutoScheduleView(APIView):
                 )
 
             demo_enabled = ser.validated_data.get('demo_enabled', False)
+            max_total_questions = ser.validated_data.get('max_total_questions', 20)
+
+            # Generate or fetch adaptive viva grouping cache
+            try:
+                grouping_cache = generate_viva_grouping(project, max_total_questions)
+            except Exception as e:
+                return _err(f"Failed to generate viva grouping: {str(e)}")
+
             created = []
             with transaction.atomic():
                 slot_idx = 0
@@ -168,6 +189,8 @@ class AutoScheduleView(APIView):
                             scheduled_start=s_start, scheduled_end=s_end,
                             location_room=room, status='scheduled',
                             demo_enabled=demo_enabled,
+                            max_total_questions=max_total_questions,
+                            grouping_cache=grouping_cache,
                         )
                         created.append(session)
                     else:
@@ -177,6 +200,8 @@ class AutoScheduleView(APIView):
                             location_room=room, status='scheduled',
                             agora_channel_name=f"group_{entity.id}",
                             demo_enabled=demo_enabled,
+                            max_total_questions=max_total_questions,
+                            grouping_cache=grouping_cache,
                         )
                         created.append(session)
 

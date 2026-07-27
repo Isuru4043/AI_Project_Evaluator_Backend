@@ -147,19 +147,91 @@ def _parse_json_response(response_text: str) -> dict:
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError:
-        pass
+        return {
+            "error": "Could not parse rubric structure from document.",
+            "raw_response": text,
+        }
 
-    # Try extracting the largest JSON object
-    start = cleaned.find('{')
-    end = cleaned.rfind('}')
-    if start != -1 and end != -1 and end > start:
-        candidate = cleaned[start:end + 1]
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
-            pass
 
-    return {
-        "error": "Could not parse rubric structure from document.",
-        "raw_response": text[:500],
-    }
+def generate_viva_grouping(project, max_questions: int) -> dict:
+    """
+    Groups a project's rubric criteria into viva topics to fit within the `max_questions` budget.
+    Checks the RubricGroupingCache first. If missing, calls Gemini and saves to cache.
+    
+    Args:
+        project: The Project instance.
+        max_questions: The maximum total questions budget.
+        
+    Returns:
+        The RubricGroupingCache instance.
+    """
+    from core.models import RubricGroupingCache, RubricCriteria
+    
+    # 1. Check cache
+    cache = RubricGroupingCache.objects.filter(project=project, max_questions=max_questions).first()
+    if cache:
+        return cache
+        
+    # 2. Extract criteria info
+    criteria = RubricCriteria.objects.filter(category__project=project).select_related('category')
+    if not criteria.exists():
+        raise ValueError("Project has no rubric criteria.")
+        
+    criteria_list = []
+    for c in criteria:
+        criteria_list.append({
+            "id": str(c.id),
+            "name": c.criteria_name,
+            "category": c.category.category_name,
+            "weight_in_category": float(c.weight_in_category or 0),
+            "description": c.description,
+        })
+        
+    # 3. Call Gemini
+    prompt = f"""
+You are an academic system that structures viva (oral examination) sessions.
+
+Here are {len(criteria_list)} rubric criteria for project '{project.project_name}':
+{json.dumps(criteria_list, indent=2)}
+
+The viva session is limited to a MAXIMUM of {max_questions} total questions.
+TASK: Group these criteria into "Viva Topics" and intelligently distribute the {max_questions} budget.
+
+Rules:
+- Each topic should cover 1 to 4 semantically related criteria.
+- Topics should have a natural, open-ended viva question focus.
+- Distribute the suggested questions proportionally based on the criteria's combined weight or complexity.
+- IMPORTANT: The sum of `suggested_questions` across ALL topics MUST equal exactly {max_questions}.
+- Every criterion MUST be included in exactly one topic.
+
+Respond in this EXACT JSON format with no extra text or markdown:
+{{
+  "viva_topics": [
+    {{
+      "topic_name": "Topic Name",
+      "source_criteria_ids": ["uuid1", "uuid2"],
+      "combined_weight_pct": 15.5,
+      "suggested_questions": 2,
+      "topic_focus": "Description of what to ask about this topic"
+    }}
+  ]
+}}
+"""
+
+    response = get_llm().models.generate_content(
+        model=MODEL,
+        contents=prompt,
+    )
+    
+    grouped_data = _parse_json_response(response.text)
+    if "error" in grouped_data:
+        raise ValueError(f"Failed to group criteria: {grouped_data['error']}")
+        
+    # 4. Save to cache
+    cache = RubricGroupingCache.objects.create(
+        project=project,
+        max_questions=max_questions,
+        grouped_criteria=grouped_data
+    )
+    
+    return cache
