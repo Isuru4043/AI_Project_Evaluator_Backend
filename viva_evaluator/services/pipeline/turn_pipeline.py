@@ -344,30 +344,41 @@ def process_answer_and_pick_next(
     correctness = float((analysis.get('correctness') or {}).get('score', 0.5))
 
     # ------------------------------------------------------------------
-    # Step E — Pick next criterion + run Strategist (instant <0.01s)
+    # Step B.5 — Confidence Analysis (Instant, needed for Strategist)
     # ------------------------------------------------------------------
-    next_criterion = pick_next_criterion(rubric, state)
-    if next_criterion is None:
-        next_criterion = answered_criterion
+    confidence = analyze_speech_confidence(
+        answer_text=student_answer,
+        speech_metrics=speech_metrics,
+    )
+    _mark('B.5:confidence')
 
-    # Check if retrieval is needed for the next criterion
-    if str(next_criterion['id']) != str(answered_criterion['id']):
+    # ------------------------------------------------------------------
+    # Step E — Pick next topic + run Strategist (instant <0.01s)
+    # ------------------------------------------------------------------
+    next_topic = pick_next_topic(viva_topics, state, session)
+    if next_topic is None:
+        next_topic = answered_topic
+
+    # Check if retrieval is needed for the next topic
+    if next_topic['topic_name'] != answered_topic['topic_name']:
         retrieval_next = retrieve_hybrid_for_turn(
             submission=submission,
-            criterion_name=next_criterion['name'],
-            criterion_description=next_criterion['description'],
+            criterion_name=next_topic['topic_name'],
+            criterion_description=next_topic['topic_focus'],
             last_answer=student_answer,
             top_k=3,
         )
     else:
         retrieval_next = retrieval
 
+    first_crit_id = str(next_topic['source_criteria_ids'][0])
+
     strategy = select_strategy(StrategistInput(
-        p_lt=state.bkt_states[str(next_criterion['id'])].p_lt,
+        p_lt=state.bkt_states[first_crit_id].p_lt,
         analysis=analysis,
         kg_signals=retrieval_next,
         intent_history=state.intent_history,
-        speech_confidence=speech_metrics,
+        speech_confidence=confidence.get('flag'),
     ))
     _mark('E:strategist')
 
@@ -376,8 +387,8 @@ def process_answer_and_pick_next(
         state.intent_history = state.intent_history[-30:]
 
     next_difficulty = _bloom_to_difficulty(strategy['bloom_level'])
-    is_first_for_criterion = (
-        state.coverage[str(next_criterion['id'])].turns == 0
+    is_first_for_topic = (
+        state.coverage[first_crit_id].turns == 0
     )
 
     recent_qs = list(
@@ -410,17 +421,17 @@ def process_answer_and_pick_next(
         question_future = main_executor.submit(
             generate_anchored_question,
             QuestionerInput(
-                criterion_name=next_criterion['name'],
-                criterion_description=next_criterion['description'],
+                criterion_name=next_topic['topic_name'],
+                criterion_description=next_topic['topic_focus'],
                 retrieved_chunks=retrieval_next['chunks'],
                 kg_signals=retrieval_next,
                 difficulty=next_difficulty,
-                question_hints=next_criterion.get('hints', []),
+                question_hints=[], # Topics don't have explicit hints
                 recent_questions=recent_qs,
                 previous_question=prev_question_obj.question_text,
                 previous_answer=student_answer,
-                is_first_question=is_first_for_criterion,
-                question_number_in_criterion=state.coverage[str(next_criterion['id'])].turns + 1,
+                is_first_question=is_first_for_topic,
+                question_number_in_criterion=state.coverage[first_crit_id].turns + 1,
                 weak_grounding=_grounding_is_weak(retrieval_next['chunks']),
                 session_id=str(session.id),
             )
@@ -450,9 +461,10 @@ def process_answer_and_pick_next(
                 CharitableInput(
                     question_text=prev_question_obj.question_text,
                     student_answer=student_answer,
-                    criterion_name=answered_criterion['name'],
-                    criterion_description=answered_criterion['description'],
+                    criterion_name=answered_topic['topic_name'],
+                    criterion_description=answered_topic['topic_focus'],
                     retrieved_chunks=retrieval['chunks'],
+
                 )
             )
 
@@ -543,13 +555,9 @@ def process_answer_and_pick_next(
                                             'rationale': sc['rationale']}
 
     # ------------------------------------------------------------------
-    # Step B.5, C, D — Confidence, Ability Update, & Termination Check
+    # Step C, D — Ability Update & Termination Check
+    # (Confidence was computed in Step B.5 before the Strategist)
     # ------------------------------------------------------------------
-    confidence = analyze_speech_confidence(
-        answer_text=student_answer,
-        speech_metrics=speech_metrics,
-    )
-    _mark('B.5:confidence')
 
     # ------------------------------------------------------------------
     # Step C — Bayesian ability update for all criteria in the answered topic.
@@ -590,13 +598,13 @@ def process_answer_and_pick_next(
         _mark('G:save')
         total_time = _t.time() - _turn_t0
         table_lines = ["\n" + "=" * 45]
-        table_lines.append(f"{'PIPELINE STEP (TERMINATED)':<25} | {'TIME (s)':>15}")
-        table_lines.append("-" * 45)
-        for label, timestamp, elapsed in _stage_marks:
-            table_lines.append(f"{label:<25} | {elapsed:>14.2f}s")
-        table_lines.append("-" * 45)
-        table_lines.append(f"{'TOTAL (attempts=1)':<25} | {total_time:>14.2f}s")
-        table_lines.append("=" * 45 + "\n")
+        table_lines.append(f"{'PIPELINE STEP (TERMINATED)':<25} | {'STEP (s)':>10} | {'CUMULATIVE (s)':>15}")
+        table_lines.append("-" * 55)
+        for label, timestamp, step_elapsed, total_elapsed in _stage_marks:
+            table_lines.append(f"{label:<25} | {step_elapsed:>9.2f}s | {total_elapsed:>14.2f}s")
+        table_lines.append("-" * 55)
+        table_lines.append(f"{'TOTAL (attempts=1)':<25} | {'':>10} | {total_time:>14.2f}s")
+        table_lines.append("=" * 55 + "\n")
         logger.info("\n".join(table_lines))
 
         return {
@@ -608,75 +616,7 @@ def process_answer_and_pick_next(
             'next_question_payload': None,
         }
 
-    # ------------------------------------------------------------------
-    # Step E — Pick next topic + run Strategist
-    # ------------------------------------------------------------------
-    next_topic = pick_next_topic(viva_topics, state, session)
-    if next_topic is None:
-        # All quotas met but termination didn't fire (e.g., min turns not met).
-        # Fall back to the answered topic to keep moving.
-        next_topic = answered_topic
-
-    first_crit_id = str(next_topic['source_criteria_ids'][0])
-    strategy = select_strategy(StrategistInput(
-        p_lt=state.bkt_states[first_crit_id].p_lt,
-        analysis=analysis,
-        kg_signals=retrieval,                         # reuse retrieval
-        intent_history=state.intent_history,
-        speech_confidence=confidence.get('flag'),
-    ))
-    _mark('E:strategist')
-
-    # Append intent to history for repetition prevention next turn
-    state.intent_history.append(strategy['socratic_intent'])
-    if len(state.intent_history) > 30:
-        state.intent_history = state.intent_history[-30:]
-
-
-    # ------------------------------------------------------------------
-    # Step F — Generate next question via the Questioner
-    # ------------------------------------------------------------------
-    # Recompute retrieval for the *next* topic if it differs from the
-    # answered one. This keeps anchoring focused on the new topic.
-    if next_topic['topic_name'] != answered_topic['topic_name']:
-        retrieval = retrieve_hybrid_for_turn(
-            submission=submission,
-            criterion_name=next_topic['topic_name'],
-            criterion_description=next_topic['topic_focus'],
-            last_answer=student_answer,
-            top_k=3,
-        )
-    _mark('F:retrieval2')
-
-    next_difficulty = _bloom_to_difficulty(strategy['bloom_level'])
-    is_first_for_topic = (
-        state.coverage[str(next_topic['source_criteria_ids'][0])].turns == 0
-    )
-
-    recent_qs = list(
-        session.viva_questions.order_by('-question_order')
-        .values_list('question_text', flat=True)[:5]
-    )
-
-    question_data = generate_anchored_question(QuestionerInput(
-        criterion_name=next_topic['topic_name'],
-        criterion_description=next_topic['topic_focus'],
-        retrieved_chunks=retrieval['chunks'],
-        kg_signals=retrieval,
-        difficulty=next_difficulty,
-        question_hints=[], # Topics might not have explicit hints
-        recent_questions=recent_qs,
-        previous_question=prev_question_obj.question_text,
-        previous_answer=student_answer,
-        is_first_question=is_first_for_topic,
-        question_number_in_criterion=state.coverage[str(next_topic['source_criteria_ids'][0])].turns + 1,
-        weak_grounding=_grounding_is_weak(retrieval['chunks']),
-        session_id=str(session.id),
-    ))
-    _mark('F:questioner(LLM+critic)')
-
-    # Override the bloom level the Questioner echoes back with the Strategist's choice
-    question_data['blooms_level'] = strategy['bloom_level']
+    # (Step E & F are now handled in parallel earlier in the pipeline)
 
     # ------------------------------------------------------------------
     # Step G — Persist state and print full latency timeline summary
@@ -686,13 +626,13 @@ def process_answer_and_pick_next(
     
     total_time = _t.time() - _turn_t0
     table_lines = ["\n" + "=" * 45]
-    table_lines.append(f"{'PIPELINE STEP':<25} | {'TIME (s)':>15}")
-    table_lines.append("-" * 45)
-    for label, timestamp, elapsed in _stage_marks:
-        table_lines.append(f"{label:<25} | {elapsed:>14.2f}s")
-    table_lines.append("-" * 45)
-    table_lines.append(f"{'TOTAL (attempts=' + str(question_data.get('attempts', 1)) + ')':<25} | {total_time:>14.2f}s")
-    table_lines.append("=" * 45 + "\n")
+    table_lines.append(f"{'PIPELINE STEP':<25} | {'STEP (s)':>10} | {'CUMULATIVE (s)':>15}")
+    table_lines.append("-" * 55)
+    for label, timestamp, step_elapsed, total_elapsed in _stage_marks:
+        table_lines.append(f"{label:<25} | {step_elapsed:>9.2f}s | {total_elapsed:>14.2f}s")
+    table_lines.append("-" * 55)
+    table_lines.append(f"{'TOTAL (attempts=' + str(question_data.get('attempts', 1)) + ')':<25} | {'':>10} | {total_time:>14.2f}s")
+    table_lines.append("=" * 55 + "\n")
     
     logger.info("\n".join(table_lines))
 
