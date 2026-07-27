@@ -218,6 +218,10 @@ class RubricExtractApplyView(APIView):
     the structure and the categories + criteria are created directly on this
     project. The examiner reviews/edits afterwards with the normal rubric
     CRUD — this replaces typing every category and criterion by hand.
+
+    IMPORTANT: This REPLACES any existing rubric categories on the project.
+    Re-uploading a rubric document will delete the old categories first,
+    preventing the "200% allocated" duplication bug.
     """
     permission_classes = [IsAuthenticated, IsExaminer]
 
@@ -244,11 +248,15 @@ class RubricExtractApplyView(APIView):
                 return _err('File too large. Maximum size is 10MB.')
 
             import os
+            import logging
             import tempfile
+            from django.db import transaction
             from core.utils.document_parser import extract_text_from_file
             from viva_evaluator.services.rubric_extractor import (
                 extract_rubric_from_text,
             )
+
+            logger = logging.getLogger(__name__)
 
             with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{ext}') as tmp:
                 for chunk in rubric_file.chunks():
@@ -272,38 +280,56 @@ class RubricExtractApplyView(APIView):
 
             from viva_evaluator.models import CriteriaQuestionHint
 
-            created = []
-            for cat_data in categories_data:
-                category = RubricCategory.objects.create(
-                    project=project,
-                    category_name=str(cat_data.get('category_name', 'Untitled'))[:255],
-                    weight_percentage=cat_data.get('weight_percentage') or 0,
-                    description=cat_data.get('description') or '',
-                )
-                for cri_data in (cat_data.get('criteria') or []):
-                    criteria = RubricCriteria.objects.create(
-                        category=category,
-                        criteria_name=str(cri_data.get('criteria_name', 'Untitled'))[:255],
-                        max_score=cri_data.get('max_score') or 10,
-                        weight_in_category=cri_data.get('weight_in_category'),
-                        description=cri_data.get('description') or '',
-                        questions_to_ask=int(cri_data.get('questions_to_ask') or 3),
+            # Wrap delete + create in a transaction so we don't end up with
+            # a half-deleted rubric if something fails mid-way.
+            with transaction.atomic():
+                # ── Delete existing categories (cascade deletes criteria + hints) ──
+                existing_count = project.rubric_categories.count()
+                if existing_count > 0:
+                    project.rubric_categories.all().delete()
+                    logger.info(
+                        'rubric_extract: deleted %d existing categories for project=%s before re-import',
+                        existing_count, project_id,
                     )
-                    for hint in (cri_data.get('question_hints') or []):
-                        hint_text = (hint or {}).get('hint_text', '')
-                        if hint_text:
-                            CriteriaQuestionHint.objects.create(
-                                criteria=criteria,
-                                hint_text=hint_text,
-                                order=int((hint or {}).get('order') or 1),
-                            )
-                created.append(category)
 
+                # ── Create new categories from extracted data ──
+                created = []
+                for cat_data in categories_data:
+                    category = RubricCategory.objects.create(
+                        project=project,
+                        category_name=str(cat_data.get('category_name', 'Untitled'))[:255],
+                        weight_percentage=cat_data.get('weight_percentage') or 0,
+                        description=cat_data.get('description') or '',
+                    )
+                    for cri_data in (cat_data.get('criteria') or []):
+                        criteria = RubricCriteria.objects.create(
+                            category=category,
+                            criteria_name=str(cri_data.get('criteria_name', 'Untitled'))[:255],
+                            max_score=cri_data.get('max_score') or 10,
+                            weight_in_category=cri_data.get('weight_in_category'),
+                            description=cri_data.get('description') or '',
+                            questions_to_ask=int(cri_data.get('questions_to_ask') or 3),
+                        )
+                        for hint in (cri_data.get('question_hints') or []):
+                            hint_text = (hint or {}).get('hint_text', '')
+                            if hint_text:
+                                CriteriaQuestionHint.objects.create(
+                                    criteria=criteria,
+                                    hint_text=hint_text,
+                                    order=int((hint or {}).get('order') or 1),
+                                )
+                    created.append(category)
+
+            replaced_msg = (
+                f' (replaced {existing_count} previous categories)'
+                if existing_count > 0 else ''
+            )
             return _ok(
-                f'Extracted {len(created)} categories from "{rubric_file.name}". '
+                f'Extracted {len(created)} categories from "{rubric_file.name}"{replaced_msg}. '
                 'Review and edit them below.',
                 RubricCategorySerializer(created, many=True).data,
                 201,
             )
         except Exception as e:
             return _500(e)
+

@@ -57,8 +57,15 @@ def _grounding_is_weak(chunks: List[Dict], threshold: float = WEAK_GROUNDING_THR
 # Helpers — load rubric and resolve session submission
 # =============================================================================
 
+_RUBRIC_CACHE: Dict[str, List[Dict]] = {}
+
+
 def load_rubric(project) -> List[Dict]:
-    """Flat list of all rubric criteria for a project, in document order."""
+    """Flat list of all rubric criteria for a project, in document order (cached in RAM)."""
+    proj_id = str(project.id)
+    if proj_id in _RUBRIC_CACHE:
+        return _RUBRIC_CACHE[proj_id]
+
     out: List[Dict] = []
     for category in project.rubric_categories.all().order_by('id'):
         for crit in category.criteria.all().order_by('id'):
@@ -72,6 +79,7 @@ def load_rubric(project) -> List[Dict]:
                 'questions_to_ask':  int(crit.questions_to_ask or 3),
                 'hints':             hints,
             })
+    _RUBRIC_CACHE[proj_id] = out
     return out
 
 
@@ -199,9 +207,10 @@ def process_answer_and_pick_next(
 
     def _mark(label):
         now = _t.time()
-        elapsed = now - (_stage_marks[-1][1] if _stage_marks else _turn_t0)
-        _stage_marks.append((label, now, elapsed))
-        logger.info('[turn-timing] %-22s %6.2fs', label, elapsed)
+        step_elapsed = now - (_stage_marks[-1][1] if _stage_marks else _turn_t0)
+        total_elapsed = now - _turn_t0
+        _stage_marks.append((label, now, step_elapsed, total_elapsed))
+        logger.info('[turn-timing] %-28s step: %5.2fs | cumul: %5.2fs', label, step_elapsed, total_elapsed)
 
     # ------------------------------------------------------------------
     # Setup
@@ -232,14 +241,10 @@ def process_answer_and_pick_next(
     _mark('A:retrieval')
 
     # ------------------------------------------------------------------
-    # Step A.5 — Response Triage (A1, FAIRNESS GATE).
-    # Decide whether the student actually engaged with the question or was
-    # confused by it. If confused (and we still have clarification budget),
-    # SUSPEND scoring entirely — no Analyzer, no ability update, no turn
-    # consumed — and re-ask the same question in clearer words.
-    # This can only ever HELP the student (asymmetric) and is bounded by
-    # CLARIFICATION_CAP so it cannot be used to stall.
+    # Step A.5 & Step B — Response Triage (A1) AND Analyzer (3D rubric)
+    # Executed IN PARALLEL via ThreadPoolExecutor to minimize latency.
     # ------------------------------------------------------------------
+    from concurrent.futures import ThreadPoolExecutor
     from viva_evaluator.services.agents.response_triage import (
         triage_response, TriageInput, CLARIFY_LABELS, RESTATE_LABELS, LABEL_GARBLED,
     )
@@ -339,25 +344,142 @@ def process_answer_and_pick_next(
     correctness = float((analysis.get('correctness') or {}).get('score', 0.5))
 
     # ------------------------------------------------------------------
-    # Step B.1 — Material vs superficial inconsistency (A3, FAIRNESS).
-    # If consistency was flagged low, decide whether it's a real
-    # contradiction or just reworded phrasing. Superficial clashes get the
-    # penalty neutralised (asymmetric: can only lift consistency, not lower).
+    # Step E — Pick next criterion + run Strategist (instant <0.01s)
+    # ------------------------------------------------------------------
+    next_criterion = pick_next_criterion(rubric, state)
+    if next_criterion is None:
+        next_criterion = answered_criterion
+
+    # Check if retrieval is needed for the next criterion
+    if str(next_criterion['id']) != str(answered_criterion['id']):
+        retrieval_next = retrieve_hybrid_for_turn(
+            submission=submission,
+            criterion_name=next_criterion['name'],
+            criterion_description=next_criterion['description'],
+            last_answer=student_answer,
+            top_k=3,
+        )
+    else:
+        retrieval_next = retrieval
+
+    strategy = select_strategy(StrategistInput(
+        p_lt=state.bkt_states[str(next_criterion['id'])].p_lt,
+        analysis=analysis,
+        kg_signals=retrieval_next,
+        intent_history=state.intent_history,
+        speech_confidence=speech_metrics,
+    ))
+    _mark('E:strategist')
+
+    state.intent_history.append(strategy['socratic_intent'])
+    if len(state.intent_history) > 30:
+        state.intent_history = state.intent_history[-30:]
+
+    next_difficulty = _bloom_to_difficulty(strategy['bloom_level'])
+    is_first_for_criterion = (
+        state.coverage[str(next_criterion['id'])].turns == 0
+    )
+
+    recent_qs = list(
+        session.viva_questions.order_by('-question_order')
+        .values_list('question_text', flat=True)[:5]
+    )
+
+    # ------------------------------------------------------------------
+    # Steps B.1-3 (Fairness Rescue) AND Step F (Questioner LLM)
+    # Executed IN PARALLEL via ThreadPoolExecutor.
     # ------------------------------------------------------------------
     consistency_dim = analysis.get('consistency') or {}
     consistency_score = float(consistency_dim.get('score', 1.0))
-    if consistency_score < CONSISTENCY_REVIEW_THRESHOLD:
-        from viva_evaluator.services.agents.consistency_check import (
-            classify_inconsistency, ConsistencyInput,
-        )
-        from viva_evaluator.services.agents.analyzer import recompute_soft_score
+    need_b1 = consistency_score < CONSISTENCY_REVIEW_THRESHOLD
+    need_b2 = CHARITABLE_BAND[0] <= correctness <= CHARITABLE_BAND[1]
+    need_b3 = soft_score < SELF_CORRECTION_TRIGGER_MAX
 
-        verdict = classify_inconsistency(ConsistencyInput(
-            question_text=prev_question_obj.question_text,
-            student_answer=student_answer,
-            transcript_recent=transcript_recent,
-            consistency_evidence=consistency_dim.get('evidence_quote', ''),
-        ))
+    previous_answer = ''
+    if need_b3:
+        for _pair in reversed(transcript_recent):
+            if _pair.get('answer_text'):
+                previous_answer = _pair['answer_text']
+                break
+        if not previous_answer:
+            need_b3 = False
+
+    futures = {}
+    with ThreadPoolExecutor(max_workers=4) as main_executor:
+        # Submit Questioner LLM task
+        question_future = main_executor.submit(
+            generate_anchored_question,
+            QuestionerInput(
+                criterion_name=next_criterion['name'],
+                criterion_description=next_criterion['description'],
+                retrieved_chunks=retrieval_next['chunks'],
+                kg_signals=retrieval_next,
+                difficulty=next_difficulty,
+                question_hints=next_criterion.get('hints', []),
+                recent_questions=recent_qs,
+                previous_question=prev_question_obj.question_text,
+                previous_answer=student_answer,
+                is_first_question=is_first_for_criterion,
+                question_number_in_criterion=state.coverage[str(next_criterion['id'])].turns + 1,
+                weak_grounding=_grounding_is_weak(retrieval_next['chunks']),
+                session_id=str(session.id),
+            )
+        )
+
+        # Submit Fairness Rescue tasks in parallel
+        if need_b1:
+            from viva_evaluator.services.agents.consistency_check import (
+                classify_inconsistency, ConsistencyInput,
+            )
+            futures['b1'] = main_executor.submit(
+                classify_inconsistency,
+                ConsistencyInput(
+                    question_text=prev_question_obj.question_text,
+                    student_answer=student_answer,
+                    transcript_recent=transcript_recent,
+                    consistency_evidence=consistency_dim.get('evidence_quote', ''),
+                )
+            )
+
+        if need_b2:
+            from viva_evaluator.services.agents.charitable_check import (
+                assess_understanding, CharitableInput,
+            )
+            futures['b2'] = main_executor.submit(
+                assess_understanding,
+                CharitableInput(
+                    question_text=prev_question_obj.question_text,
+                    student_answer=student_answer,
+                    criterion_name=answered_criterion['name'],
+                    criterion_description=answered_criterion['description'],
+                    retrieved_chunks=retrieval['chunks'],
+                )
+            )
+
+        if need_b3:
+            from viva_evaluator.services.agents.self_correction import (
+                assess_self_correction, SelfCorrectionInput,
+            )
+            futures['b3'] = main_executor.submit(
+                assess_self_correction,
+                SelfCorrectionInput(
+                    question_text=prev_question_obj.question_text,
+                    current_answer=student_answer,
+                    previous_answer=previous_answer,
+                )
+            )
+
+        # Wait for Questioner & Fairness results in parallel
+        question_data = question_future.result()
+        for key in list(futures.keys()):
+            futures[key] = futures[key].result()
+
+    _mark('F:questioner+fairness(parallel)')
+
+    # Apply B.1 (Consistency) update
+    if need_b1 and 'b1' in futures:
+        from viva_evaluator.services.agents.analyzer import recompute_soft_score
+        verdict = futures['b1']
         if not verdict['material']:
             analysis['consistency']['score'] = max(consistency_score, CONSISTENCY_NEUTRAL)
             analysis['consistency_adjustment'] = {
@@ -367,10 +489,6 @@ def process_answer_and_pick_next(
             }
             soft_score = recompute_soft_score(analysis)
             analysis['soft_score'] = soft_score
-            logger.info(
-                '[turn] A3 consistency suppressed (superficial): %.2f -> %.2f',
-                consistency_score, analysis['consistency']['score'],
-            )
         else:
             analysis['consistency_adjustment'] = {
                 'applied': False, 'material': True, 'rationale': verdict['rationale'],
@@ -403,58 +521,29 @@ def process_answer_and_pick_next(
                 'adjusted_soft': CHARITABLE_FLOOR,
                 'rationale':     charitable['rationale'],
             }
-            logger.info(
-                '[turn] CHARITABLE rescue: soft %.2f -> %.2f (%s)',
-                original_soft, soft_score, charitable['rationale'][:80],
-            )
         else:
             analysis['charitable'] = {'applied': False,
                                       'rationale': charitable['rationale']}
-        _mark('B.2:charitable')
+
+    # Apply B.3 (Self-correction) update
+    if need_b3 and 'b3' in futures:
+        sc = futures['b3']
+        if sc['is_correction'] and sc['improved'] and soft_score < SELF_CORRECTION_FLOOR:
+            original_soft = soft_score
+            soft_score = SELF_CORRECTION_FLOOR
+            analysis['self_correction'] = {
+                'applied':       True,
+                'original_soft': round(original_soft, 4),
+                'adjusted_soft': SELF_CORRECTION_FLOOR,
+                'rationale':     sc['rationale'],
+            }
+            analysis['soft_score'] = soft_score
+        else:
+            analysis['self_correction'] = {'applied': False,
+                                            'rationale': sc['rationale']}
 
     # ------------------------------------------------------------------
-    # Step B.3 — Self-correction crediting (A4, FAIRNESS RESCUE).
-    # If the current answer corrects/improves the student's previous answer,
-    # credit the recovery. Asymmetric: can only RAISE the score, and only when
-    # the current score left room (below the trigger threshold).
-    # ------------------------------------------------------------------
-    if soft_score < SELF_CORRECTION_TRIGGER_MAX:
-        previous_answer = ''
-        for _pair in reversed(transcript_recent):
-            if _pair.get('answer_text'):
-                previous_answer = _pair['answer_text']
-                break
-        if previous_answer:
-            from viva_evaluator.services.agents.self_correction import (
-                assess_self_correction, SelfCorrectionInput,
-            )
-            sc = assess_self_correction(SelfCorrectionInput(
-                question_text=prev_question_obj.question_text,
-                current_answer=student_answer,
-                previous_answer=previous_answer,
-            ))
-            if sc['is_correction'] and sc['improved'] and soft_score < SELF_CORRECTION_FLOOR:
-                original_soft = soft_score
-                soft_score = SELF_CORRECTION_FLOOR
-                analysis['self_correction'] = {
-                    'applied':       True,
-                    'original_soft': round(original_soft, 4),
-                    'adjusted_soft': SELF_CORRECTION_FLOOR,
-                    'rationale':     sc['rationale'],
-                }
-                analysis['soft_score'] = soft_score
-                logger.info(
-                    '[turn] A4 self-correction credit: soft %.2f -> %.2f (%s)',
-                    original_soft, soft_score, sc['rationale'][:80],
-                )
-            else:
-                analysis['self_correction'] = {'applied': False,
-                                                'rationale': sc['rationale']}
-            _mark('B.3:self_correction')
-
-    # ------------------------------------------------------------------
-    # Step B.5 — Speech confidence (Week 6)
-    # Strictly informational — does NOT affect BKT or rubric scoring.
+    # Step B.5, C, D — Confidence, Ability Update, & Termination Check
     # ------------------------------------------------------------------
     confidence = analyze_speech_confidence(
         answer_text=student_answer,
@@ -494,7 +583,6 @@ def process_answer_and_pick_next(
     decision = should_terminate(state, rubric, session=session)
     if decision.should_end:
         save_session_state(session, state)
-        # Mark the EvaluationSession status
         from core.models import EvaluationSession as ES
         session.status = ES.Status.COMPLETED
         session.save(update_fields=['status'])
@@ -591,7 +679,7 @@ def process_answer_and_pick_next(
     question_data['blooms_level'] = strategy['bloom_level']
 
     # ------------------------------------------------------------------
-    # Step G — Persist state and return
+    # Step G — Persist state and print full latency timeline summary
     # ------------------------------------------------------------------
     save_session_state(session, state)
     _mark('G:save')

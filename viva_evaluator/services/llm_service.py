@@ -130,9 +130,6 @@ def llm_call_with_image(
 ) -> Any:
     """
     Multimodal call — same contract as llm_call, but with one image attached.
-
-    Used by the image captioner during indexing. Gemini handles the vision
-    part natively; if you swap providers later, only this function changes.
     """
     return _llm_call_internal(
         prompt=prompt,
@@ -142,6 +139,30 @@ def llm_call_with_image(
         fallback=fallback,
         image_bytes=image_bytes,
         image_mime=image_mime,
+    )
+
+
+def llm_call_with_media(
+    prompt: str,
+    media_bytes: bytes,
+    mime_type: str = 'image/png',
+    model: str = 'default',
+    expect_json: bool = False,
+    max_retries: int = 2,
+    fallback: Optional[Any] = None,
+) -> Any:
+    """
+    Multimodal call — accepts any image or audio bytes (e.g. audio/webm, audio/mp3, image/png)
+    and processes them using Google GenAI SDK.
+    """
+    return _llm_call_internal(
+        prompt=prompt,
+        model=model,
+        expect_json=expect_json,
+        max_retries=max_retries,
+        fallback=fallback,
+        image_bytes=media_bytes,
+        image_mime=mime_type,
     )
 
 
