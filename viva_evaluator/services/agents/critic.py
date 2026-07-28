@@ -69,6 +69,7 @@ def critique_question(inp: CriticInput) -> Dict:
             'critique': '',
             'specificity_score': 0.7,
             'bloom_alignment_score': 0.7,
+            'conversational_flow_score': 0.7,
             'hallucination_flag': False,
         },
     )
@@ -80,16 +81,18 @@ def critique_question(inp: CriticInput) -> Dict:
             'critique': '',
             'specificity_score': 0.5,
             'bloom_alignment_score': 0.5,
+            'conversational_flow_score': 0.5,
             'hallucination_flag': False,
         }
 
     # Defensive normalization
     spec = _clamp01(response.get('specificity_score', 0.7))
     bloom = _clamp01(response.get('bloom_alignment_score', 0.7))
+    conv = _clamp01(response.get('conversational_flow_score', 0.7))
     halluc = bool(response.get('hallucination_flag', False))
 
-    # Critic passes if all three quality bars are met
-    quality_ok = spec >= 0.5 and bloom >= 0.5 and not halluc
+    # Critic passes if all quality bars are met
+    quality_ok = spec >= 0.5 and bloom >= 0.5 and conv >= 0.5 and not halluc
     passed = bool(response.get('passed', quality_ok)) and quality_ok
 
     return {
@@ -97,6 +100,7 @@ def critique_question(inp: CriticInput) -> Dict:
         'critique':              str(response.get('critique', '') or '')[:300],
         'specificity_score':     spec,
         'bloom_alignment_score': bloom,
+        'conversational_flow_score': conv,
         'hallucination_flag':    halluc,
     }
 
@@ -154,17 +158,28 @@ SCORE THE QUESTION ON THREE DIMENSIONS (each 0.0 to 1.0):
    - Inventing a function name not in the sources
    - Citing a section/table that doesn't exist
    - Claiming the student wrote something they didn't write
+   - Asking the student to compare their work against an external alternative 
+     technology (e.g., AES-CBC, React vs Angular) that is NOT explicitly 
+     mentioned in the retrieved sources.
+
+4. CONVERSATIONAL FLOW: does the question read naturally when spoken aloud? 
+   Is it broken into two simple sentences, or is it one massive, overly-dense 
+   sentence packed with technical jargon?
+       1.0 = Natural, conversational, easy to hear (e.g. 2 short sentences)
+       0.5 = Okay, but a bit dense or academic
+       0.0 = Hard to parse when spoken, long multi-clause sentence
 
 Respond ONLY with valid JSON in this exact shape:
 {{
     "passed": true,
     "specificity_score": 0.85,
     "bloom_alignment_score": 0.90,
+    "conversational_flow_score": 0.85,
     "hallucination_flag": false,
     "critique": "<one-sentence reason if passed=false; empty string if passed=true>"
 }}
 
-Set passed=false if specificity < 0.5, OR bloom_alignment < 0.5, OR
+Set passed=false if specificity < 0.5, OR bloom_alignment < 0.5, OR conversational_flow_score < 0.5, OR
 hallucination_flag is true.
 """
 
