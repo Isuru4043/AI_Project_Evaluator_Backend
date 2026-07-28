@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 # A1 Response Triage: maximum CONSECUTIVE clarification re-asks before the
 # pipeline proceeds to score regardless (prevents a student stalling forever).
-CLARIFICATION_CAP = 2
+CLARIFICATION_CAP = 1
 
 # B3 Weak-retrieval awareness: if the best retrieved chunk's cosine similarity
 # is below this, the submission barely covers the criterion → ask a broader
