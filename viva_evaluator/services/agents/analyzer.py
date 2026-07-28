@@ -69,8 +69,8 @@ def recompute_soft_score(analysis: Dict) -> float:
 class AnalyzerInput:
     question_text: str
     student_answer: str
-    criterion_name: str
-    criterion_description: str = ''
+    topic_name: str
+    topic_focus: str = ''
     retrieved_chunks: List[Dict] = field(default_factory=list)
     contradicts_code_alerts: List[Dict] = field(default_factory=list)
     transcript_recent: List[Dict] = field(default_factory=list)  # last 5 Q/A pairs
@@ -157,19 +157,19 @@ def _build_prompt(inp: AnalyzerInput) -> str:
 
     return f"""You are an academic viva examiner scoring a student's spoken answer.
 
-RUBRIC CRITERION:
-Name: {inp.criterion_name}
-Description: {inp.criterion_description or '(no description)'}
+{transcript_block}
+The question asked was:
+"{inp.question_text}"
 
-QUESTION ASKED:
-{inp.question_text}
+The student is being assessed on the topic: '{inp.topic_name}'
+Topic focus/description: {inp.topic_focus}
 
 STUDENT'S ANSWER (verbatim):
 {inp.student_answer}
 
 RETRIEVED SOURCES (the student's report and code — single source of truth):
 {sources_block}
-{contradicts_block}{transcript_block}
+{contradicts_block}
 TASK — produce a 3D rubric assessment.
 
 Each dimension is scored from 0.0 to 1.0:

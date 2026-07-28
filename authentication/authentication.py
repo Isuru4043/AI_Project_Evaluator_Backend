@@ -32,9 +32,16 @@ class CookieJWTAuthentication(JWTAuthentication):
         try:
             validated_token = self.get_validated_token(raw_token)
         except (InvalidToken, TokenError):
-            # Expired or invalid token — treat as anonymous rather than
-            # raising a 401. This lets AllowAny views (login, register)
-            # work even when the browser still holds a stale cookie.
+            # If the Authorization header token was invalid/placeholder, check
+            # if a valid login cookie exists before failing authentication.
+            if header is not None:
+                raw_cookie_token = request.COOKIES.get(settings.AUTH_COOKIE_ACCESS_NAME)
+                if raw_cookie_token:
+                    try:
+                        validated_cookie_token = self.get_validated_token(raw_cookie_token)
+                        return self.get_user(validated_cookie_token), validated_cookie_token
+                    except (InvalidToken, TokenError):
+                        pass
             return None
 
         return self.get_user(validated_token), validated_token

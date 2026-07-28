@@ -59,6 +59,7 @@ class TerminationDecision:
 def should_terminate(
     state: SessionState,
     all_criteria: List[Dict],
+    session=None,
 ) -> TerminationDecision:
     """
     Evaluate the three termination conditions plus hard cap.
@@ -72,10 +73,11 @@ def should_terminate(
         TerminationDecision flagging which conditions hold.
     """
     # ----- Hard cap (overrides everything) ----------------------------------
-    if state.total_turns >= HARD_TURN_CAP:
+    hard_cap = getattr(session, 'max_total_questions', HARD_TURN_CAP) if session else HARD_TURN_CAP
+    if state.total_turns >= hard_cap:
         return TerminationDecision(
             should_end=True,
-            reason=f'hard_cap reached ({HARD_TURN_CAP} turns)',
+            reason=f'hard_cap reached ({hard_cap} turns)',
             coverage_met=False,
             min_turns_met=True,
             bkt_converged=False,

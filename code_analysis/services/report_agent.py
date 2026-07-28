@@ -1,6 +1,7 @@
 import json
 from django.conf import settings
-from google import genai
+
+from AI_Evaluator_Backend.llm import get_llm
 
 
 class CodeAnalysisReportAgent:
@@ -39,11 +40,7 @@ class CodeAnalysisReportAgent:
 
     def __init__(self, model=None):
         self.model = model or settings.GEMINI_MODEL
-        self.client = genai.Client(
-            vertexai=True,
-            project=settings.GOOGLE_CLOUD_PROJECT,
-            location=settings.GOOGLE_CLOUD_LOCATION,
-        )
+        self.client = get_llm()
 
     def generate_report(self, sonar_summary: dict, code_summary: str,
                          quality_status: str, quality_reason: str) -> dict:

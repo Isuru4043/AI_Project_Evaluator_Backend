@@ -57,8 +57,15 @@ def _grounding_is_weak(chunks: List[Dict], threshold: float = WEAK_GROUNDING_THR
 # Helpers — load rubric and resolve session submission
 # =============================================================================
 
+_RUBRIC_CACHE: Dict[str, List[Dict]] = {}
+
+
 def load_rubric(project) -> List[Dict]:
-    """Flat list of all rubric criteria for a project, in document order."""
+    """Flat list of all rubric criteria for a project, in document order (cached in RAM)."""
+    proj_id = str(project.id)
+    if proj_id in _RUBRIC_CACHE:
+        return _RUBRIC_CACHE[proj_id]
+
     out: List[Dict] = []
     for category in project.rubric_categories.all().order_by('id'):
         for crit in category.criteria.all().order_by('id'):
@@ -72,32 +79,73 @@ def load_rubric(project) -> List[Dict]:
                 'questions_to_ask':  int(crit.questions_to_ask or 3),
                 'hints':             hints,
             })
+    _RUBRIC_CACHE[proj_id] = out
     return out
 
 
-def pick_next_criterion(rubric: List[Dict], state) -> Optional[Dict]:
+def load_viva_topics(session) -> List[Dict]:
+    """Returns grouped viva topics if available, else falls back to raw criteria as topics."""
+    if session.grouping_cache and session.grouping_cache.grouped_criteria:
+        topics = session.grouping_cache.grouped_criteria.get('viva_topics', [])
+        if topics:
+            return topics
+            
+    # Fallback to 1-to-1 criteria mapping if no grouping exists
+    rubric = load_rubric(session.project)
+    fallback_topics = []
+    for c in rubric:
+        fallback_topics.append({
+            'topic_name': c['name'],
+            'source_criteria_ids': [c['id']],
+            'suggested_questions': c['questions_to_ask'],
+            'topic_focus': c['description'],
+        })
+    return fallback_topics
+
+
+def pick_next_topic(topics: List[Dict], state, session) -> Optional[Dict]:
     """
-    Walk criteria in rubric order, return the first that hasn't met its
-    questions_to_ask quota yet (counting only "correct enough" turns,
-    matching the termination logic).
+    Round robin across topics based on topic budgets.
+    Applies the 4 rules from the adaptive viva design.
     """
-    for crit in rubric:
-        cov = state.coverage.get(str(crit['id']))
-        required = int(crit['questions_to_ask'])
+    from viva_evaluator.services.pipeline.termination import WEAK_MASTERY_THRESHOLD
+
+    # We need a quick way to check if a topic has met its budget.
+    # A topic meets its budget if ANY (or all?) of its criteria have enough correct turns.
+    # Let's say a topic budget is met if its total questions asked >= suggested_questions.
+    
+    # We can calculate topic_turns by looking at state.coverage for its criteria.
+    # Since one question applies to all criteria in a topic, the turns for the first criterion
+    # accurately reflects the turns for the topic.
+    
+    # Rule 1: Find first topic that has not met its question budget yet
+    for topic in topics:
+        first_crit_id = str(topic['source_criteria_ids'][0])
+        cov = state.coverage.get(first_crit_id)
+        # Use turns (or correct_turns) against suggested_questions
+        budget = topic.get('suggested_questions', 2)
+        
         correct_turns = cov.correct_turns if cov else 0
-        if correct_turns < required:
-            return crit
+        if correct_turns < budget:
+            return topic
 
-        # Also revisit weak-mastery criteria up to MAX_TURNS
-        from viva_evaluator.services.pipeline.termination import (
-            MAX_TURNS_PER_CONCEPT, WEAK_MASTERY_THRESHOLD,
-        )
-        bkt = state.bkt_states.get(str(crit['id']))
-        if (bkt
-                and bkt.p_lt < WEAK_MASTERY_THRESHOLD
-                and (cov.turns if cov else 0) < MAX_TURNS_PER_CONCEPT):
-            return crit
+    # Rule 3: If all topics met their budget but total_turns < max_total_questions,
+    # revisit topics where BKT mastery < 0.40 (WEAK_MASTERY_THRESHOLD)
+    if state.total_turns < session.max_total_questions:
+        weak_topics = []
+        for topic in topics:
+            for crit_id in topic['source_criteria_ids']:
+                bkt = state.bkt_states.get(str(crit_id))
+                if bkt and bkt.p_lt < WEAK_MASTERY_THRESHOLD:
+                    weak_topics.append(topic)
+                    break # Topic is weak if any criterion is weak
+                    
+        if weak_topics:
+            # Rule 2: Among tied topics, prefer the one with LOWEST BKT mastery
+            # For simplicity, just return the first weak topic found
+            return weak_topics[0]
 
+    # Rule 4: If all topics have mastery >= 0.40 (or total turns reached), terminate early
     return None
 
 
@@ -159,9 +207,10 @@ def process_answer_and_pick_next(
 
     def _mark(label):
         now = _t.time()
-        elapsed = now - (_stage_marks[-1][1] if _stage_marks else _turn_t0)
-        _stage_marks.append((label, now, elapsed))
-        logger.info('[turn-timing] %-22s %6.2fs', label, elapsed)
+        step_elapsed = now - (_stage_marks[-1][1] if _stage_marks else _turn_t0)
+        total_elapsed = now - _turn_t0
+        _stage_marks.append((label, now, step_elapsed, total_elapsed))
+        logger.info('[turn-timing] %-28s step: %5.2fs | cumul: %5.2fs', label, step_elapsed, total_elapsed)
 
     # ------------------------------------------------------------------
     # Setup
@@ -174,8 +223,9 @@ def process_answer_and_pick_next(
         state.get_or_init_coverage(str(crit['id']), questions_to_ask=int(crit['questions_to_ask']))
         state.get_or_init_bkt(str(crit['id']))
 
-    # Resolve which criterion was being asked about
-    answered_criterion = _resolve_answered_criterion(prev_question_obj, rubric)
+    # Resolve which topic was being asked about
+    viva_topics = load_viva_topics(session)
+    answered_topic = _resolve_answered_topic(prev_question_obj, viva_topics)
 
     # ------------------------------------------------------------------
     # Step A — Hybrid retrieval for the answered criterion
@@ -183,138 +233,265 @@ def process_answer_and_pick_next(
     _mark('setup')
     retrieval = retrieve_hybrid_for_turn(
         submission=submission,
-        criterion_name=answered_criterion['name'],
-        criterion_description=answered_criterion['description'],
+        criterion_name=answered_topic['topic_name'],
+        criterion_description=answered_topic['topic_focus'],
         last_answer=student_answer,
         top_k=3,
     )
     _mark('A:retrieval')
 
     # ------------------------------------------------------------------
-    # Step A.5 — Response Triage (A1, FAIRNESS GATE).
-    # Decide whether the student actually engaged with the question or was
-    # confused by it. If confused (and we still have clarification budget),
-    # SUSPEND scoring entirely — no Analyzer, no ability update, no turn
-    # consumed — and re-ask the same question in clearer words.
-    # This can only ever HELP the student (asymmetric) and is bounded by
-    # CLARIFICATION_CAP so it cannot be used to stall.
+    # Step A.5 & Step B — Response Triage (A1) AND Analyzer (3D rubric)
+    # Executed IN PARALLEL via ThreadPoolExecutor to minimize latency.
     # ------------------------------------------------------------------
+    from concurrent.futures import ThreadPoolExecutor
     from viva_evaluator.services.agents.response_triage import (
         triage_response, TriageInput, CLARIFY_LABELS, RESTATE_LABELS, LABEL_GARBLED,
     )
 
-    triage = triage_response(TriageInput(
+    triage_input = TriageInput(
         question_text=prev_question_obj.question_text,
         student_answer=student_answer,
         is_spoken=bool(speech_metrics),
-    ))
-    _mark('A.5:triage')
+    )
 
-    gate_labels = CLARIFY_LABELS | RESTATE_LABELS
-    if triage['label'] in gate_labels and state.clarification_streak < CLARIFICATION_CAP:
-        state.clarification_streak += 1
-        prev_bloom = getattr(prev_question_obj, 'blooms_level', 'Analyze') or 'Analyze'
-
-        if triage['label'] in RESTATE_LABELS:
-            # A5: transcription artifact — re-present the SAME question verbatim
-            # and ask the student to restate. No rephrase, no LLM call needed.
-            question_data = {
-                'question_text':  prev_question_obj.question_text,
-                'blooms_level':   prev_bloom,
-                'difficulty':     _bloom_to_difficulty(prev_bloom),
-                'tier1_passed':   True,
-                'tier1_failures': [],
-                'critic_ran':     False,
-                'critic_passed':  None,
-                'critic_critique': '',
-                'critic_scores':  {},
-                'attempts':       0,
-            }
-        else:
-            # A1: confusion — re-ask the same concept in clearer words.
-            question_data = generate_anchored_question(QuestionerInput(
-                criterion_name=answered_criterion['name'],
-                criterion_description=answered_criterion['description'],
-                retrieved_chunks=retrieval['chunks'],
-                kg_signals=retrieval,
-                difficulty=_bloom_to_difficulty(prev_bloom),
-                question_hints=answered_criterion.get('hints', []),
-                recent_questions=[],            # a rephrase SHOULD resemble the original
-                previous_question=prev_question_obj.question_text,
-                previous_answer=student_answer,
-                is_first_question=False,
-                clarify_mode=True,
-                clarify_reason=triage.get('rationale', ''),
-                session_id=str(session.id),
-            ))
-            question_data['blooms_level'] = prev_bloom
-
-        save_session_state(session, state)
-        logger.info(
-            '[turn] %s (streak=%d/%d) label=%s for criterion=%s',
-            'RESTATE' if triage['label'] in RESTATE_LABELS else 'CLARIFICATION',
-            state.clarification_streak, CLARIFICATION_CAP,
-            triage['label'], answered_criterion['name'],
-        )
-
-        return {
-            'clarification':       True,
-            'triage':              triage,
-            'session_complete':    False,
-            'analysis':            None,
-            'soft_score':          None,
-            'speech_confidence':   {},
-            'clarification_attempt': state.clarification_streak,
-            'clarified_question_payload': {
-                'question_data':   question_data,
-                'criterion':       answered_criterion,
-                'bloom_level':     prev_bloom,
-                'difficulty':      _bloom_to_difficulty(prev_bloom),
-            },
-        }
-
-    # Not clarifying (real attempt, or clarification budget exhausted) →
-    # reset the streak and proceed to normal scoring.
-    state.clarification_streak = 0
-
-    # ------------------------------------------------------------------
-    # Step B — Analyzer (3D rubric)
-    # ------------------------------------------------------------------
     transcript_recent = _build_recent_transcript(session)
-    analysis = analyze_answer(AnalyzerInput(
+    analyzer_input = AnalyzerInput(
         question_text=prev_question_obj.question_text,
         student_answer=student_answer,
-        criterion_name=answered_criterion['name'],
-        criterion_description=answered_criterion['description'],
+        topic_name=answered_topic['topic_name'],
+        topic_focus=answered_topic['topic_focus'],
         retrieved_chunks=retrieval['chunks'],
         contradicts_code_alerts=retrieval.get('contradicts_code_alerts') or [],
         transcript_recent=transcript_recent,
-    ))
-    _mark('B:analyzer(LLM)')
+    )
+
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        future_triage = executor.submit(triage_response, triage_input)
+        future_analyzer = executor.submit(analyze_answer, analyzer_input)
+
+        triage = future_triage.result()
+        _mark('A.5:triage(parallel)')
+
+        gate_labels = CLARIFY_LABELS | RESTATE_LABELS
+        if triage['label'] in gate_labels and state.clarification_streak < CLARIFICATION_CAP:
+            state.clarification_streak += 1
+            prev_bloom = getattr(prev_question_obj, 'blooms_level', 'Analyze') or 'Analyze'
+
+            if triage['label'] in RESTATE_LABELS:
+                question_data = {
+                    'question_text':  prev_question_obj.question_text,
+                    'blooms_level':   prev_bloom,
+                    'difficulty':     _bloom_to_difficulty(prev_bloom),
+                    'tier1_passed':   True,
+                    'tier1_failures': [],
+                    'critic_ran':     False,
+                    'critic_passed':  None,
+                    'critic_critique': '',
+                    'critic_scores':  {},
+                    'attempts':       0,
+                }
+            else:
+                question_data = generate_anchored_question(QuestionerInput(
+                    criterion_name=answered_topic['topic_name'],
+                    criterion_description=answered_topic['topic_focus'],
+                    retrieved_chunks=retrieval['chunks'],
+                    kg_signals=retrieval,
+                    difficulty=_bloom_to_difficulty(prev_bloom),
+                    question_hints=[],
+                    recent_questions=[],
+                    previous_question=prev_question_obj.question_text,
+                    previous_answer=student_answer,
+                    is_first_question=False,
+                    clarify_mode=True,
+                    clarify_reason=triage.get('rationale', ''),
+                    session_id=str(session.id),
+                ))
+                question_data['blooms_level'] = prev_bloom
+
+            save_session_state(session, state)
+            logger.info(
+                '[turn] %s (streak=%d/%d) label=%s for topic=%s',
+                'RESTATE' if triage['label'] in RESTATE_LABELS else 'CLARIFICATION',
+                state.clarification_streak, CLARIFICATION_CAP,
+                triage['label'], answered_topic['topic_name'],
+            )
+
+            return {
+                'clarification':       True,
+                'triage':              triage,
+                'session_complete':    False,
+                'analysis':            None,
+                'soft_score':          None,
+                'speech_confidence':   {},
+                'clarification_attempt': state.clarification_streak,
+                'clarified_question_payload': {
+                    'question_data':   question_data,
+                    'topic':           answered_topic,
+                    'bloom_level':     prev_bloom,
+                    'difficulty':      _bloom_to_difficulty(prev_bloom),
+                },
+            }
+
+        # Not clarifying (real attempt, or clarification budget exhausted) →
+        # reset the streak and proceed to normal scoring.
+        state.clarification_streak = 0
+        analysis = future_analyzer.result()
+        _mark('B:analyzer(parallel)')
 
     soft_score = float(analysis.get('soft_score', 0.5))
     correctness = float((analysis.get('correctness') or {}).get('score', 0.5))
 
     # ------------------------------------------------------------------
-    # Step B.1 — Material vs superficial inconsistency (A3, FAIRNESS).
-    # If consistency was flagged low, decide whether it's a real
-    # contradiction or just reworded phrasing. Superficial clashes get the
-    # penalty neutralised (asymmetric: can only lift consistency, not lower).
+    # Step B.5 — Confidence Analysis (Instant, needed for Strategist)
+    # ------------------------------------------------------------------
+    confidence = analyze_speech_confidence(
+        answer_text=student_answer,
+        speech_metrics=speech_metrics,
+    )
+    _mark('B.5:confidence')
+
+    # ------------------------------------------------------------------
+    # Step E — Pick next topic + run Strategist (instant <0.01s)
+    # ------------------------------------------------------------------
+    next_topic = pick_next_topic(viva_topics, state, session)
+    if next_topic is None:
+        next_topic = answered_topic
+
+    # Check if retrieval is needed for the next topic
+    if next_topic['topic_name'] != answered_topic['topic_name']:
+        retrieval_next = retrieve_hybrid_for_turn(
+            submission=submission,
+            criterion_name=next_topic['topic_name'],
+            criterion_description=next_topic['topic_focus'],
+            last_answer=student_answer,
+            top_k=3,
+        )
+    else:
+        retrieval_next = retrieval
+
+    first_crit_id = str(next_topic['source_criteria_ids'][0])
+
+    strategy = select_strategy(StrategistInput(
+        p_lt=state.bkt_states[first_crit_id].p_lt,
+        analysis=analysis,
+        kg_signals=retrieval_next,
+        intent_history=state.intent_history,
+        speech_confidence=confidence.get('flag'),
+    ))
+    _mark('E:strategist')
+
+    state.intent_history.append(strategy['socratic_intent'])
+    if len(state.intent_history) > 30:
+        state.intent_history = state.intent_history[-30:]
+
+    next_difficulty = _bloom_to_difficulty(strategy['bloom_level'])
+    is_first_for_topic = (
+        state.coverage[first_crit_id].turns == 0
+    )
+
+    recent_qs = list(
+        session.viva_questions.order_by('-question_order')
+        .values_list('question_text', flat=True)[:5]
+    )
+
+    # ------------------------------------------------------------------
+    # Steps B.1-3 (Fairness Rescue) AND Step F (Questioner LLM)
+    # Executed IN PARALLEL via ThreadPoolExecutor.
     # ------------------------------------------------------------------
     consistency_dim = analysis.get('consistency') or {}
     consistency_score = float(consistency_dim.get('score', 1.0))
-    if consistency_score < CONSISTENCY_REVIEW_THRESHOLD:
-        from viva_evaluator.services.agents.consistency_check import (
-            classify_inconsistency, ConsistencyInput,
-        )
-        from viva_evaluator.services.agents.analyzer import recompute_soft_score
+    need_b1 = consistency_score < CONSISTENCY_REVIEW_THRESHOLD
+    need_b2 = CHARITABLE_BAND[0] <= correctness <= CHARITABLE_BAND[1]
+    need_b3 = soft_score < SELF_CORRECTION_TRIGGER_MAX
 
-        verdict = classify_inconsistency(ConsistencyInput(
-            question_text=prev_question_obj.question_text,
-            student_answer=student_answer,
-            transcript_recent=transcript_recent,
-            consistency_evidence=consistency_dim.get('evidence_quote', ''),
-        ))
+    previous_answer = ''
+    if need_b3:
+        for _pair in reversed(transcript_recent):
+            if _pair.get('answer_text'):
+                previous_answer = _pair['answer_text']
+                break
+        if not previous_answer:
+            need_b3 = False
+
+    futures = {}
+    with ThreadPoolExecutor(max_workers=4) as main_executor:
+        # Submit Questioner LLM task
+        question_future = main_executor.submit(
+            generate_anchored_question,
+            QuestionerInput(
+                criterion_name=next_topic['topic_name'],
+                criterion_description=next_topic['topic_focus'],
+                retrieved_chunks=retrieval_next['chunks'],
+                kg_signals=retrieval_next,
+                difficulty=next_difficulty,
+                question_hints=[], # Topics don't have explicit hints
+                recent_questions=recent_qs,
+                previous_question=prev_question_obj.question_text,
+                previous_answer=student_answer,
+                is_first_question=is_first_for_topic,
+                question_number_in_criterion=state.coverage[first_crit_id].turns + 1,
+                weak_grounding=_grounding_is_weak(retrieval_next['chunks']),
+                session_id=str(session.id),
+            )
+        )
+
+        # Submit Fairness Rescue tasks in parallel
+        if need_b1:
+            from viva_evaluator.services.agents.consistency_check import (
+                classify_inconsistency, ConsistencyInput,
+            )
+            futures['b1'] = main_executor.submit(
+                classify_inconsistency,
+                ConsistencyInput(
+                    question_text=prev_question_obj.question_text,
+                    student_answer=student_answer,
+                    transcript_recent=transcript_recent,
+                    consistency_evidence=consistency_dim.get('evidence_quote', ''),
+                )
+            )
+
+        if need_b2:
+            from viva_evaluator.services.agents.charitable_check import (
+                assess_understanding, CharitableInput,
+            )
+            futures['b2'] = main_executor.submit(
+                assess_understanding,
+                CharitableInput(
+                    question_text=prev_question_obj.question_text,
+                    student_answer=student_answer,
+                    criterion_name=answered_topic['topic_name'],
+                    criterion_description=answered_topic['topic_focus'],
+                    retrieved_chunks=retrieval['chunks'],
+
+                )
+            )
+
+        if need_b3:
+            from viva_evaluator.services.agents.self_correction import (
+                assess_self_correction, SelfCorrectionInput,
+            )
+            futures['b3'] = main_executor.submit(
+                assess_self_correction,
+                SelfCorrectionInput(
+                    question_text=prev_question_obj.question_text,
+                    current_answer=student_answer,
+                    previous_answer=previous_answer,
+                )
+            )
+
+        # Wait for Questioner & Fairness results in parallel
+        question_data = question_future.result()
+        for key in list(futures.keys()):
+            futures[key] = futures[key].result()
+
+    _mark('F:questioner+fairness(parallel)')
+
+    # Apply B.1 (Consistency) update
+    if need_b1 and 'b1' in futures:
+        from viva_evaluator.services.agents.analyzer import recompute_soft_score
+        verdict = futures['b1']
         if not verdict['material']:
             analysis['consistency']['score'] = max(consistency_score, CONSISTENCY_NEUTRAL)
             analysis['consistency_adjustment'] = {
@@ -324,10 +501,6 @@ def process_answer_and_pick_next(
             }
             soft_score = recompute_soft_score(analysis)
             analysis['soft_score'] = soft_score
-            logger.info(
-                '[turn] A3 consistency suppressed (superficial): %.2f -> %.2f',
-                consistency_score, analysis['consistency']['score'],
-            )
         else:
             analysis['consistency_adjustment'] = {
                 'applied': False, 'material': True, 'rationale': verdict['rationale'],
@@ -347,8 +520,8 @@ def process_answer_and_pick_next(
         charitable = assess_understanding(CharitableInput(
             question_text=prev_question_obj.question_text,
             student_answer=student_answer,
-            criterion_name=answered_criterion['name'],
-            criterion_description=answered_criterion['description'],
+            criterion_name=answered_topic['topic_name'],
+            criterion_description=answered_topic['topic_focus'],
             retrieved_chunks=retrieval['chunks'],
         ))
         if charitable['understanding_sound'] and soft_score < CHARITABLE_FLOOR:
@@ -360,100 +533,79 @@ def process_answer_and_pick_next(
                 'adjusted_soft': CHARITABLE_FLOOR,
                 'rationale':     charitable['rationale'],
             }
-            logger.info(
-                '[turn] CHARITABLE rescue: soft %.2f -> %.2f (%s)',
-                original_soft, soft_score, charitable['rationale'][:80],
-            )
         else:
             analysis['charitable'] = {'applied': False,
                                       'rationale': charitable['rationale']}
-        _mark('B.2:charitable')
+
+    # Apply B.3 (Self-correction) update
+    if need_b3 and 'b3' in futures:
+        sc = futures['b3']
+        if sc['is_correction'] and sc['improved'] and soft_score < SELF_CORRECTION_FLOOR:
+            original_soft = soft_score
+            soft_score = SELF_CORRECTION_FLOOR
+            analysis['self_correction'] = {
+                'applied':       True,
+                'original_soft': round(original_soft, 4),
+                'adjusted_soft': SELF_CORRECTION_FLOOR,
+                'rationale':     sc['rationale'],
+            }
+            analysis['soft_score'] = soft_score
+        else:
+            analysis['self_correction'] = {'applied': False,
+                                            'rationale': sc['rationale']}
 
     # ------------------------------------------------------------------
-    # Step B.3 — Self-correction crediting (A4, FAIRNESS RESCUE).
-    # If the current answer corrects/improves the student's previous answer,
-    # credit the recovery. Asymmetric: can only RAISE the score, and only when
-    # the current score left room (below the trigger threshold).
+    # Step C, D — Ability Update & Termination Check
+    # (Confidence was computed in Step B.5 before the Strategist)
     # ------------------------------------------------------------------
-    if soft_score < SELF_CORRECTION_TRIGGER_MAX:
-        previous_answer = ''
-        for _pair in reversed(transcript_recent):
-            if _pair.get('answer_text'):
-                previous_answer = _pair['answer_text']
-                break
-        if previous_answer:
-            from viva_evaluator.services.agents.self_correction import (
-                assess_self_correction, SelfCorrectionInput,
-            )
-            sc = assess_self_correction(SelfCorrectionInput(
-                question_text=prev_question_obj.question_text,
-                current_answer=student_answer,
-                previous_answer=previous_answer,
-            ))
-            if sc['is_correction'] and sc['improved'] and soft_score < SELF_CORRECTION_FLOOR:
-                original_soft = soft_score
-                soft_score = SELF_CORRECTION_FLOOR
-                analysis['self_correction'] = {
-                    'applied':       True,
-                    'original_soft': round(original_soft, 4),
-                    'adjusted_soft': SELF_CORRECTION_FLOOR,
-                    'rationale':     sc['rationale'],
-                }
-                analysis['soft_score'] = soft_score
-                logger.info(
-                    '[turn] A4 self-correction credit: soft %.2f -> %.2f (%s)',
-                    original_soft, soft_score, sc['rationale'][:80],
-                )
-            else:
-                analysis['self_correction'] = {'applied': False,
-                                                'rationale': sc['rationale']}
-            _mark('B.3:self_correction')
 
     # ------------------------------------------------------------------
-    # Step B.5 — Speech confidence (Week 6)
-    # Strictly informational — does NOT affect BKT or rubric scoring.
-    # ------------------------------------------------------------------
-    confidence = analyze_speech_confidence(
-        answer_text=student_answer,
-        speech_metrics=speech_metrics,
-    )
-    _mark('B.5:confidence')
-
-    # ------------------------------------------------------------------
-    # Step C — Bayesian ability update for the answered criterion.
+    # Step C — Bayesian ability update for all criteria in the answered topic.
     # Difficulty-aware: the answered question's Bloom level sets the item
     # difficulty, so a correct hard answer raises ability more than a
     # correct easy one (and a wrong easy answer costs more).
     # ------------------------------------------------------------------
-    ability_state = state.get_or_init_bkt(str(answered_criterion['id']))
-    update_ability(
-        ability_state,
-        soft_score,
-        bloom_level=getattr(prev_question_obj, 'blooms_level', 'Analyze') or 'Analyze',
-    )
+    for crit_id in answered_topic['source_criteria_ids']:
+        ability_state = state.get_or_init_bkt(str(crit_id))
+        update_ability(
+            ability_state,
+            soft_score,
+            bloom_level=getattr(prev_question_obj, 'blooms_level', 'Analyze') or 'Analyze',
+        )
 
     # ------------------------------------------------------------------
     # Step D — Termination check (BEFORE strategist for the next turn)
     # ------------------------------------------------------------------
     # Coverage update happens through record_turn AFTER we've used the intent
     # for strategist input — but termination needs the *current* counts so
-    # we pre-update coverage here for the answered criterion only.
-    answered_id = str(answered_criterion['id'])
-    cov = state.coverage[answered_id]
-    cov.turns += 1
-    cov.sum_correctness += correctness
-    if correctness >= 0.3:
-        cov.correct_turns += 1
+    # we pre-update coverage here for all criteria in the answered topic.
+    for crit_id in answered_topic['source_criteria_ids']:
+        cov = state.coverage[str(crit_id)]
+        cov.turns += 1
+        cov.sum_correctness += correctness
+        if correctness >= 0.3:
+            cov.correct_turns += 1
     state.total_turns += 1
     state.soft_score_history.append(round(soft_score, 4))
 
-    decision = should_terminate(state, rubric)
+    decision = should_terminate(state, rubric, session=session)
     if decision.should_end:
         save_session_state(session, state)
-        # Mark the EvaluationSession status
         from core.models import EvaluationSession as ES
         session.status = ES.Status.COMPLETED
         session.save(update_fields=['status'])
+        
+        _mark('G:save')
+        total_time = _t.time() - _turn_t0
+        table_lines = ["\n" + "=" * 45]
+        table_lines.append(f"{'PIPELINE STEP (TERMINATED)':<25} | {'STEP (s)':>10} | {'CUMULATIVE (s)':>15}")
+        table_lines.append("-" * 55)
+        for label, timestamp, step_elapsed, total_elapsed in _stage_marks:
+            table_lines.append(f"{label:<25} | {step_elapsed:>9.2f}s | {total_elapsed:>14.2f}s")
+        table_lines.append("-" * 55)
+        table_lines.append(f"{'TOTAL (attempts=1)':<25} | {'':>10} | {total_time:>14.2f}s")
+        table_lines.append("=" * 55 + "\n")
+        logger.info("\n".join(table_lines))
 
         return {
             'analysis':              analysis,
@@ -464,82 +616,25 @@ def process_answer_and_pick_next(
             'next_question_payload': None,
         }
 
-    # ------------------------------------------------------------------
-    # Step E — Pick next criterion + run Strategist
-    # ------------------------------------------------------------------
-    next_criterion = pick_next_criterion(rubric, state)
-    if next_criterion is None:
-        # All quotas met but termination didn't fire (e.g., min turns not met).
-        # Fall back to the answered criterion to keep moving.
-        next_criterion = answered_criterion
-
-    strategy = select_strategy(StrategistInput(
-        p_lt=state.bkt_states[str(next_criterion['id'])].p_lt,
-        analysis=analysis,
-        kg_signals=retrieval,                         # reuse retrieval
-        intent_history=state.intent_history,
-        speech_confidence=confidence.get('flag'),
-    ))
-    _mark('E:strategist')
-
-    # Append intent to history for repetition prevention next turn
-    state.intent_history.append(strategy['socratic_intent'])
-    if len(state.intent_history) > 30:
-        state.intent_history = state.intent_history[-30:]
-
+    # (Step E & F are now handled in parallel earlier in the pipeline)
 
     # ------------------------------------------------------------------
-    # Step F — Generate next question via the Questioner
-    # ------------------------------------------------------------------
-    # Recompute retrieval for the *next* criterion if it differs from the
-    # answered one. This keeps anchoring focused on the new topic.
-    if str(next_criterion['id']) != str(answered_criterion['id']):
-        retrieval = retrieve_hybrid_for_turn(
-            submission=submission,
-            criterion_name=next_criterion['name'],
-            criterion_description=next_criterion['description'],
-            last_answer=student_answer,
-            top_k=3,
-        )
-    _mark('F:retrieval2')
-
-    next_difficulty = _bloom_to_difficulty(strategy['bloom_level'])
-    is_first_for_criterion = (
-        state.coverage[str(next_criterion['id'])].turns == 0
-    )
-
-    recent_qs = list(
-        session.viva_questions.order_by('-question_order')
-        .values_list('question_text', flat=True)[:5]
-    )
-
-    question_data = generate_anchored_question(QuestionerInput(
-        criterion_name=next_criterion['name'],
-        criterion_description=next_criterion['description'],
-        retrieved_chunks=retrieval['chunks'],
-        kg_signals=retrieval,
-        difficulty=next_difficulty,
-        question_hints=next_criterion.get('hints', []),
-        recent_questions=recent_qs,
-        previous_question=prev_question_obj.question_text,
-        previous_answer=student_answer,
-        is_first_question=is_first_for_criterion,
-        question_number_in_criterion=state.coverage[str(next_criterion['id'])].turns + 1,
-        weak_grounding=_grounding_is_weak(retrieval['chunks']),
-        session_id=str(session.id),
-    ))
-    _mark('F:questioner(LLM+critic)')
-
-    # Override the bloom level the Questioner echoes back with the Strategist's choice
-    question_data['blooms_level'] = strategy['bloom_level']
-
-    # ------------------------------------------------------------------
-    # Step G — Persist state and return
+    # Step G — Persist state and print full latency timeline summary
     # ------------------------------------------------------------------
     save_session_state(session, state)
     _mark('G:save')
-    logger.info('[turn-timing] TOTAL %.2fs (attempts=%s)',
-                _t.time() - _turn_t0, question_data.get('attempts'))
+    
+    total_time = _t.time() - _turn_t0
+    table_lines = ["\n" + "=" * 45]
+    table_lines.append(f"{'PIPELINE STEP':<25} | {'STEP (s)':>10} | {'CUMULATIVE (s)':>15}")
+    table_lines.append("-" * 55)
+    for label, timestamp, step_elapsed, total_elapsed in _stage_marks:
+        table_lines.append(f"{label:<25} | {step_elapsed:>9.2f}s | {total_elapsed:>14.2f}s")
+    table_lines.append("-" * 55)
+    table_lines.append(f"{'TOTAL (attempts=' + str(question_data.get('attempts', 1)) + ')':<25} | {'':>10} | {total_time:>14.2f}s")
+    table_lines.append("=" * 55 + "\n")
+    
+    logger.info("\n".join(table_lines))
 
     return {
         'analysis':              analysis,
@@ -548,14 +643,14 @@ def process_answer_and_pick_next(
         'session_complete':      False,
         'termination_reason':    None,
         'strategy':              strategy,
-        'next_criterion':        next_criterion,
+        'next_topic':            next_topic,
         'next_question_payload': {
             'question_data':        question_data,
-            'criterion':            next_criterion,
+            'topic':                next_topic,
             'bloom_level':          strategy['bloom_level'],
             'socratic_intent':      strategy['socratic_intent'],
             'difficulty':           next_difficulty,
-            'p_lt':                 state.bkt_states[str(next_criterion['id'])].p_lt,
+            'p_lt':                 state.bkt_states[str(next_topic['source_criteria_ids'][0])].p_lt,
         },
     }
 
@@ -578,21 +673,28 @@ def _bloom_to_difficulty(bloom: str) -> str:
     return _BLOOM_TO_DIFFICULTY.get(bloom, 'medium')
 
 
-def _resolve_answered_criterion(question_obj, rubric):
-    """Find which rubric criterion the answered question belonged to."""
+def _resolve_answered_topic(question_obj, topics):
+    """Find which viva topic the answered question belonged to."""
+    if hasattr(question_obj, 'viva_topic_name') and question_obj.viva_topic_name:
+        for t in topics:
+            if t['topic_name'] == question_obj.viva_topic_name:
+                return t
+    
+    # Fallback for old sessions or missing data
+    # Create a generic topic containing the single criterion if it exists
+    crit_ids = []
     try:
         ext = question_obj.extension
         if ext and ext.criteria_id:
-            crit_id = str(ext.criteria_id)
-            for c in rubric:
-                if c['id'] == crit_id:
-                    return c
+            crit_ids.append(str(ext.criteria_id))
     except Exception:
         pass
-    # Fallback to the first rubric criterion to avoid crashing
-    return rubric[0] if rubric else {
-        'id': 'unknown', 'name': 'General',
-        'description': '', 'questions_to_ask': 3, 'hints': [],
+        
+    return {
+        'topic_name': 'General',
+        'source_criteria_ids': crit_ids,
+        'suggested_questions': 2,
+        'topic_focus': '',
     }
 
 

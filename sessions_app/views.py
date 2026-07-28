@@ -725,7 +725,7 @@ class StudentSessionStatusView(APIView):
             from django.db.models import Q
             sessions_qs = EvaluationSession.objects.filter(
                 Q(student=sp) | Q(group__members__student=sp)
-            ).distinct().select_related('project', 'group').order_by('scheduled_start')
+            ).distinct().select_related('project', 'group').order_by('-scheduled_start')
 
             sessions = list(sessions_qs)
             # NOTE: status is now driven ONLY by explicit actions (the student's
@@ -749,8 +749,14 @@ class StudentSessionStatusView(APIView):
                 elif status_filter == 'completed':
                     sessions = [s for s in sessions if s.phase == 'completed']
 
-            data = StudentSessionStatusSerializer(sessions, many=True).data
-            return _ok('Session status retrieved.', data)
+            # Paginate (9 per page)
+            from rest_framework.pagination import PageNumberPagination
+            paginator = PageNumberPagination()
+            paginator.page_size = 9
+            paginated_sessions = paginator.paginate_queryset(sessions, request)
+
+            data = StudentSessionStatusSerializer(paginated_sessions, many=True).data
+            return paginator.get_paginated_response(data)
         except Exception as e:
             return _500(e)
 

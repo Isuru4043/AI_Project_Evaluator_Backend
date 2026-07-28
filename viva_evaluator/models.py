@@ -133,6 +133,9 @@ class VivaAnswerExtension(models.Model):
         blank=True,
     )
 
+    # Full JSON dump of the AI evaluation (rubric scores, gaps identified, socratic intent, etc.)
+    detailed_ai_analysis = models.JSONField(null=True, blank=True)
+
     class Meta:
         verbose_name = 'Viva Answer Extension'
         verbose_name_plural = 'Viva Answer Extensions'

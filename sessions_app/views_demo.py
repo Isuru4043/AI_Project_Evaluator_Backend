@@ -45,11 +45,10 @@ def _get_student_profile(user):
 # ─── Warm-up ─────────────────────────────────────────────────────────────────
 
 class StartWarmupView(APIView):
-    """Fire dummy pings to Modal endpoints to trigger GPU cold-starts.
+    """Signal presentation readiness.
 
-    Called by the frontend the instant "Start Demo" is clicked, so
-    containers are warm by the time the first real chunk arrives ~20-30s
-    later.
+    With Gemini Multimodal, no GPU container warming is needed as Google's
+    managed multimodal APIs are always-on.
     """
     permission_classes = [IsAuthenticated]
 
@@ -61,29 +60,11 @@ class StartWarmupView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        def _ping(url, label):
-            """Non-blocking ping — we don't care about the response."""
-            try:
-                http_requests.post(url, timeout=5)
-                logger.info('Warm-up ping sent to %s.', label)
-            except Exception:
-                # Modal may return 422 (missing body) — that's fine,
-                # the container still wakes up.
-                logger.info('Warm-up ping attempted for %s (container waking).', label)
-
-        # Fire both pings in background threads so we respond instantly
-        threading.Thread(
-            target=_ping,
-            args=(settings.MODAL_CANARY_URL, 'Canary-Qwen'),
-            daemon=True,
-        ).start()
-        threading.Thread(
-            target=_ping,
-            args=(settings.MODAL_QWEN_VL_URL, 'Qwen2.5-VL'),
-            daemon=True,
-        ).start()
-
-        return Response({'status': 'warmup_triggered'}, status=status.HTTP_200_OK)
+        logger.info('Presentation demo session %s ready (Gemini Multimodal).', session_id)
+        return Response({
+            'status': 'warmup_triggered',
+            'backend': 'gemini_multimodal',
+        }, status=status.HTTP_200_OK)
 
 
 # ─── Audio Upload ────────────────────────────────────────────────────────────

@@ -1,9 +1,12 @@
+import logging
 import os
 import shutil
 import time
 import subprocess
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 
 class SonarQubeService:
@@ -72,11 +75,18 @@ class SonarQubeService:
         
         command[0] = scanner_exe
 
-        subprocess.run(
-            command,
-            cwd=base_dir,
-            check=True,
-        )
+        scanner_timeout = int(os.getenv("CODE_ANALYSIS_SCANNER_TIMEOUT", "600"))
+        try:
+            subprocess.run(
+                command,
+                cwd=base_dir,
+                check=True,
+                timeout=scanner_timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"sonar-scanner timed out after {scanner_timeout}s."
+            ) from exc
 
     def get_summary(self, project_key):
         self._assert_configured()
@@ -100,7 +110,12 @@ class SonarQubeService:
                 measures.raise_for_status()
                 break
             except requests.exceptions.HTTPError as exc:
-                if exc.response.status_code == 404 and attempt < max_retries - 1:
+                logger.error(
+                    "SonarCloud measures/component failed (status=%s): %s",
+                    exc.response.status_code if exc.response is not None else "?",
+                    exc.response.text if exc.response is not None else "no response body",
+                )
+                if exc.response is not None and exc.response.status_code == 404 and attempt < max_retries - 1:
                     time.sleep(2)
                     continue
                 raise

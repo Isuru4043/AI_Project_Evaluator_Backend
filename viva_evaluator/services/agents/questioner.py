@@ -105,9 +105,30 @@ def generate_anchored_question(
     )
     question_text = (response.get('question_text') or '').strip()
 
-    # ---- Tier 1 validation -------------------------------------------------
-    result = validate_question(question_text, recent_questions=inp.recent_questions)
-    attempts = 1
+    # ---- Tier 1 and Tier 2 (Critic) parallel execution ---------------------
+    import concurrent.futures
+    from viva_evaluator.services.agents.critic import critique_question, CriticInput
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        future_tier1 = executor.submit(validate_question, question_text, recent_questions=inp.recent_questions)
+
+        future_critic = None
+        if enable_critic:
+            critic_inp = CriticInput(
+                question_text=question_text,
+                target_bloom=blooms,
+                target_intent=_intent_label_from_kg(inp.kg_signals),
+                retrieved_chunks=inp.retrieved_chunks,
+                student_last_answer=inp.previous_answer,
+            )
+            future_critic = executor.submit(critique_question, critic_inp)
+
+        result = future_tier1.result()
+        attempts = 1
+
+        initial_critic_result = None
+        if future_critic:
+            initial_critic_result = future_critic.result()
 
     # One Tier 1 retry with failure reasons fed back into the prompt
     if not result.passed and max_retries > 0:
@@ -131,6 +152,7 @@ def generate_anchored_question(
             question_text = retry_text
             result = retry_result
             response = retry_response
+            initial_critic_result = None  # Invalidated since question text changed
 
     # ---- Tier 2 (Critic) — only if Tier 1 passed --------------------------
     critic_passed = True
@@ -138,7 +160,16 @@ def generate_anchored_question(
     critic_data = None
     critic_ran = False
 
-    if enable_critic and result.passed and question_text:
+    # Optimization: if Tier 1 passed with high confidence (spoken length 18-45 words, low similarity),
+    # skip Critic LLM call to save ~1.4s latency.
+    is_high_confidence_tier1 = (
+        result.passed
+        and 18 <= result.word_count <= 45
+        and result.similarity_to_recent < 0.65
+        and not inp.clarify_mode
+    )
+
+    if enable_critic and result.passed and question_text and not is_high_confidence_tier1:
         critic_ran = True
         critic_passed, critic_critique, attempts, response, question_text, result, critic_data = (
             _run_critic_loop(
@@ -148,6 +179,7 @@ def generate_anchored_question(
                 response=response,
                 tier1_result=result,
                 attempts=attempts,
+                initial_critic_result=initial_critic_result,
             )
         )
 
@@ -200,9 +232,9 @@ HARD RULES — your question MUST follow ALL of these:
    Instead, refer to the CONTENT itself: "you described your encryption
    approach", "in your threat model", "your zero trust design".
 
-3. KEEP IT SHORT AND SPOKEN. Target length: 20-40 words. Maximum 60.
+3. KEEP IT SHORT AND SPOKEN. Target length: 15-25 words. Maximum 35.
    This is an ORAL exam — the student must hold the entire question in
-   their head. Long, written-style questions are bad. Examples:
+   their head in ONE breath. Ask the core question directly in 1 short sentence. Examples:
        BAD  (too long, written-style):
          "Considering your Zero Trust goal and the problem of compromised
           servers, how complete and architecturally sound is this single
@@ -217,31 +249,41 @@ HARD RULES — your question MUST follow ALL of these:
    idea in plain words instead of pasting their wording back at them.
    At most quote 3-5 words, not full sentences.
 
-5. PLAIN LANGUAGE. Phrase it as a real examiner SPEAKS aloud, not as
-   they would write in a paper. The student is a final-year CS student
-   so technical terms from THEIR project are fine ("encryption",
-   "authentication", "API"). What you must avoid is academic register
-   in the question itself.
+5. PLAIN CONVERSATIONAL LANGUAGE. Phrase it as a real examiner SPEAKS aloud across a coffee table.
+   The student is a final-year CS student, so technical terms from THEIR project are fine ("encryption",
+   "authentication", "API"). What you MUST avoid is academic paper register in the question itself.
 
-   THE READ-ALOUD TEST: Imagine asking the question across a table while
-   drinking coffee. If it sounds stiff, rewrite it.
+   THE READ-ALOUD TEST: Imagine asking the question across a table while drinking coffee.
+   If it sounds stiff or requires re-reading to understand, IT IS TOO COMPLEX. Rewrite it into plain English.
 
-       AVOID (stiff/written):              PREFER (spoken/natural):
-         "exfiltrate"                        "steal" / "leak" / "take"
-         "mitigate"                          "reduce" / "handle" / "fix"
-         "ascertain"                         "check" / "figure out"
-         "elucidate"                         "explain" / "walk through"
-         "ramifications"                     "effects" / "consequences"
-         "architecturally sound"             "good design" / "the right call"
-         "in totality"                       "overall"
-         "vis-à-vis"                         "compared to" / "against"
-         "considering the implications of"   "given" / "with"
-         "particularly those involving"      "especially when"
-         "as it pertains to"                 "for"
-         "in the context of"                 "for" / "when"
+       BANNED STIFF PHRASES (DO NOT USE):         PREFER CONVERSATIONAL PLAIN WORDS:
+         "facilitating the exchange"               "sharing files" / "sending data"
+         "remains untrusted"                       "stays out of the loop" / "can't read it"
+         "lifecycle of a file"                     "when a file is uploaded"
+         "scrambled ciphertext"                    "encrypted files"
+         "exfiltrate"                              "steal" / "leak" / "take"
+         "mitigate"                                "reduce" / "handle" / "fix"
+         "ascertain"                               "check" / "figure out"
+         "elucidate"                               "explain" / "walk through"
+         "ramifications"                            "effects" / "consequences"
+         "architecturally sound"                    "good design" / "the right call"
+         "in totality"                              "overall"
+         "vis-à-vis"                                "compared to" / "against"
+         "considering the implications of"          "given" / "with"
+         "particularly those involving"             "especially when"
+         "as it pertains to"                        "for"
+         "in the context of"                        "for" / "when"
 
-   General rule: a 1-syllable verb beats a 4-syllable verb when both
-   carry the same meaning.
+       FEW-SHOT EXAMPLES:
+         BAD (Stiff / Paper-style):
+           "You described a system where the server only handles scrambled ciphertext. Could you
+            walk me through the lifecycle of a file to explain how the server remains untrusted
+            while still facilitating the exchange?"
+         GOOD (Conversational / Spoken):
+           "You mentioned the server only receives encrypted files — walk me through how a user
+            uploads a file without the server reading its content?"
+
+   General rule: a 1-syllable verb beats a 4-syllable verb when both carry the same meaning.
 
 6. PUNCTUATION: end with exactly one '?'. No compound questions.
 
@@ -465,6 +507,7 @@ def _run_critic_loop(
     response: Dict,
     tier1_result: 'Tier1Result',
     attempts: int,
+    initial_critic_result: Optional[Dict] = None,
 ):
     """
     Run the Critic on the candidate question. On fail, regenerate with the
@@ -492,13 +535,16 @@ def _run_critic_loop(
     current_tier1 = tier1_result
 
     for attempt_idx in range(CRITIC_MAX_RETRIES + 1):
-        critic_result = critique_question(CriticInput(
-            question_text=current_text,
-            target_bloom=blooms,
-            target_intent=_intent_label_from_kg(inp.kg_signals),
-            retrieved_chunks=inp.retrieved_chunks,
-            student_last_answer=inp.previous_answer,
-        ))
+        if attempt_idx == 0 and initial_critic_result:
+            critic_result = initial_critic_result
+        else:
+            critic_result = critique_question(CriticInput(
+                question_text=current_text,
+                target_bloom=blooms,
+                target_intent=_intent_label_from_kg(inp.kg_signals),
+                retrieved_chunks=inp.retrieved_chunks,
+                student_last_answer=inp.previous_answer,
+            ))
 
         critic_score = (
             critic_result['specificity_score']

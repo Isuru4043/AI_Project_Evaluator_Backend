@@ -369,8 +369,29 @@ class ProjectSubmission(models.Model):
 
 
 # =============================================================================
-# 11. EVALUATION SESSIONS
+# 11. EVALUATION SESSIONS & GROUPING
 # =============================================================================
+
+class RubricGroupingCache(models.Model):
+    """Caches LLM-generated criteria grouping for a specific question budget."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        related_name='rubric_grouping_caches',
+    )
+    max_questions = models.IntegerField()
+    grouped_criteria = models.JSONField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Rubric Grouping Cache'
+        verbose_name_plural = 'Rubric Grouping Caches'
+        unique_together = ('project', 'max_questions')
+
+    def __str__(self):
+        return f"{self.project} - max {self.max_questions} q's"
+
 
 class EvaluationSession(models.Model):
     """A scheduled evaluation/viva session for a project."""
@@ -410,6 +431,18 @@ class EvaluationSession(models.Model):
     scheduled_start = models.DateTimeField()
     scheduled_end = models.DateTimeField()
     actual_start = models.DateTimeField(null=True, blank=True)
+    
+    # Adaptive Viva Limits
+    max_total_questions = models.IntegerField(default=25)
+    max_questions_per_topic = models.IntegerField(default=2)
+    grouping_cache = models.ForeignKey(
+        RubricGroupingCache,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='sessions',
+    )
+
     # Whether this session includes a demo/presentation phase. Set by the
     # examiner when scheduling. When False the student goes straight to the AI
     # viva; when True the room opens in demo mode until the presenting student
@@ -633,6 +666,11 @@ class VivaQuestion(models.Model):
         blank=True,
         related_name='viva_questions',
     )
+    
+    # New Multi-Criteria Fields for Adaptive Viva
+    viva_topic_name = models.CharField(max_length=255, null=True, blank=True)
+    source_criteria_ids = models.JSONField(null=True, blank=True)
+
     question_text = models.TextField()
     blooms_level = models.CharField(
         max_length=20,
