@@ -13,6 +13,7 @@ from viva_evaluator.views.session_views import (
     SessionListView,
     SessionStatusView,
     CurrentQuestionView,
+    SessionDetailedReportView,
 )
 
 from viva_evaluator.views.project_views import (

@@ -385,21 +385,6 @@ class AnswerSubmitView(APIView):
             soft_score = result['soft_score']
             confidence = result.get('speech_confidence') or {}
 
-            # Persist the answer + extension (audit trail).
-            answer = VivaAnswer.objects.create(
-                question=question,
-                student=student_profile,
-                transcribed_answer=answer_text,
-                # ai_answer_score is on a 0-10 scale historically; map from soft_score
-                ai_answer_score=round(soft_score * 10.0, 2),
-            )
-            VivaAnswerExtension.objects.create(
-                answer=answer,
-                llm_score=round(soft_score * 10.0, 2),
-                llm_reasoning=analysis.get('reasoning', '') or '',
-                next_difficulty_signal=_difficulty_signal_from_score(soft_score),
-            )
-
             # Build a unified rubric scores block for the response.
             rubric_payload = {
                 'correctness': analysis.get('correctness', {}),
@@ -414,6 +399,28 @@ class AnswerSubmitView(APIView):
                 'consistency_adjustment': analysis.get('consistency_adjustment', {'applied': False}),
                 'self_correction':      analysis.get('self_correction', {'applied': False}),
             }
+
+            detailed_analysis = {
+                "rubric": rubric_payload,
+                "strategy": result.get('strategy', {}),
+                "speech_confidence": confidence
+            }
+
+            # Persist the answer + extension (audit trail).
+            answer = VivaAnswer.objects.create(
+                question=question,
+                student=student_profile,
+                transcribed_answer=answer_text,
+                # ai_answer_score is on a 0-10 scale historically; map from soft_score
+                ai_answer_score=round(soft_score * 10.0, 2),
+            )
+            VivaAnswerExtension.objects.create(
+                answer=answer,
+                llm_score=round(soft_score * 10.0, 2),
+                llm_reasoning=analysis.get('reasoning', '') or '',
+                next_difficulty_signal=_difficulty_signal_from_score(soft_score),
+                detailed_ai_analysis=detailed_analysis,
+            )
 
             # ---- Session complete -------------------------------------------
             if result['session_complete']:
@@ -651,7 +658,10 @@ class CurrentQuestionView(APIView):
             return Response({"question": None, "session_complete": False},
                             status=status.HTTP_200_OK)
 
-        ext = latest_q.extension if hasattr(latest_q, 'extension') else None
+        try:
+            ext = latest_q.extension
+        except Exception:
+            ext = None
         return Response(
             {
                 "question": {
@@ -668,3 +678,109 @@ class CurrentQuestionView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+class SessionDetailedReportView(APIView):
+    """
+    GET /api/evaluator/sessions/<session_id>/detailed-report/
+    
+    Returns the comprehensive timeline of the AI viva session for the examiner.
+    Includes every question asked, the student's transcribed answer, and the
+    granular AI reasoning (gaps identified, strategies, soft scores) stored
+    in the detailed_ai_analysis JSON field.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, session_id):
+        from core.models import EvaluationSession, VivaQuestion
+        import traceback as tb_module
+
+        try:
+            try:
+                session = EvaluationSession.objects.select_related(
+                    'project', 'student__user', 'group'
+                ).get(id=session_id)
+            except EvaluationSession.DoesNotExist:
+                return Response({"error": "Session not found."}, status=status.HTTP_404_NOT_FOUND)
+
+            # Get session info
+            session_data = {
+                "session_id": str(session.id),
+                "project_name": session.project.project_name,
+                "status": session.status,
+                "scheduled_start": session.scheduled_start,
+                "scheduled_end": session.scheduled_end,
+                "location_room": session.location_room,
+                "student_name": session.student.user.full_name if session.student and getattr(session.student, 'user', None) else None,
+                "group_name": session.group.group_name if session.group else None,
+            }
+
+            # Get summary report if exists
+            report_data = None
+            try:
+                summary = session.summary_report
+                report_data = {
+                    "total_ai_score": summary.total_ai_score,
+                    "total_final_score": summary.total_final_score,
+                    "grade": summary.grade,
+                    "overall_feedback": summary.overall_feedback,
+                    "emotional_summary": summary.emotional_summary,
+                    "integrity_flags_summary": summary.integrity_flags_summary,
+                }
+            except Exception:
+                pass
+
+            # Fetch all questions and their answers in chronological order
+            questions_qs = (
+                session.viva_questions.all()
+                .prefetch_related('answers__student__user')
+                .order_by('question_order')
+            )
+
+            timeline = []
+            for q in questions_qs:
+                try:
+                    q_ext = q.extension
+                except Exception:
+                    q_ext = None
+                
+                # Usually one answer per question in the AI loop
+                answer = q.answers.order_by('-answered_at').first()
+                ans_ext = None
+                if answer:
+                    try:
+                        ans_ext = answer.extension
+                    except Exception:
+                        ans_ext = None
+
+                timeline.append({
+                    "question_id": str(q.id),
+                    "question_text": q.question_text,
+                    "question_source": q.question_source,
+                    "question_order": q.question_order,
+                    "blooms_level": q.blooms_level,
+                    "difficulty": q_ext.difficulty_level if q_ext else None,
+                    "criterion": q_ext.criteria.criteria_name if q_ext and q_ext.criteria else getattr(q, 'viva_topic_name', None),
+                    "asked_at": str(getattr(q, 'asked_at', None) or q.generated_at),
+                    "answer": {
+                        "answer_id": str(answer.id),
+                        "transcribed_answer": answer.transcribed_answer,
+                        "answered_at": str(answer.answered_at) if answer.answered_at else None,
+                        "answered_by": answer.student.user.full_name if getattr(answer, 'student', None) and getattr(answer.student, 'user', None) else None,
+                        "llm_score": float(ans_ext.llm_score) if ans_ext and ans_ext.llm_score is not None else None,
+                        "llm_reasoning": ans_ext.llm_reasoning if ans_ext else None,
+                        "detailed_ai_analysis": ans_ext.detailed_ai_analysis if ans_ext else None,
+                    } if answer else None
+                })
+
+            return Response({
+                "session": session_data,
+                "report": report_data,
+                "timeline": timeline,
+            }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            return Response({
+                "error": str(e),
+                "traceback": tb_module.format_exc(),
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
