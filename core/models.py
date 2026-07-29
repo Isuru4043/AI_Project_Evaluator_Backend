@@ -436,6 +436,7 @@ class EvaluationSession(models.Model):
         SCHEDULED = 'scheduled', 'Scheduled'
         IN_PROGRESS = 'in_progress', 'In Progress'
         COMPLETED = 'completed', 'Completed'
+        EXPIRED = 'expired', 'Expired'
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     project = models.ForeignKey(
