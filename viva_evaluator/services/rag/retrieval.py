@@ -136,18 +136,38 @@ def _rrf_fuse(dense_hits: List[Dict], lex_hits: List[Dict]) -> List[Dict]:
 
 
 def retrieve_for_indexing(
-    submission,
-    sample_query: str = 'project overview',
-    top_k: int = 1,
+    store: SubmissionVectorStore,
+    query: str,
+    top_k: int = 2
 ) -> List[Dict]:
     """
-    Sanity-check retrieval immediately after indexing — used by health checks.
+    Simpler dense-only retrieval used by the indexing pipeline to verify chunks.
+    No lexical or rerank overhead.
     """
-    store = load_index_for_submission(submission)
-    if store is None:
+    if store.num_chunks == 0:
         return []
-    query_vec = embed_text(sample_query)
-    return store.search(query_vec, top_k=top_k)
+    vec = embed_text(query)
+    return store.search(vec, top_k=top_k)
+
+
+def retrieve_module_materials(
+    project_id: str,
+    query: str,
+    top_k: int = 3
+) -> List[Dict]:
+    """
+    Retrieves chunks from the module materials index to set theoretical boundaries.
+    """
+    from viva_evaluator.services.rag.faiss_store import get_faiss_store
+    
+    index_name = f"module_materials_{project_id}"
+    store = get_faiss_store(index_name)
+    if store is None or store.num_chunks == 0:
+        return []
+        
+    vec = embed_text(query)
+    # Just do a simple dense search for now
+    return store.search(vec, top_k=top_k)
 
 
 # =============================================================================

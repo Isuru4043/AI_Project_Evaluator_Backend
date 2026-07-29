@@ -9,6 +9,9 @@ from viva_evaluator.views import (
     ProjectCreateView,
     ProjectListView,
     ProjectDetailView,
+    ModuleMaterialListView,
+    ModuleMaterialUploadView,
+    ModuleMaterialDeleteView,
     RubricCategoryCreateView,
     RubricCriteriaCreateView,
     QuestionHintCreateView,
@@ -51,6 +54,9 @@ urlpatterns = [
     path('projects/<uuid:project_id>/', ProjectDetailView.as_view(), name='project-detail'),
     path('projects/<uuid:project_id>/categories/', RubricCategoryCreateView.as_view(), name='category-create'),
     path('projects/<uuid:project_id>/sessions/', SessionListView.as_view(), name='session-list'),
+    path('projects/<uuid:project_id>/module-materials/', ModuleMaterialListView.as_view(), name='module-material-list'),
+    path('projects/<uuid:project_id>/module-materials/upload/', ModuleMaterialUploadView.as_view(), name='module-material-upload'),
+    path('projects/<uuid:project_id>/module-materials/<uuid:material_id>/', ModuleMaterialDeleteView.as_view(), name='module-material-delete'),
 
     # Rubric
     path('categories/<uuid:category_id>/criteria/', RubricCriteriaCreateView.as_view(), name='criteria-create'),

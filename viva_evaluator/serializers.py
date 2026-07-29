@@ -1,11 +1,23 @@
 from rest_framework import serializers
 from core.models import (
     Project, RubricCategory,
-    RubricCriteria, ProjectSubmission, EvaluationSession
+    RubricCriteria, ProjectSubmission, EvaluationSession,
+    ModuleMaterial
 )
 from viva_evaluator.models import (
     SubmissionIndexStatus, CriteriaQuestionHint
 )
+
+
+# =============================================================================
+# MODULE MATERIALS
+# =============================================================================
+
+class ModuleMaterialSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ModuleMaterial
+        fields = ['id', 'project', 'file_url', 'original_filename', 'processing_status', 'uploaded_at']
+        read_only_fields = ['id', 'processing_status', 'uploaded_at']
 
 
 # =============================================================================

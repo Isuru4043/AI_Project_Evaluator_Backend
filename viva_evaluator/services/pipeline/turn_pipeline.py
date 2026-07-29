@@ -417,25 +417,38 @@ def process_answer_and_pick_next(
 
     futures = {}
     with ThreadPoolExecutor(max_workers=4) as main_executor:
-        # Submit Questioner LLM task
-        question_future = main_executor.submit(
-            generate_anchored_question,
-            QuestionerInput(
-                criterion_name=next_topic['topic_name'],
-                criterion_description=next_topic['topic_focus'],
-                retrieved_chunks=retrieval_next['chunks'],
-                kg_signals=retrieval_next,
-                difficulty=next_difficulty,
-                question_hints=[], # Topics don't have explicit hints
-                recent_questions=recent_qs,
-                previous_question=prev_question_obj.question_text,
-                previous_answer=student_answer,
-                is_first_question=is_first_for_topic,
-                question_number_in_criterion=state.coverage[first_crit_id].turns + 1,
-                weak_grounding=_grounding_is_weak(retrieval_next['chunks']),
-                session_id=str(session.id),
-            )
+        # Submit retrieval of module materials
+        from viva_evaluator.services.rag.retrieval import retrieve_module_materials
+        module_future = main_executor.submit(
+            retrieve_module_materials,
+            project_id=str(session.project.id),
+            query=next_topic['topic_name'] + " " + (next_topic['topic_focus'] or ""),
+            top_k=2
         )
+        
+        # Submit Questioner LLM task (needs module_future result first)
+        def _run_questioner():
+            mod_chunks = module_future.result()
+            return generate_anchored_question(
+                QuestionerInput(
+                    criterion_name=next_topic['topic_name'],
+                    criterion_description=next_topic['topic_focus'],
+                    retrieved_chunks=retrieval_next['chunks'],
+                    module_chunks=mod_chunks,
+                    kg_signals=retrieval_next,
+                    difficulty=next_difficulty,
+                    question_hints=[], # Topics don't have explicit hints
+                    recent_questions=recent_qs,
+                    previous_question=prev_question_obj.question_text,
+                    previous_answer=student_answer,
+                    is_first_question=is_first_for_topic,
+                    question_number_in_criterion=state.coverage[first_crit_id].turns + 1,
+                    weak_grounding=_grounding_is_weak(retrieval_next['chunks']),
+                    session_id=str(session.id),
+                )
+            )
+            
+        question_future = main_executor.submit(_run_questioner)
 
         # Submit Fairness Rescue tasks in parallel
         if need_b1:

@@ -141,7 +141,43 @@ class StudentProfile(models.Model):
 
 
 # =============================================================================
-# 4. PROJECTS
+# 4. MODULE MATERIALS
+# =============================================================================
+
+class ModuleMaterial(models.Model):
+    """Lecture materials uploaded by the examiner to set the theoretical boundary."""
+
+    class ProcessingStatus(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        COMPLETED = 'completed', 'Completed'
+        FAILED = 'failed', 'Failed'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(
+        'Project',
+        on_delete=models.CASCADE,
+        related_name='module_materials',
+    )
+    file_url = models.TextField()
+    original_filename = models.CharField(max_length=255)
+    processing_status = models.CharField(
+        max_length=20,
+        choices=ProcessingStatus.choices,
+        default=ProcessingStatus.PENDING,
+    )
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Module Material'
+        verbose_name_plural = 'Module Materials'
+        ordering = ['-uploaded_at']
+
+    def __str__(self):
+        return f"{self.original_filename} ({self.processing_status})"
+
+
+# =============================================================================
+# 5. PROJECTS
 # =============================================================================
 
 class Project(models.Model):
