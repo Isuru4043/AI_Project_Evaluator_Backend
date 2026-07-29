@@ -70,8 +70,9 @@ class CodeAnalysisService:
                 extra_args=_scanner_extra_args(),
             )
             submission.sonar_task_id = read_sonar_task_id(repo_path)
+            submission.save(update_fields=["sonar_task_id"])
             logger.info(f"SonarQube scanner finished. Task ID: {submission.sonar_task_id}")
-
+            
             logger.info("Collecting code excerpt for Gemini...")
             code_excerpt = collect_code_excerpt(repo_path)
             if self.gemini.is_enabled():
