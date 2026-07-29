@@ -21,6 +21,9 @@ from viva_evaluator.views.project_views import (
     ProjectDetailView,
     ProjectListView,
     StudentListView,
+    ModuleMaterialListView,
+    ModuleMaterialUploadView,
+    ModuleMaterialDeleteView,
 )
 
 from viva_evaluator.views.rubric_views import (
