@@ -45,6 +45,7 @@ class QuestionerInput:
     criterion_name: str
     criterion_description: str = ''
     retrieved_chunks: List[Dict] = field(default_factory=list)
+    module_chunks: List[Dict] = field(default_factory=list)           # Module materials chunks
     kg_signals: Optional[Dict] = None                 # Week 3: hybrid retrieval output
     difficulty: str = 'medium'                        # 'easy' | 'medium' | 'hard'
     question_hints: List[str] = field(default_factory=list)
@@ -119,6 +120,7 @@ def generate_anchored_question(
                 target_bloom=blooms,
                 target_intent=_intent_label_from_kg(inp.kg_signals),
                 retrieved_chunks=inp.retrieved_chunks,
+                module_chunks=inp.module_chunks,
                 student_last_answer=inp.previous_answer,
             )
             future_critic = executor.submit(critique_question, critic_inp)
@@ -232,22 +234,28 @@ HARD RULES — your question MUST follow ALL of these:
    Instead, refer to the CONTENT itself: "you described your encryption
    approach", "in your threat model", "your zero trust design".
 
-3. KEEP IT SHORT AND SPOKEN. Target length: 15-25 words. Maximum 35.
+3. KEEP IT SHORT AND SPOKEN. Target length: 15-30 words. Maximum 40.
    This is an ORAL exam — the student must hold the entire question in
-   their head in ONE breath. Ask the core question directly in 1 short sentence. Examples:
-       BAD  (too long, written-style):
+   their head. You MUST use exactly TWO sentences if it helps keep it natural:
+   Sentence 1 states the context. Sentence 2 asks the question. This creates a 
+   natural pause for the Text-to-Speech engine.
+       BAD  (too long, written-style, single sentence):
          "Considering your Zero Trust goal and the problem of compromised
           servers, how complete and architecturally sound is this single
-          countermeasure against all confidentiality threats, particularly
-          those involving active server compromise or key management
-          vulnerabilities beyond data at rest?"
-       GOOD (short, spoken):
-         "You said AES-256-GCM gives confidentiality even if the server
-          is compromised — what threats does it not cover?"
+          countermeasure against all confidentiality threats?"
+       GOOD (short, spoken, two sentences):
+         "You said AES-256-GCM protects confidentiality if the server is compromised.
+          What threats does it not cover?"
 
 4. AVOID quoting long phrases from the report. Paraphrase the student's
    idea in plain words instead of pasting their wording back at them.
    At most quote 3-5 words, not full sentences.
+
+5. MODULE BOUNDARY (strict). If "Module Materials" context is provided below,
+   you MUST restrict the theoretical depth of your question to the concepts 
+   covered in those materials. Do NOT expect the student to know technologies
+   or concepts outside these materials, UNLESS they specifically mention an
+   external technology that is presented as an alternative in the Module Materials.
 
 5. PLAIN CONVERSATIONAL LANGUAGE. Phrase it as a real examiner SPEAKS aloud across a coffee table.
    The student is a final-year CS student, so technical terms from THEIR project are fine ("encryption",
@@ -325,6 +333,13 @@ HARD RULES — your question MUST follow ALL of these:
 
     The student wrote their report weeks ago. They may not remember
     exact phrasing of every term they invented.
+
+11. NO EXTERNAL ALTERNATIVES. Do NOT ask the student to compare their choice
+    against external technologies, frameworks, or algorithms that they did
+    NOT explicitly mention in their report or code. 
+    For example, if they used "AES-256-GCM", do NOT ask "Why didn't you use
+    AES-CBC?" unless AES-CBC is explicitly in the retrieved sources. It is
+    unfair to test them on alternatives they haven't studied.
 """
 
 
@@ -448,6 +463,14 @@ def _build_prompt(
 
     bloom_phrasing = _bloom_phrasing_hint(blooms_level)
 
+    module_block = ''
+    if inp.module_chunks:
+        module_text = format_chunks_for_prompt(inp.module_chunks)
+        module_block = (
+            "\nMODULE MATERIALS (Strict theoretical boundary — do not ask for knowledge outside this scope):\n"
+            f"{module_text}\n"
+        )
+
     return f"""You are an academic viva examiner conducting an oral examination.
 
 RUBRIC CRITERION:
@@ -460,6 +483,7 @@ their project — every concrete reference must come from here):
 {sources_block}
 {kg_block}
 {demo_block}
+{module_block}
 CONVERSATION CONTEXT:
 {conversation_block}
 {hints_block}{retry_block}{clarify_block}{weak_grounding_block}
@@ -543,13 +567,15 @@ def _run_critic_loop(
                 target_bloom=blooms,
                 target_intent=_intent_label_from_kg(inp.kg_signals),
                 retrieved_chunks=inp.retrieved_chunks,
+                module_chunks=inp.module_chunks,
                 student_last_answer=inp.previous_answer,
             ))
 
         critic_score = (
             critic_result['specificity_score']
             + critic_result['bloom_alignment_score']
-        ) / 2.0
+            + critic_result['boundary_check_score']
+        ) / 3.0
         if critic_result['hallucination_flag']:
             critic_score *= 0.5  # halve score for hallucination
 
@@ -561,6 +587,7 @@ def _run_critic_loop(
             best_critic_data = {
                 'specificity':     critic_result['specificity_score'],
                 'bloom_alignment': critic_result['bloom_alignment_score'],
+                'boundary_check':  critic_result['boundary_check_score'],
                 'hallucination':   critic_result['hallucination_flag'],
             }
             best_critic_passed = critic_result['passed']

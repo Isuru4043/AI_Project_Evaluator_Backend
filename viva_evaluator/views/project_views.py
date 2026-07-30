@@ -139,3 +139,121 @@ class StudentListView(APIView):
             for s in students
         ]
         return Response(data, status=status.HTTP_200_OK)
+
+
+# =============================================================================
+# 3. MODULE MATERIALS
+# =============================================================================
+
+class ModuleMaterialListView(APIView):
+    """
+    GET /api/viva/projects/<project_id>/module-materials/
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, project_id):
+        from core.models import ModuleMaterial
+        from viva_evaluator.serializers import ModuleMaterialSerializer
+        
+        materials = ModuleMaterial.objects.filter(project_id=project_id)
+        return Response(
+            ModuleMaterialSerializer(materials, many=True).data,
+            status=status.HTTP_200_OK
+        )
+
+
+class ModuleMaterialUploadView(APIView):
+    """
+    POST /api/viva/projects/<project_id>/module-materials/upload/
+    """
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request, project_id):
+        from core.models import Project, ModuleMaterial
+        from viva_evaluator.serializers import ModuleMaterialSerializer
+        import uuid
+        import os
+        from django.core.files.storage import default_storage
+        from django_q.tasks import async_task
+        
+        try:
+            project = Project.objects.get(id=project_id)
+        except Project.DoesNotExist:
+            return Response({"error": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        file_obj = request.FILES.get('file')
+        if not file_obj:
+            return Response({"error": "No file provided"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Validate extension
+        ext = os.path.splitext(file_obj.name)[1].lower()
+        if ext not in ['.pdf', '.pptx', '.docx']:
+            return Response({"error": "Only PDF, PPTX, and DOCX files are supported"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Save file
+        filename = f"module_materials/{project_id}/{uuid.uuid4()}{ext}"
+        saved_path = default_storage.save(filename, file_obj)
+        file_url = default_storage.url(saved_path)
+
+        # Create record
+        material = ModuleMaterial.objects.create(
+            project=project,
+            file_url=file_url,
+            original_filename=file_obj.name,
+            processing_status=ModuleMaterial.ProcessingStatus.PENDING
+        )
+
+        # Trigger background task
+        try:
+            async_task('viva_evaluator.tasks.process_module_material_task', material.id)
+        except Exception as e:
+            # If Q cluster isn't running or something fails synchronously
+            pass
+
+        return Response(
+            ModuleMaterialSerializer(material).data,
+            status=status.HTTP_201_CREATED
+        )
+
+class ModuleMaterialDeleteView(APIView):
+    """
+    DELETE /api/viva/projects/<project_id>/module-materials/<material_id>/
+    """
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, project_id, material_id):
+        from core.models import ModuleMaterial
+        from django.core.files.storage import default_storage
+        import urllib.parse
+        
+        try:
+            material = ModuleMaterial.objects.get(id=material_id, project_id=project_id)
+        except ModuleMaterial.DoesNotExist:
+            return Response({"error": "Material not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # 1. Delete original file from storage
+        if material.file_url:
+            parsed = urllib.parse.urlparse(material.file_url)
+            path = parsed.path
+            if 'module_materials/' in path:
+                path = path[path.index('module_materials/'):]
+            else:
+                path = material.file_url.replace('/media/', '')
+            
+            if default_storage.exists(path):
+                default_storage.delete(path)
+
+        # 2. Delete vectors/chunks if they exist
+        chunks_path = f"module_materials/{material.id}_chunks.json"
+        faiss_path = f"module_materials/{material.id}_faiss.bin"
+        
+        if default_storage.exists(chunks_path):
+            default_storage.delete(chunks_path)
+        if default_storage.exists(faiss_path):
+            default_storage.delete(faiss_path)
+
+        # 3. Delete DB record
+        material.delete()
+
+        return Response(status=status.HTTP_204_NO_CONTENT)

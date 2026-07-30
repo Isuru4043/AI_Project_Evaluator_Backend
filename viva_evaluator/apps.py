@@ -27,3 +27,19 @@ class VivaEvaluatorConfig(AppConfig):
 
         threading.Thread(target=_warmup_models, daemon=True).start()
 
+        # Schedule the sweeper task
+        def _schedule_tasks():
+            from django_q.models import Schedule
+            if not Schedule.objects.filter(func='viva_evaluator.tasks.sweep_expired_sessions_task').exists():
+                Schedule.objects.create(
+                    func='viva_evaluator.tasks.sweep_expired_sessions_task',
+                    schedule_type=Schedule.MINUTES,
+                    minutes=5,
+                    repeats=-1
+                )
+        
+        try:
+            _schedule_tasks()
+        except Exception as e:
+            logger.warning('[boot] Task scheduling failed (DB might not be ready): %s', e)
+

@@ -31,6 +31,10 @@ class ManualScheduleView(APIView):
             project = Project.objects.filter(id=project_id).first()
             if not project:
                 return _err('Project not found.', code=404)
+                
+            from core.models import ModuleMaterial
+            if ModuleMaterial.objects.filter(project=project, processing_status=ModuleMaterial.ProcessingStatus.PENDING).exists():
+                return _err('Please wait for all Module Content materials to finish processing before scheduling sessions.', code=400)
 
             ep = _get_examiner_profile(request.user)
             if not _is_assigned(ep, project):
@@ -111,6 +115,10 @@ class AutoScheduleView(APIView):
             project = Project.objects.filter(id=project_id).first()
             if not project:
                 return _err('Project not found.', code=404)
+                
+            from core.models import ModuleMaterial
+            if ModuleMaterial.objects.filter(project=project, processing_status=ModuleMaterial.ProcessingStatus.PENDING).exists():
+                return _err('Please wait for all Module Content materials to finish processing before scheduling sessions.', code=400)
 
             ep = _get_examiner_profile(request.user)
             if not _is_assigned(ep, project):
