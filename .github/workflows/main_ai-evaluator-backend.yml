@@ -67,45 +67,45 @@ jobs:
 
   # Note: This Oracle deployment is preserved for your future use.
   # Currently commented out so it doesn't fail your GitHub Actions pipeline since the server is offline.
-  # deploy_oracle:
-  #   runs-on: ubuntu-latest
-  #   needs: build
-  #   
-  #   steps:
-  #     - name: Download artifact from build job
-  #       uses: actions/download-artifact@v4
-  #       with:
-  #         name: python-app
-  #         
-  #     - name: Copy files to Oracle Server
-  #       uses: appleboy/scp-action@v0.1.7
-  #       with:
-  #         host: ${{ secrets.ORACLE_HOST }}
-  #         username: ${{ secrets.ORACLE_USERNAME }}
-  #         key: ${{ secrets.ORACLE_SSH_KEY }}
-  #         source: "."
-  #         target: "/home/ubuntu/app"
-  # 
-  #     - name: Restart Server
-  #       uses: appleboy/ssh-action@v1.0.3
-  #       with:
-  #         host: ${{ secrets.ORACLE_HOST }}
-  #         username: ${{ secrets.ORACLE_USERNAME }}
-  #         key: ${{ secrets.ORACLE_SSH_KEY }}
-  #         script: |
-  #           cd /home/ubuntu/app
-  #           
-  #           # Setup virtual environment and install dependencies
-  #           python3 -m venv venv
-  #           source venv/bin/activate
-  #           pip install -r requirements.txt
-  #           
-  #           # Run migrations just in case
-  #           python3 manage.py migrate
-  #           
-  #           # Restart the web server
-  #           sudo systemctl restart gunicorn
-  #           
-  #           # If you are also running Django Q cluster on the server, restart it too
-  #           sudo systemctl restart django-q
+  deploy_oracle:
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+      - name: Download artifact from build job
+        uses: actions/download-artifact@v4
+        with:
+          name: python-app
+          
+      - name: Copy files to Oracle Server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.ORACLE_HOST }}
+          username: ${{ secrets.ORACLE_USERNAME }}
+          key: ${{ secrets.ORACLE_SSH_KEY }}
+          source: "."
+          target: "/home/ubuntu/app"
+  
+      - name: Restart Server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.ORACLE_HOST }}
+          username: ${{ secrets.ORACLE_USERNAME }}
+          key: ${{ secrets.ORACLE_SSH_KEY }}
+          script: |
+            cd /home/ubuntu/app
+            
+            # Setup virtual environment and install dependencies
+            python3 -m venv venv
+            source venv/bin/activate
+            pip install -r requirements.txt
+            
+            # Run migrations just in case
+            python3 manage.py migrate
+            
+            # Restart the web server
+            sudo systemctl restart gunicorn
+            
+            # If you are also running Django Q cluster on the server, restart it too
+            sudo systemctl restart django-q
 
