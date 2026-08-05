@@ -749,6 +749,11 @@ class StudentSessionStatusView(APIView):
                 elif status_filter == 'completed':
                     sessions = [s for s in sessions if s.phase == 'completed']
 
+            if request.query_params.get('fetch_all') == 'true':
+                data = StudentSessionStatusSerializer(sessions, many=True).data
+                from rest_framework.response import Response
+                return Response({'count': len(data), 'results': data})
+
             # Paginate (9 per page)
             from rest_framework.pagination import PageNumberPagination
             paginator = PageNumberPagination()
