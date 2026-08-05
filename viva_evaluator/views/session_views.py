@@ -725,6 +725,8 @@ class SessionDetailedReportView(APIView):
                     "overall_feedback": summary.overall_feedback,
                     "emotional_summary": summary.emotional_summary,
                     "integrity_flags_summary": summary.integrity_flags_summary,
+                    "scores_status": summary.scores_status,
+                    "scores_approved_at": summary.scores_approved_at.isoformat() if summary.scores_approved_at else None,
                 }
             except Exception:
                 pass
@@ -767,6 +769,8 @@ class SessionDetailedReportView(APIView):
                         "answered_at": str(answer.answered_at) if answer.answered_at else None,
                         "answered_by": answer.student.user.full_name if getattr(answer, 'student', None) and getattr(answer.student, 'user', None) else None,
                         "llm_score": float(ans_ext.llm_score) if ans_ext and ans_ext.llm_score is not None else None,
+                        "examiner_override_score": float(answer.examiner_override_score) if answer.examiner_override_score is not None else None,
+                        "examiner_override_note": answer.examiner_override_note,
                         "llm_reasoning": ans_ext.llm_reasoning if ans_ext else None,
                         "detailed_ai_analysis": ans_ext.detailed_ai_analysis if ans_ext else None,
                     } if answer else None
