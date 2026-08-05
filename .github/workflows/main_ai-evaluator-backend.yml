@@ -64,6 +64,7 @@ jobs:
           app-name: 'ai-evaluator-backend'
           slot-name: 'Production'
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_9452CF14804B486897E9CA9126CD49BC }}
+          startup-command: 'bash startup.sh'
 
   # Note: This Oracle deployment is preserved for your future use.
   # Currently commented out so it doesn't fail your GitHub Actions pipeline since the server is offline.
