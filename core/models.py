@@ -765,6 +765,15 @@ class VivaAnswer(models.Model):
     ai_answer_score = models.DecimalField(
         max_digits=5, decimal_places=2, null=True, blank=True,
     )
+
+    # Human-in-the-Loop: examiner can override the AI score for this answer.
+    # When NULL the AI score is used as-is; when set it overrides the AI score
+    # in all downstream calculations and the report.
+    examiner_override_score = models.DecimalField(
+        max_digits=5, decimal_places=2, null=True, blank=True,
+    )
+    examiner_override_note = models.TextField(null=True, blank=True)
+
     answered_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -882,6 +891,19 @@ class SessionSummaryReport(models.Model):
         blank=True,
         related_name='finalized_reports',
     )
+
+    # Human-in-the-Loop approval workflow.
+    # Scores stay DRAFT until the examiner explicitly clicks "Approve Scores".
+    class ScoresStatus(models.TextChoices):
+        DRAFT    = 'draft',    'Draft'
+        APPROVED = 'approved', 'Approved'
+
+    scores_status = models.CharField(
+        max_length=20,
+        choices=ScoresStatus.choices,
+        default=ScoresStatus.DRAFT,
+    )
+    scores_approved_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         verbose_name = 'Session Summary Report'

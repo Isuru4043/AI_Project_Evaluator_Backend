@@ -33,6 +33,10 @@ from viva_evaluator.views import (
     BriefRejectView,
     AblationRunView,
 )
+from viva_evaluator.views.scoring_views import (
+    PatchAnswerScoreView,
+    ApproveSessionScoresView,
+)
 
 urlpatterns = [
     # Submissions
@@ -48,6 +52,10 @@ urlpatterns = [
     path('sessions/<uuid:session_id>/status/', SessionStatusView.as_view(), name='session-status'),
     path('sessions/<uuid:session_id>/current/', CurrentQuestionView.as_view(), name='session-current'),
     path('sessions/<uuid:session_id>/final-scores/', FinalScoreSubmitView.as_view(), name='final-scores'),
+
+    # Human-in-the-Loop: per-question score editing + bulk approval
+    path('sessions/<uuid:session_id>/answers/<uuid:answer_id>/score/', PatchAnswerScoreView.as_view(), name='answer-score-patch'),
+    path('sessions/<uuid:session_id>/approve-scores/', ApproveSessionScoresView.as_view(), name='session-approve-scores'),
 
     # Projects
     path('projects/', ProjectListView.as_view(), name='project-list-create'),

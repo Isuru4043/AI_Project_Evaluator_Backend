@@ -79,6 +79,15 @@ def generate_post_viva_report(session) -> Dict:
     # ---- Knowledge audit ----
     knowledge_audit = _build_knowledge_audit(session)
 
+    # ---- Human-in-the-Loop: approval status ----
+    try:
+        summary = session.summary_report
+        scores_status    = summary.scores_status
+        scores_approved_at = summary.scores_approved_at.isoformat() if summary.scores_approved_at else None
+    except Exception:
+        scores_status    = 'draft'
+        scores_approved_at = None
+
     return {
         'session_id':           str(session.id),
         'overall_score':        round(overall_score, 3),
@@ -92,6 +101,9 @@ def generate_post_viva_report(session) -> Dict:
         'total_turns':          state.total_turns,
         'intent_history':       list(state.intent_history),
         'charts':               charts,
+        # Human-in-the-Loop approval fields
+        'scores_status':        scores_status,
+        'scores_approved_at':   scores_approved_at,
     }
 
 
@@ -339,15 +351,32 @@ def _build_transcript(questions) -> List[Dict]:
             except Exception:
                 reasoning = ''
 
+        # Collect examiner override if the examiner edited the score
+        examiner_override_score = None
+        examiner_override_note  = ''
+        answer_id = None
+        if answer:
+            answer_id = str(answer.id)
+            if answer.examiner_override_score is not None:
+                examiner_override_score = float(answer.examiner_override_score)
+            examiner_override_note = answer.examiner_override_note or ''
+
+        # The effective score shown in the report: examiner override wins if set
+        effective_score = examiner_override_score if examiner_override_score is not None else ai_score
+
         out.append({
-            'question_order': q.question_order,
-            'question_text':  q.question_text,
-            'blooms_level':   q.blooms_level,
-            'criterion':      criterion_name,
-            'difficulty':     difficulty,
-            'answer_text':    answer.transcribed_answer if answer else '',
-            'ai_answer_score': ai_score,
-            'reasoning':      reasoning,
+            'answer_id':              answer_id,
+            'question_order':         q.question_order,
+            'question_text':          q.question_text,
+            'blooms_level':           q.blooms_level,
+            'criterion':              criterion_name,
+            'difficulty':             difficulty,
+            'answer_text':            answer.transcribed_answer if answer else '',
+            'ai_answer_score':        ai_score,
+            'examiner_override_score': examiner_override_score,
+            'examiner_override_note': examiner_override_note,
+            'effective_score':        effective_score,
+            'reasoning':              reasoning,
         })
     return out
 
