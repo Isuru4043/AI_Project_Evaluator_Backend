@@ -84,6 +84,36 @@ class TestSummary:
         assert len(summary.session_flags) == 1
         assert summary.timeline[0].t_start_ms == 0  # sorted
 
+    def test_off_screen_glances_reach_the_artifact(self, group_manifest):
+        """Look-aways must survive the fold into the summary — they are the
+        gaze signal the examiner actually acts on."""
+        events = [
+            *[
+                BehavioralEvent(t_ms=t, kind=BehavioralKind.GAZE_SAMPLE,
+                                student_id="s1", payload={"on_camera": on})
+                # off 0–1000, back on at 1000, off again 2000–3000
+                for t, on in [(0, False), (500, False), (1000, True),
+                              (2000, False), (3000, True)]
+            ],
+            BehavioralEvent(t_ms=0, kind=BehavioralKind.OFF_SCREEN_GLANCE,
+                            student_id="s1", payload={"duration_ms": 1000}),
+            BehavioralEvent(t_ms=2000, kind=BehavioralKind.OFF_SCREEN_GLANCE,
+                            student_id="s1", payload={"duration_ms": 1000}),
+            IntegrityFlag(t_ms=2000, video_timecode="00:00:02",
+                          kind=IntegrityKind.GAZE_OFF_SCREEN,
+                          note="looked away", student_id="s1"),
+        ]
+        summary = build_summary(group_manifest, events)
+        s1 = summary.per_student[0]
+
+        assert s1.off_screen_glance_count == 2
+        # gaps while off camera: 0→500, 500→1000, 2000→3000
+        assert s1.off_screen_time_ms == 2000
+        assert s1.attention_pct == 40.0  # 2 of 5 samples on camera
+        # the flag routes to the student, not the session bucket
+        assert [f.kind for f in s1.integrity_flags] == [IntegrityKind.GAZE_OFF_SCREEN]
+        assert summary.session_flags == []
+
     def test_recording_ref_carried(self, individual_manifest):
         rec = RecordingRef(path="session_x.mp4", video_offset_ms=1500)
         summary = build_summary(individual_manifest, [], recording=rec)

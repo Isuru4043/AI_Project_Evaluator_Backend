@@ -17,7 +17,7 @@ from exam_cv.capture.camera import FakeCamera
 from exam_cv.contracts.schemas import BehavioralKind, IntegrityKind
 from exam_cv.faces.identity import EnrollmentGallery, IdentityResolver
 from exam_cv.faces.mesh import FaceObservation
-from exam_cv.service import RunnerConfig, SessionRunner
+from exam_cv.service import RunnerConfig, SessionRunner, _UnusedEmbedder
 
 from test_identity_and_tracker import FakeEmbedder, synthetic_landmarks
 
@@ -145,6 +145,56 @@ def test_group_session_end_to_end(group_manifest, tmp_path):
 
     # artifact file published
     assert (tmp_path / f"session_{group_manifest.session_id}_summary.json").exists()
+
+
+def test_individual_session_flags_an_intruder(individual_manifest, tmp_path):
+    """A second person joining an individual viva is THE extra-person case.
+
+    Identity here is wired exactly as exam_cv.analyze builds it for individual
+    mode — an empty gallery and an embedder that refuses to run — so this also
+    guards the regression where a second face pushed the runner down the
+    recognition path and killed the whole analysis mid-session.
+    """
+    identity = IdentityResolver(EnrollmentGallery(), _UnusedEmbedder())
+
+    class IntruderMesh(FakeMesh):
+        """The student alone until 3s, then a stranger leans in."""
+
+        def _scene(self, image):
+            i = int(image[0, 0, 0]) | (int(image[0, 0, 1]) << 8)
+            faces = [
+                FaceObservation(
+                    1, self.BBOX_S1,
+                    synthetic_landmarks(mouth_open=0.30 if i % 2 else 0.05),
+                )
+            ]
+            if i * STEP_MS / 1000.0 >= 3:
+                # smaller bbox — the student stays the primary face
+                faces.append(
+                    FaceObservation(2, self.BBOX_UNKNOWN, synthetic_landmarks())
+                )
+            return faces
+
+    runner = SessionRunner(
+        manifest=individual_manifest,
+        frames=FakeCamera(synthetic_frames=make_frames()[: int(8 * FPS)], fps=FPS),
+        mesh=IntruderMesh(),
+        identity_resolver=identity,
+        output_dir=tmp_path,
+        voice_active_fn=lambda t: True,
+        config=RunnerConfig(),
+    )
+    summary = runner.run()
+
+    extra = [
+        f for f in summary.session_flags
+        if f.kind in (IntegrityKind.EXTRA_PERSON, IntegrityKind.UNKNOWN_FACE)
+    ]
+    assert len(extra) == 1, "intruder produced no integrity flag"
+    assert extra[0].video_timecode.startswith("00:00:0")
+
+    # the student is still attributed normally — the intruder never displaces them
+    assert summary.per_student[0].turn_count >= 1
 
 
 def test_individual_session_no_embeds(individual_manifest, tmp_path):

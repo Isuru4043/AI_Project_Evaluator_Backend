@@ -73,6 +73,34 @@ class SessionRunner:
         self.events_path = self.output_dir / f"session_{manifest.session_id}_events.jsonl"
         self._individual = manifest.mode == SessionMode.INDIVIDUAL
 
+    def _assign_identities(self, observations, frame, roster_ids) -> list:
+        """student_id (or None = unknown face) for each observation.
+
+        Individual mode never embeds: the roster holds one student, so the
+        PRIMARY face — the largest, i.e. the one at the camera — is them, and
+        every other face in frame is by definition not on the roster. That is
+        exactly the extra-person case the integrity flags exist for, so those
+        faces must resolve to unknown rather than being run through a
+        recognition model that individual mode deliberately never loads.
+        """
+        if self._individual:
+            if not observations:
+                return []
+            primary = max(
+                observations,
+                key=lambda o: (o.bbox[2] - o.bbox[0]) * (o.bbox[3] - o.bbox[1]),
+            )
+            return [roster_ids[0] if o is primary else None for o in observations]
+
+        return [
+            self.identity.resolve(
+                obs.track_id,
+                frame.t_ms,
+                crop_provider=lambda o=obs: self.mesh.crop(frame.image, o),
+            )
+            for obs in observations
+        ]
+
     def run(self):
         from .faces.mesh import (  # local import keeps fakes numpy-only
             coarse_gaze_on_camera,
@@ -87,8 +115,8 @@ class SessionRunner:
             min_turn_ms=self.cfg.min_turn_ms,
             merge_gap_ms=self.cfg.merge_gap_ms,
         )
-        gaze = GazeAnalyzer()
         video_offset_ms = 0
+        gaze = GazeAnalyzer(video_offset_ms=video_offset_ms)
         presence = PresenceAnalyzer(roster_ids, video_offset_ms=video_offset_ms)
 
         next_window = self.cfg.window_ms
@@ -112,15 +140,10 @@ class SessionRunner:
 
                 identified: dict[str, "FaceObservation"] = {}
                 unknown_faces = 0
-                for obs in observations:
-                    if self._individual and len(observations) == 1:
-                        sid = roster_ids[0]  # roster of one: no embedding needed
-                    else:
-                        sid = self.identity.resolve(
-                            obs.track_id,
-                            frame.t_ms,
-                            crop_provider=lambda o=obs: self.mesh.crop(frame.image, o),
-                        )
+                for obs, sid in zip(
+                    observations,
+                    self._assign_identities(observations, frame, roster_ids),
+                ):
                     if sid is None:
                         unknown_faces += 1
                     else:
@@ -151,15 +174,10 @@ class SessionRunner:
                     tick_obs = self.mesh.process_tick(frame.image)
                     gaze_map: dict[str, bool] = {}
                     tick_unknown = 0
-                    for obs in tick_obs:
-                        if self._individual and len(tick_obs) == 1:
-                            sid = roster_ids[0]
-                        else:
-                            sid = self.identity.resolve(
-                                obs.track_id,
-                                frame.t_ms,
-                                crop_provider=lambda o=obs: self.mesh.crop(frame.image, o),
-                            )
+                    for obs, sid in zip(
+                        tick_obs,
+                        self._assign_identities(tick_obs, frame, roster_ids),
+                    ):
                         if sid is None:
                             tick_unknown += 1
                             continue

@@ -27,6 +27,14 @@ AZURE_CONTAINER_REPORTS = "reports"
 AZURE_CONTAINER_VIDEOS = "videos"
 AZURE_CONTAINER_AUDIOS = "audios"
 AZURE_CONTAINER_FACES = "faces"
+# Viva session recordings written by Agora Cloud Recording. Deliberately its
+# OWN container, separate from `videos`: Agora's servers hold this account key
+# to write into it, the files are large and have their own retention/lifecycle
+# needs, and the behavioral analysis is the only consumer. Overridable so a
+# deployment can point it at a dedicated storage lifecycle policy.
+AZURE_CONTAINER_RECORDINGS = os.getenv(
+    "AZURE_CONTAINER_RECORDINGS", "viva-recordings",
+)
 
 
 def _get_blob_service_client():
