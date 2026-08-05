@@ -18,7 +18,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 
 # Sentinel student_id used when the active speaker cannot be attributed with
 # confidence. Never silently guess (HITL invariant).
@@ -100,6 +100,10 @@ class IntegrityKind(str, Enum):
     UNKNOWN_FACE = "unknown_face"
     EXTRA_PERSON = "extra_person"
     STUDENT_ABSENT = "student_absent"
+    # Sustained look away from the screen. Longer than the ordinary
+    # thinking-glance the GAZE_SAMPLE stream already captures, so it is worth
+    # a timecoded pointer — still evidence for the examiner, not a verdict.
+    GAZE_OFF_SCREEN = "gaze_off_screen"
 
 
 class IntegrityFlag(BaseModel):
@@ -164,6 +168,11 @@ class StudentSummary(BaseModel):
     speaking_share: float = Field(default=0.0, ge=0.0, le=1.0)
     turn_count: int = 0
     attention_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    # Sustained look-aways: how many, and how long off-screen in total. The
+    # count is the aggregate an examiner reads at a glance; the egregious ones
+    # also appear individually in integrity_flags with a video timecode.
+    off_screen_glance_count: int = 0
+    off_screen_time_ms: int = 0
     integrity_flags: list[IntegrityFlag] = Field(default_factory=list)
 
 

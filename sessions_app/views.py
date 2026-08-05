@@ -567,10 +567,21 @@ class EndVivaView(APIView):
             video_sas = None
             audio_sas = None
             if video_blob_url:
+                # Derive the container from the URL rather than assuming one:
+                # the recording comes either from Agora Cloud Recording (its own
+                # recordings container) or from a client upload (videos), and
+                # only the URL knows which.
                 try:
-                    from AI_Evaluator_Backend.azure_storage import generate_sas_url, AZURE_CONTAINER_VIDEOS
-                    blob_path = f"{session.project_id}/{session.id}/{video_file.name}"
-                    video_sas = generate_sas_url(AZURE_CONTAINER_VIDEOS, blob_path)
+                    from urllib.parse import unquote, urlparse
+
+                    from AI_Evaluator_Backend.azure_storage import generate_sas_url
+
+                    container, _, blob_path = (
+                        unquote(urlparse(video_blob_url).path)
+                        .lstrip('/')
+                        .partition('/')
+                    )
+                    video_sas = generate_sas_url(container, blob_path)
                 except Exception:
                     video_sas = video_blob_url
 

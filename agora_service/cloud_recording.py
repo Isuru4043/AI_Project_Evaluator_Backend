@@ -53,7 +53,7 @@ def _storage_config(session) -> dict:
     from AI_Evaluator_Backend.azure_storage import (
         AZURE_ACCOUNT_KEY,
         AZURE_ACCOUNT_NAME,
-        AZURE_CONTAINER_VIDEOS,
+        AZURE_CONTAINER_RECORDINGS,
         _ensure_container,
     )
 
@@ -61,12 +61,12 @@ def _storage_config(session) -> dict:
     # credentials — they never touch our upload helpers, and they do NOT
     # create the container. If it is missing, Agora's upload fails after the
     # session (nothing here would report it), so make sure it exists first.
-    _ensure_container(AZURE_CONTAINER_VIDEOS)
+    _ensure_container(AZURE_CONTAINER_RECORDINGS)
 
     return {
         'vendor': _VENDOR_AZURE,
         'region': int(getattr(settings, 'AGORA_RECORDING_AZURE_REGION', 0)),
-        'bucket': AZURE_CONTAINER_VIDEOS,
+        'bucket': AZURE_CONTAINER_RECORDINGS,
         'accessKey': AZURE_ACCOUNT_NAME,
         'secretKey': AZURE_ACCOUNT_KEY,
         # Blob path prefix → cloudrec/<session_id>/...
@@ -230,13 +230,17 @@ def _slice_start_to_datetime(slice_start_time) -> Optional['datetime']:
 
 def _blob_url_for(file_name: str) -> str:
     """Build the same blob URL shape azure_storage upload helpers return, so
-    the CV runner can download it with the account credentials."""
+    the CV runner can download it with the account credentials.
+
+    Must name the SAME container as _storage_config's bucket — this URL is
+    what the analysis and the examiner's playback both resolve back to.
+    """
     from AI_Evaluator_Backend.azure_storage import (
         AZURE_ACCOUNT_NAME,
-        AZURE_CONTAINER_VIDEOS,
+        AZURE_CONTAINER_RECORDINGS,
     )
 
     return (
         f'https://{AZURE_ACCOUNT_NAME}.blob.core.windows.net/'
-        f'{AZURE_CONTAINER_VIDEOS}/{file_name}'
+        f'{AZURE_CONTAINER_RECORDINGS}/{file_name}'
     )

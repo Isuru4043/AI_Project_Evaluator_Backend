@@ -40,6 +40,10 @@ def build_summary(
     session_flags: list[IntegrityFlag] = []
     unattributed_ms = 0
     gaze_samples: dict[str, list[bool]] = {sid: [] for sid in students}
+    # Off-screen time is summed from the gaps between consecutive gaze samples
+    # rather than assumed from the tick rate, so it stays correct if a tick is
+    # dropped or the sampling rate is retuned.
+    last_sample: dict[str, tuple[int, bool]] = {}
 
     for ev in events:
         if isinstance(ev, AttributionEvent):
@@ -57,11 +61,19 @@ def build_summary(
             else:
                 session_flags.append(ev)
         elif isinstance(ev, BehavioralEvent):
-            if (
-                ev.kind == BehavioralKind.GAZE_SAMPLE
-                and ev.student_id in gaze_samples
-            ):
-                gaze_samples[ev.student_id].append(bool(ev.payload.get("on_camera")))
+            if ev.student_id not in students:
+                continue
+            if ev.kind == BehavioralKind.GAZE_SAMPLE:
+                on_camera = bool(ev.payload.get("on_camera"))
+                gaze_samples[ev.student_id].append(on_camera)
+                previous = last_sample.get(ev.student_id)
+                if previous is not None and not previous[1]:
+                    students[ev.student_id].off_screen_time_ms += (
+                        ev.t_ms - previous[0]
+                    )
+                last_sample[ev.student_id] = (ev.t_ms, on_camera)
+            elif ev.kind == BehavioralKind.OFF_SCREEN_GLANCE:
+                students[ev.student_id].off_screen_glance_count += 1
 
     total_attributed = sum(s.speaking_time_ms for s in students.values())
     denom = total_attributed + unattributed_ms
