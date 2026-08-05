@@ -101,16 +101,36 @@ DEFAULT_MODEL_CHAIN = [
 ]
 
 
+def _as_chain(value) -> list:
+    """Coerce a model spec into a LIST of model ids.
+
+    A chain must never be left as a bare string: `for model_id in chain`
+    iterates a string CHARACTER BY CHARACTER, so 'gemini-3.1-flash-lite'
+    becomes 21 requests for models named 'g', 'e', 'm', … each rejected with
+    400 INVALID_ARGUMENT, and the chain then reports itself 'exhausted'.
+    Normalizing here means a string can never reach the loop again.
+    """
+    if isinstance(value, str):
+        return [m.strip() for m in value.split(',') if m.strip()]
+    return [m for m in (value or []) if m]
+
+
 def _chain_from_env(var: str, default: list) -> list:
-    raw = os.getenv(var, '')
-    models = [m.strip() for m in raw.split(',') if m.strip()]
-    return models or list(default)
+    return _as_chain(os.getenv(var, '')) or list(default)
+
+
+def _default_chain() -> list:
+    """GEMINI_MODEL leads — it is what this deployment is configured and billed
+    against — with DEFAULT_MODEL_CHAIN supplying the fallback rungs behind it.
+    De-duplicated so the primary is never retried as its own fallback."""
+    lead = _as_chain(settings.GEMINI_MODEL)
+    return lead + [m for m in DEFAULT_MODEL_CHAIN if m not in lead]
 
 
 MODEL_REGISTRY = {
-    'default':   os.getenv('LLM_DEFAULT_MODEL',   settings.GEMINI_MODEL),
-    'fast':      os.getenv('LLM_FAST_MODEL',      settings.GEMINI_MODEL),
-    'reasoning': os.getenv('LLM_REASONING_MODEL', settings.GEMINI_MODEL),
+    'default':   _chain_from_env('LLM_DEFAULT_MODEL',   _default_chain()),
+    'fast':      _chain_from_env('LLM_FAST_MODEL',      _default_chain()),
+    'reasoning': _chain_from_env('LLM_REASONING_MODEL', _default_chain()),
 }
 
 
@@ -216,7 +236,7 @@ def _llm_call_internal(
     image_bytes: Optional[bytes] = None,
     image_mime: str = 'image/png',
 ) -> Any:
-    chain = MODEL_REGISTRY.get(model) or MODEL_REGISTRY['default']
+    chain = _as_chain(MODEL_REGISTRY.get(model)) or MODEL_REGISTRY['default']
     client = _get_client()
 
     last_error = None
