@@ -33,7 +33,7 @@ AZURE_CONTAINER_FACES = "faces"
 # needs, and the behavioral analysis is the only consumer. Overridable so a
 # deployment can point it at a dedicated storage lifecycle policy.
 AZURE_CONTAINER_RECORDINGS = os.getenv(
-    "AZURE_CONTAINER_RECORDINGS", "viva-recordings",
+    "AZURE_CONTAINER_RECORDINGS", "recordings",
 )
 
 
