@@ -159,6 +159,7 @@ def process_answer_and_pick_next(
     prev_question_obj,
     student_answer: str,
     speech_metrics: Optional[Dict] = None,
+    speaker_id: str = "group",
 ) -> Dict:
     """
     Score the student's answer to prev_question_obj, update BKT, check
@@ -216,7 +217,7 @@ def process_answer_and_pick_next(
     # Setup
     # ------------------------------------------------------------------
     rubric = load_rubric(session.project)
-    state = load_session_state(session)
+    state = load_session_state(session, speaker_id=speaker_id)
 
     # Initialize coverage entries for any criterion that isn't yet tracked
     for crit in rubric:
@@ -603,7 +604,7 @@ def process_answer_and_pick_next(
 
     decision = should_terminate(state, rubric, session=session)
     if decision.should_end:
-        save_session_state(session, state)
+        save_session_state(session, state, speaker_id=speaker_id)
         from core.models import EvaluationSession as ES
         session.status = ES.Status.COMPLETED
         session.save(update_fields=['status'])
@@ -634,7 +635,7 @@ def process_answer_and_pick_next(
     # ------------------------------------------------------------------
     # Step G — Persist state and print full latency timeline summary
     # ------------------------------------------------------------------
-    save_session_state(session, state)
+    save_session_state(session, state, speaker_id=speaker_id)
     _mark('G:save')
     
     total_time = _t.time() - _turn_t0

@@ -831,6 +831,14 @@ class FinalScore(models.Model):
         on_delete=models.CASCADE,
         related_name='final_scores',
     )
+    student = models.ForeignKey(
+        'StudentProfile',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='final_scores_per_student',
+        help_text="The specific student this score belongs to in a group session."
+    )
     examiner = models.ForeignKey(
         ExaminerProfile,
         on_delete=models.CASCADE,
@@ -867,10 +875,18 @@ class SessionSummaryReport(models.Model):
     """Aggregated summary report for an evaluation session."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    session = models.OneToOneField(
+    session = models.ForeignKey(
         EvaluationSession,
         on_delete=models.CASCADE,
-        related_name='summary_report',
+        related_name='summary_reports',
+    )
+    student = models.ForeignKey(
+        'StudentProfile',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='summary_reports_per_student',
+        help_text="The specific student this report belongs to in a group session."
     )
     total_ai_score = models.DecimalField(
         max_digits=6, decimal_places=2, null=True, blank=True,
