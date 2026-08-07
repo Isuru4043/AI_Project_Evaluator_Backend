@@ -251,6 +251,7 @@ class AnswerSubmitView(APIView):
         question_id = request.data.get('question_id')
         answer_text = request.data.get('answer_text', '').strip()
         speech_metrics = request.data.get('speech_metrics')   # Week 6: optional
+        speaker_id = request.data.get('speaker_id', 'group')
 
         if not question_id or not answer_text:
             return Response(
@@ -304,6 +305,7 @@ class AnswerSubmitView(APIView):
                 prev_question_obj=question,
                 student_answer=answer_text,
                 speech_metrics=speech_metrics,
+                speaker_id=speaker_id,
             )
 
             # =================================================================

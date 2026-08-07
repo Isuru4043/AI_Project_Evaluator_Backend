@@ -151,13 +151,26 @@ class SessionState:
 # Persistence helpers (read/write EvaluationSession.bkt_state_json)
 # =============================================================================
 
-def load_session_state(session) -> SessionState:
-    """Load (or create empty) state from EvaluationSession.bkt_state_json."""
+def load_session_state(session, speaker_id: str = "group") -> SessionState:
+    """Load (or create empty) state from EvaluationSession.bkt_state_json for a specific speaker."""
     raw = getattr(session, 'bkt_state_json', None) or {}
-    return SessionState.from_dict(raw)
+    
+    # Backward compatibility: if the root JSON has old state keys, wrap it
+    if 'bkt_states' in raw or 'total_turns' in raw:
+        raw = {'group': raw}
+        
+    speaker_raw = raw.get(speaker_id, {})
+    return SessionState.from_dict(speaker_raw)
 
 
-def save_session_state(session, state: SessionState) -> None:
-    """Persist state back to the session row."""
-    session.bkt_state_json = state.to_dict()
+def save_session_state(session, state: SessionState, speaker_id: str = "group") -> None:
+    """Persist state back to the session row under the specific speaker."""
+    raw = getattr(session, 'bkt_state_json', None) or {}
+    
+    # Backward compatibility
+    if 'bkt_states' in raw or 'total_turns' in raw:
+        raw = {'group': raw}
+        
+    raw[speaker_id] = state.to_dict()
+    session.bkt_state_json = raw
     session.save(update_fields=['bkt_state_json'])

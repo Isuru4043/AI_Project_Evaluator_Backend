@@ -127,19 +127,32 @@ class FinalScoreSubmitView(APIView):
             if ai_score:
                 total_ai_score += ai_score
 
-        # Create or update session summary report
-        summary, _ = SessionSummaryReport.objects.update_or_create(
-            session=session,
-            defaults={
-                'total_ai_score': total_ai_score,
-                'total_final_score': total_final_score,
-                'grade': grade,
-                'overall_feedback': overall_feedback,
-                'finalized_by': examiner,
-                'is_published': True,
-                'published_at': timezone.now(),
-            }
-        )
+        # Create or update session summary reports for each speaker (student)
+        raw_state = getattr(session, 'bkt_state_json', None) or {'group': {}}
+        speakers = list(raw_state.keys())
+        
+        from core.models import StudentProfile
+        for speaker_id in speakers:
+            student = None
+            if speaker_id != 'group':
+                try:
+                    student = StudentProfile.objects.get(id=speaker_id)
+                except (StudentProfile.DoesNotExist, ValueError):
+                    pass
+                    
+            summary, _ = SessionSummaryReport.objects.update_or_create(
+                session=session,
+                student=student,
+                defaults={
+                    'total_ai_score': total_ai_score,
+                    'total_final_score': total_final_score,
+                    'grade': grade,
+                    'overall_feedback': overall_feedback,
+                    'finalized_by': examiner,
+                    'is_published': True,
+                    'published_at': timezone.now(),
+                }
+            )
 
         return Response(
             {
