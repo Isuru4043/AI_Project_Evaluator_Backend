@@ -161,6 +161,7 @@ def process_answer_and_pick_next(
     student_answer: str,
     speech_metrics: Optional[Dict] = None,
     speaker_id: str = "group",
+    examiner_paused: bool = False,
 ) -> Dict:
     """
     Score the student's answer to prev_question_obj, update BKT, check
@@ -482,6 +483,8 @@ def process_answer_and_pick_next(
         
         # Submit Questioner LLM task (needs module_future result first)
         def _run_questioner():
+            if examiner_paused:
+                return None
             mod_chunks = module_future.result()
             return generate_anchored_question(
                 QuestionerInput(
