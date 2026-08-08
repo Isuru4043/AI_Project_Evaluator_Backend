@@ -40,71 +40,95 @@ logger = logging.getLogger(__name__)
 def generate_post_viva_report(session) -> Dict:
     """
     Build the full report dict for one EvaluationSession.
-
-    Args:
-        session: EvaluationSession instance.
-
-    Returns:
-        Dict (see module docstring).
+    Now returns a dictionary mapped by speaker_id.
     """
     from viva_evaluator.services.pipeline.session_state import load_session_state
 
-    state = load_session_state(session)
+    raw_state = getattr(session, 'bkt_state_json', None) or {}
+    if 'bkt_states' in raw_state or 'total_turns' in raw_state:
+        raw_state = {'group': raw_state}
+    if not raw_state:
+        raw_state = {'group': {}}
+
     rubric_meta = _load_rubric_meta(session.project)
     questions = list(session.viva_questions.all().order_by('question_order'))
-
-    # ---- Per-criterion means + transcript ----
-    per_criterion_data = _aggregate_per_criterion(questions, rubric_meta)
     transcript = _build_transcript(questions)
-    weak_areas = _extract_weak_areas(questions, rubric_meta)
+    
+    # We can share these across the group or filter them later. For now, keep shared.
     authorship_alerts = _extract_authorship_alerts(session)
-
-    # ---- BKT trajectories ----
-    bkt_traj = {
-        crit_id: list(bkt.history)
-        for crit_id, bkt in state.bkt_states.items()
-    }
-
-    # ---- Overall score (weighted by category) ----
-    overall_score = _compute_overall_score(per_criterion_data, rubric_meta)
-    final_grade = _grade_bracket_for(overall_score)
-
-    # ---- Charts ----
-    charts = _render_charts(
-        bkt_trajectories=bkt_traj,
-        criterion_name_map={c['id']: c['name'] for c in rubric_meta},
-        per_criterion_means=per_criterion_data,
-    )
-
-    # ---- Knowledge audit ----
     knowledge_audit = _build_knowledge_audit(session)
 
-    # ---- Human-in-the-Loop: approval status ----
-    try:
-        summary = session.summary_report
-        scores_status    = summary.scores_status
-        scores_approved_at = summary.scores_approved_at.isoformat() if summary.scores_approved_at else None
-    except Exception:
-        scores_status    = 'draft'
-        scores_approved_at = None
+    reports = {}
 
-    return {
-        'session_id':           str(session.id),
-        'overall_score':        round(overall_score, 3),
-        'final_grade_bracket':  final_grade,
-        'per_criterion_means':  per_criterion_data,
-        'bkt_trajectories':     bkt_traj,
-        'authorship_alerts':    authorship_alerts,
-        'weak_areas':           weak_areas,
-        'knowledge_audit':      knowledge_audit,
-        'transcript':           transcript,
-        'total_turns':          state.total_turns,
-        'intent_history':       list(state.intent_history),
-        'charts':               charts,
-        # Human-in-the-Loop approval fields
-        'scores_status':        scores_status,
-        'scores_approved_at':   scores_approved_at,
-    }
+    for speaker_id in raw_state.keys():
+        state = load_session_state(session, speaker_id=speaker_id)
+        
+        # Filter answers for this specific student if possible to get their weak areas.
+        # But for now, we'll just aggregate all questions they answered.
+        # Let's get per-criterion data for this student's state.
+        
+        # Wait, _aggregate_per_criterion uses questions! If we don't filter questions by student, 
+        # all students get the same mean score in the report.
+        # Let's filter the questions to only those answered by the student.
+        speaker_questions = []
+        for q in questions:
+            # check if any answer belongs to this speaker (or if speaker='group')
+            if speaker_id == 'group':
+                speaker_questions.append(q)
+            else:
+                has_answer = any(str(a.student_id) == speaker_id for a in q.answers.all())
+                if has_answer:
+                    speaker_questions.append(q)
+                    
+        per_criterion_data = _aggregate_per_criterion(speaker_questions, rubric_meta)
+        weak_areas = _extract_weak_areas(speaker_questions, rubric_meta)
+        
+        bkt_traj = {
+            crit_id: list(bkt.history)
+            for crit_id, bkt in state.bkt_states.items()
+        }
+
+        overall_score = _compute_overall_score(per_criterion_data, rubric_meta)
+        final_grade = _grade_bracket_for(overall_score)
+
+        charts = _render_charts(
+            bkt_trajectories=bkt_traj,
+            criterion_name_map={c['id']: c['name'] for c in rubric_meta},
+            per_criterion_means=per_criterion_data,
+        )
+
+        try:
+            # We must find the specific summary report for this student
+            if speaker_id == 'group':
+                summary = session.summary_report
+            else:
+                summary = session.summary_reports.get(student_id=speaker_id)
+                
+            scores_status    = summary.scores_status
+            scores_approved_at = summary.scores_approved_at.isoformat() if summary.scores_approved_at else None
+        except Exception:
+            scores_status    = 'draft'
+            scores_approved_at = None
+
+        reports[speaker_id] = {
+            'session_id':           str(session.id),
+            'speaker_id':           speaker_id,
+            'overall_score':        round(overall_score, 3),
+            'final_grade_bracket':  final_grade,
+            'per_criterion_means':  per_criterion_data,
+            'bkt_trajectories':     bkt_traj,
+            'authorship_alerts':    authorship_alerts,
+            'weak_areas':           weak_areas,
+            'knowledge_audit':      knowledge_audit,
+            'transcript':           transcript, # Full group transcript
+            'total_turns':          state.total_turns,
+            'intent_history':       list(state.intent_history),
+            'charts':               charts,
+            'scores_status':        scores_status,
+            'scores_approved_at':   scores_approved_at,
+        }
+
+    return reports
 
 
 # =============================================================================

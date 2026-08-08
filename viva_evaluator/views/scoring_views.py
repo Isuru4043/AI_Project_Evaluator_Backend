@@ -45,7 +45,7 @@ class FinalScoreSubmitView(APIView):
     def post(self, request, session_id):
         from core.models import (
             EvaluationSession, RubricCriteria,
-            FinalScore, SessionSummaryReport, ExaminerProfile
+            FinalScore, SessionSummaryReport, ExaminerProfile, StudentProfile
         )
         from django.utils import timezone
 
@@ -66,83 +66,89 @@ class FinalScoreSubmitView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        scores_data = request.data.get('scores', [])
-        overall_feedback = request.data.get('overall_feedback', '')
-        grade = request.data.get('grade', '')
+        # Expecting a dictionary: { "speaker_id": { "scores": [...], "overall_feedback": "...", "grade": "..." } }
+        # Or backward compatibility: { "scores": [...] } -> treat as "group"
+        payload = request.data
+        if 'scores' in payload:
+            payload = {'group': payload}
 
-        if not scores_data:
+        if not payload:
             return Response(
-                {"error": "scores list is required."},
+                {"error": "Payload is empty."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        saved_scores = []
-        total_final_score = 0
-        total_ai_score = 0
+        all_saved_scores = {}
 
-        for score_item in scores_data:
-            criteria_id = score_item.get('criteria_id')
-            examiner_final_score = score_item.get('examiner_final_score')
-            examiner_note = score_item.get('examiner_note', '')
+        for speaker_id, speaker_data in payload.items():
+            scores_data = speaker_data.get('scores', [])
+            overall_feedback = speaker_data.get('overall_feedback', '')
+            grade = speaker_data.get('grade', '')
 
-            if not criteria_id or examiner_final_score is None:
-                continue
+            saved_scores = []
+            total_final_score = 0
+            total_ai_score = 0
 
-            try:
-                criteria = RubricCriteria.objects.get(id=criteria_id)
-            except RubricCriteria.DoesNotExist:
-                continue
+            for score_item in scores_data:
+                criteria_id = score_item.get('criteria_id')
+                examiner_final_score = score_item.get('examiner_final_score')
+                examiner_note = score_item.get('examiner_note', '')
 
-            # Get AI recommended score for this criterion
-            ai_score = None
-            try:
-                ai_rec = session.ai_score_recommendations.filter(
-                    criteria=criteria
-                ).last()
-                if ai_rec:
-                    ai_score = float(ai_rec.ai_recommended_score)
-            except Exception:
-                pass
+                if not criteria_id or examiner_final_score is None:
+                    continue
 
-            # Save final score
-            final_score, _ = FinalScore.objects.update_or_create(
-                session=session,
-                criteria=criteria,
-                examiner=examiner,
-                defaults={
-                    'examiner_final_score': examiner_final_score,
-                    'ai_recommended_score': ai_score,
-                    'examiner_note': examiner_note,
-                }
-            )
-
-            saved_scores.append({
-                'criteria': criteria.criteria_name,
-                'ai_recommended_score': ai_score,
-                'examiner_final_score': float(examiner_final_score),
-                'examiner_note': examiner_note,
-            })
-
-            total_final_score += float(examiner_final_score)
-            if ai_score:
-                total_ai_score += ai_score
-
-        # Create or update session summary reports for each speaker (student)
-        raw_state = getattr(session, 'bkt_state_json', None) or {'group': {}}
-        speakers = list(raw_state.keys())
-        
-        from core.models import StudentProfile
-        for speaker_id in speakers:
-            student = None
-            if speaker_id != 'group':
                 try:
-                    student = StudentProfile.objects.get(id=speaker_id)
-                except (StudentProfile.DoesNotExist, ValueError):
+                    criteria = RubricCriteria.objects.get(id=criteria_id)
+                except RubricCriteria.DoesNotExist:
+                    continue
+
+                # Get AI recommended score for this criterion
+                ai_score = None
+                try:
+                    # In a fully separated world, ai_score_recommendations would also belong to student.
+                    # For now, just grab the last one for the criteria.
+                    ai_rec = session.ai_score_recommendations.filter(
+                        criteria=criteria
+                    ).last()
+                    if ai_rec:
+                        ai_score = float(ai_rec.ai_recommended_score)
+                except Exception:
                     pass
-                    
+
+                student = None
+                if speaker_id != 'group':
+                    try:
+                        student = StudentProfile.objects.get(id=speaker_id)
+                    except (StudentProfile.DoesNotExist, ValueError):
+                        pass
+
+                # Save final score
+                final_score, _ = FinalScore.objects.update_or_create(
+                    session=session,
+                    criteria=criteria,
+                    examiner=examiner,
+                    student=student,
+                    defaults={
+                        'examiner_final_score': examiner_final_score,
+                        'ai_recommended_score': ai_score,
+                        'examiner_note': examiner_note,
+                    }
+                )
+
+                saved_scores.append({
+                    'criteria': criteria.criteria_name,
+                    'ai_recommended_score': ai_score,
+                    'examiner_final_score': float(examiner_final_score),
+                    'examiner_note': examiner_note,
+                })
+
+                total_final_score += float(examiner_final_score)
+                if ai_score:
+                    total_ai_score += ai_score
+
             summary, _ = SessionSummaryReport.objects.update_or_create(
                 session=session,
-                student=student,
+                student=student if 'student' in locals() else None,
                 defaults={
                     'total_ai_score': total_ai_score,
                     'total_final_score': total_final_score,
@@ -153,15 +159,19 @@ class FinalScoreSubmitView(APIView):
                     'published_at': timezone.now(),
                 }
             )
+            
+            all_saved_scores[speaker_id] = {
+                "grade": grade,
+                "total_final_score": total_final_score,
+                "total_ai_score": total_ai_score,
+                "scores": saved_scores,
+            }
 
         return Response(
             {
                 "message": "Final scores submitted successfully.",
                 "session_id": session_id,
-                "grade": grade,
-                "total_final_score": total_final_score,
-                "total_ai_score": total_ai_score,
-                "scores": saved_scores,
+                "student_reports": all_saved_scores,
             },
             status=status.HTTP_201_CREATED,
         )
@@ -284,67 +294,65 @@ class ApproveSessionScoresView(APIView):
 
         examiner = request.user.examiner_profile
 
-        # Get or create the summary report
-        report, _ = SessionSummaryReport.objects.get_or_create(
-            session=session,
-            defaults={
-                'finalized_by': examiner,
-            }
-        )
-
-        if report.scores_status == SessionSummaryReport.ScoresStatus.APPROVED:
+        reports = session.summary_reports.all()
+        if not reports.exists():
             return Response(
-                {
-                    "message": "Scores are already approved.",
-                    "scores_status": "approved",
-                    "scores_approved_at": report.scores_approved_at,
-                },
-                status=status.HTTP_200_OK,
+                {"error": "No summary reports found to approve."},
+                status=status.HTTP_404_NOT_FOUND,
             )
 
         now = timezone.now()
         
-        # Recalculate the final score based on overrides
-        total_possible = 0
-        total_earned = 0
-        
-        for q in session.viva_questions.all():
-            answer = q.answers.order_by('-answered_at').first()
-            if not answer:
+        for report in reports:
+            if report.scores_status == SessionSummaryReport.ScoresStatus.APPROVED:
                 continue
-            
-            total_possible += 10
-            if answer.examiner_override_score is not None:
-                total_earned += float(answer.examiner_override_score)
-            else:
-                try:
-                    if hasattr(answer, 'extension') and answer.extension.llm_score is not None:
-                        total_earned += float(answer.extension.llm_score)
-                except Exception:
-                    pass
-                    
-        final_percentage = 0
-        if total_possible > 0:
-            final_percentage = round((total_earned / total_possible) * 100, 2)
-            
-        grade = "F"
-        if final_percentage >= 75: grade = "A"
-        elif final_percentage >= 65: grade = "B"
-        elif final_percentage >= 50: grade = "C"
-        elif final_percentage >= 35: grade = "S"
 
-        report.total_final_score = final_percentage
-        report.grade = grade
-        report.scores_status     = SessionSummaryReport.ScoresStatus.APPROVED
-        report.scores_approved_at = now
-        report.is_published      = True
-        report.published_at      = now
-        report.finalized_by      = examiner
-        report.save(update_fields=[
-            'total_final_score', 'grade',
-            'scores_status', 'scores_approved_at',
-            'is_published', 'published_at', 'finalized_by',
-        ])
+            # Recalculate the final score based on overrides for THIS student
+            total_possible = 0
+            total_earned = 0
+            
+            for q in session.viva_questions.all():
+                # Get the answer for THIS student, or if student is None (group mode), get the first answer
+                if report.student:
+                    answer = q.answers.filter(student=report.student).order_by('-answered_at').first()
+                else:
+                    answer = q.answers.order_by('-answered_at').first()
+                    
+                if not answer:
+                    continue
+                
+                total_possible += 10
+                if answer.examiner_override_score is not None:
+                    total_earned += float(answer.examiner_override_score)
+                else:
+                    try:
+                        if hasattr(answer, 'extension') and answer.extension.llm_score is not None:
+                            total_earned += float(answer.extension.llm_score)
+                    except Exception:
+                        pass
+                        
+            final_percentage = 0
+            if total_possible > 0:
+                final_percentage = round((total_earned / total_possible) * 100, 2)
+                
+            grade = "F"
+            if final_percentage >= 75: grade = "A"
+            elif final_percentage >= 65: grade = "B"
+            elif final_percentage >= 50: grade = "C"
+            elif final_percentage >= 35: grade = "S"
+
+            report.total_final_score = final_percentage
+            report.grade = grade
+            report.scores_status     = SessionSummaryReport.ScoresStatus.APPROVED
+            report.scores_approved_at = now
+            report.is_published      = True
+            report.published_at      = now
+            report.finalized_by      = examiner
+            report.save(update_fields=[
+                'total_final_score', 'grade',
+                'scores_status', 'scores_approved_at',
+                'is_published', 'published_at', 'finalized_by',
+            ])
 
         return Response(
             {

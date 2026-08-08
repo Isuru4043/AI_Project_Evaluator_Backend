@@ -244,6 +244,7 @@ class SessionListView(APIView):
                     gid = str(s.group_id) if s.group_id else 'ungrouped'
                     if gid not in groups:
                         groups[gid] = {
+                            'id': str(s.id),
                             'group_id': gid,
                             'group_name': s.group.group_name if s.group else None,
                             'scheduled_start': s.scheduled_start,
