@@ -304,6 +304,7 @@ class AnswerSubmitView(APIView):
                 student_answer=answer_text,
                 speech_metrics=speech_metrics,
                 speaker_id=speaker_id,
+                examiner_paused=session.examiner_paused,
             )
 
             # =================================================================
@@ -432,6 +433,19 @@ class AnswerSubmitView(APIView):
                         "rubric": rubric_payload,
                         "speech_confidence": confidence,
                         "message": "All termination conditions satisfied — session complete.",
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
+            # ---- Examiner Paused --------------------------------------------
+            if session.examiner_paused:
+                return Response(
+                    {
+                        "answer_saved": True,
+                        "session_complete": False,
+                        "paused_by_examiner": True,
+                        "rubric": rubric_payload,
+                        "speech_confidence": confidence,
                     },
                     status=status.HTTP_200_OK,
                 )
@@ -721,7 +735,28 @@ class SessionDetailedReportView(APIView):
             # Get summary report if exists
             # Get summary reports for all students in the session
             reports_data = {}
+            from core.models import SessionSummaryReport
             try:
+                # If session is completed, ensure reports exist so examiners can approve scores
+                from core.models import EvaluationSession as ES
+                if session.status == ES.Status.COMPLETED:
+                    raw_state = getattr(session, 'bkt_state_json', None) or {}
+                    if 'bkt_states' in raw_state or 'total_turns' in raw_state:
+                        raw_state = {'group': raw_state}
+                    if not raw_state:
+                        # Fallback for empty sessions
+                        if session.group:
+                            for student in session.group.students.all():
+                                SessionSummaryReport.objects.get_or_create(session=session, student=student)
+                        else:
+                            SessionSummaryReport.objects.get_or_create(session=session, student=session.student)
+                    else:
+                        for speaker_id in raw_state.keys():
+                            if speaker_id == 'group':
+                                SessionSummaryReport.objects.get_or_create(session=session, student=None)
+                            else:
+                                SessionSummaryReport.objects.get_or_create(session=session, student_id=speaker_id)
+
                 summaries = session.summary_reports.all()
                 for summary in summaries:
                     # In a group session with individual tracking, the student might be linked

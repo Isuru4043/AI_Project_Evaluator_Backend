@@ -51,6 +51,10 @@ def generate_post_viva_report(session) -> Dict:
         raw_state = {'group': {}}
 
     rubric_meta = _load_rubric_meta(session.project)
+    
+    # --- BATCH ANALYZE EXAMINER QUESTIONS ---
+    _batch_analyze_examiner_questions(session, rubric_meta)
+    
     questions = list(session.viva_questions.all().order_by('question_order'))
     transcript = _build_transcript(questions)
     
@@ -162,6 +166,7 @@ def _load_rubric_meta(project) -> List[Dict]:
             rows.append({
                 'id':                  str(crit.id),
                 'name':                crit.criteria_name,
+                'description':         crit.description,
                 'category_name':       category.category_name,
                 'category_weight_pct': cat_weight,
                 'weight_in_category_pct': (
@@ -262,7 +267,135 @@ def _aggregate_per_criterion(questions, rubric_meta: List[Dict]) -> List[Dict]:
     return out
 
 
-# Removed unused _compute_overall_score and _grade_bracket_for
+    return out
+
+
+def _map_examiner_question_to_criterion(question_text: str, rubric_meta: List[Dict]) -> Optional[Dict]:
+    """Use SBERT cosine similarity to find the closest rubric criterion."""
+    if not rubric_meta:
+        return None
+    try:
+        from viva_evaluator.services.rag.embeddings import embed_texts
+        import numpy as np
+        
+        q_vec = embed_texts([question_text])[0]
+        crit_texts = [f"{c['name']}: {c.get('description', '')}" for c in rubric_meta]
+        crit_vecs = embed_texts(crit_texts)
+        
+        similarities = np.dot(crit_vecs, q_vec) / (
+            np.linalg.norm(crit_vecs, axis=1) * np.linalg.norm(q_vec) + 1e-9
+        )
+        best_idx = int(np.argmax(similarities))
+        return rubric_meta[best_idx]
+    except Exception as exc:
+        logger.warning('Failed to map examiner question to criterion: %s', exc)
+        return rubric_meta[0] # fallback
+
+
+def _batch_analyze_examiner_questions(session, rubric_meta: List[Dict]):
+    """
+    Find all examiner questions in this session that haven't been scored yet,
+    map them to the closest rubric criterion using SBERT, run the Analyzer,
+    and save the AI score back to the DB so ScoringService picks it up.
+    """
+    try:
+        from core.models import VivaQuestion, RubricCriteria
+        from viva_evaluator.models import VivaAnswerExtension, VivaQuestionExtension
+        from viva_evaluator.services.agents.analyzer import analyze_answer, AnalyzerInput
+        from viva_evaluator.services.rag.retrieval import retrieve_hybrid_for_turn
+        
+        submission = _resolve_submission(session)
+        if not submission:
+            return
+
+        examiner_qs = session.viva_questions.filter(
+            question_source=VivaQuestion.QuestionSource.EXAMINER
+        ).prefetch_related('answers__extension')
+        
+        for q in examiner_qs:
+            # Skip blank questions (e.g. examiner closed tab before voice transcription finished)
+            if not q.question_text.strip():
+                continue
+                
+            answer = q.answers.order_by('-answered_at').first()
+            if not answer:
+                continue
+                
+            # If already scored, skip
+            if answer.ai_answer_score is not None:
+                continue
+                
+            student_answer = answer.transcribed_answer or ''
+            if not student_answer:
+                continue
+                
+            # 1. Map to criterion
+            mapped_crit = _map_examiner_question_to_criterion(q.question_text, rubric_meta)
+            if not mapped_crit:
+                continue
+                
+            # Link question to criterion
+            try:
+                crit_obj = RubricCriteria.objects.get(id=mapped_crit['id'])
+                VivaQuestionExtension.objects.get_or_create(
+                    question=q,
+                    defaults={'criteria': crit_obj, 'difficulty_level': 'medium'}
+                )
+            except Exception:
+                pass
+
+            # 2. Retrieve context
+            retrieval = retrieve_hybrid_for_turn(
+                submission=submission,
+                criterion_name=mapped_crit['name'],
+                criterion_description=mapped_crit.get('description', ''),
+                last_answer=student_answer,
+                top_k=3,
+            )
+            
+            # 3. Analyze
+            analysis = analyze_answer(AnalyzerInput(
+                question_text=q.question_text,
+                student_answer=student_answer,
+                criterion_name=mapped_crit['name'],
+                criterion_description=mapped_crit.get('description', ''),
+                retrieved_chunks=retrieval['chunks'],
+                kg_signals=retrieval,
+                previous_turn_context=[],
+            ))
+            
+            soft_score = float(analysis.get('soft_score', 0.5))
+            
+            # 4. Save
+            answer.ai_answer_score = round(soft_score * 10.0, 2)
+            answer.save(update_fields=['ai_answer_score'])
+            
+            rubric_payload = {
+                'correctness': analysis.get('correctness', {}),
+                'depth':       analysis.get('depth', {}),
+                'consistency': analysis.get('consistency', {}),
+                'soft_score':  soft_score,
+                'reasoning':   analysis.get('reasoning', ''),
+            }
+            
+            detailed_analysis = {
+                "rubric": rubric_payload,
+                "strategy": {},
+                "speech_confidence": {}
+            }
+            
+            try:
+                VivaAnswerExtension.objects.create(
+                    answer=answer,
+                    llm_score=round(soft_score * 10.0, 2),
+                    llm_reasoning=analysis.get('reasoning', '') or '',
+                    next_difficulty_signal='stay',
+                    detailed_ai_analysis=detailed_analysis,
+                )
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.warning('Failed to batch analyze examiner questions: %s', exc)
 
 # =============================================================================
 # Internals — transcript + weak areas + authorship alerts

@@ -73,8 +73,13 @@ def should_terminate(
         TerminationDecision flagging which conditions hold.
     """
     # ----- Hard cap (overrides everything) ----------------------------------
+    if session:
+        ai_turns = session.viva_questions.filter(question_source='ai').count()
+    else:
+        ai_turns = state.total_turns
+
     hard_cap = getattr(session, 'max_total_questions', HARD_TURN_CAP) if session else HARD_TURN_CAP
-    if state.total_turns >= hard_cap:
+    if ai_turns >= hard_cap:
         return TerminationDecision(
             should_end=True,
             reason=f'hard_cap reached ({hard_cap} turns)',

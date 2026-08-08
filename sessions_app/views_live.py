@@ -17,6 +17,7 @@ Endpoints (prefixed with /api/ in root urls):
 from django.db.models import Max
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
+from django_q.tasks import async_task
 
 from core.models import (
     EvaluationSession,
@@ -213,5 +214,169 @@ class LiveQuestionAnswerView(APIView):
                 _serialize_question(question, answer),
                 201,
             )
+        except Exception as e:
+            return _500(e)
+
+
+# =============================================================================
+# Examiner Takeover Flow
+# =============================================================================
+
+class ExaminerTakeoverView(APIView):
+    """POST /api/sessions/<session_id>/live-questions/takeover/"""
+    permission_classes = [IsAuthenticated, IsExaminer]
+
+    def post(self, request, session_id):
+        try:
+            session = _get_session(session_id)
+            if not session:
+                return _err('Session not found.', code=404)
+            ep = _get_examiner_profile(request.user)
+            if not ep or not _is_assigned(ep, session.project):
+                return _err('You are not assigned to this project.', code=403)
+            
+            session.examiner_paused = True
+            session.save(update_fields=['examiner_paused'])
+            
+            ai_asked = session.viva_questions.filter(question_source=VivaQuestion.QuestionSource.AI).count()
+            
+            return _ok('AI paused.', {
+                'paused': True,
+                'ai_questions_asked': ai_asked,
+                'max_ai_questions': session.max_total_questions
+            })
+        except Exception as e:
+            return _500(e)
+
+
+class ExaminerResumeView(APIView):
+    """POST /api/sessions/<session_id>/live-questions/resume/"""
+    permission_classes = [IsAuthenticated, IsExaminer]
+
+    def post(self, request, session_id):
+        try:
+            session = _get_session(session_id)
+            if not session:
+                return _err('Session not found.', code=404)
+            ep = _get_examiner_profile(request.user)
+            if not ep or not _is_assigned(ep, session.project):
+                return _err('You are not assigned to this project.', code=403)
+            
+            session.examiner_paused = False
+            session.save(update_fields=['examiner_paused'])
+            
+            return _ok('AI resumed.', {'paused': False})
+        except Exception as e:
+            return _500(e)
+
+
+class ExaminerEndSessionView(APIView):
+    """POST /api/sessions/<session_id>/live-questions/end-session/"""
+    permission_classes = [IsAuthenticated, IsExaminer]
+
+    def post(self, request, session_id):
+        try:
+            session = _get_session(session_id)
+            if not session:
+                return _err('Session not found.', code=404)
+            ep = _get_examiner_profile(request.user)
+            if not ep or not _is_assigned(ep, session.project):
+                return _err('You are not assigned to this project.', code=403)
+            
+            session.status = EvaluationSession.Status.COMPLETED
+            session.examiner_paused = False
+            session.save(update_fields=['status', 'examiner_paused'])
+            
+            async_task('viva_evaluator.services.reporting.post_viva_report.generate_post_viva_report', session.id)
+            
+            return _ok('Session ended.', {'ended': True})
+        except Exception as e:
+            return _500(e)
+
+
+class ExaminerSessionStatusView(APIView):
+    """GET /api/sessions/<session_id>/live-questions/status/"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, session_id):
+        try:
+            session = _get_session(session_id)
+            if not session:
+                return _err('Session not found.', code=404)
+            
+            ai_asked = session.viva_questions.filter(question_source=VivaQuestion.QuestionSource.AI).count()
+            examiner_asked = session.viva_questions.filter(question_source=VivaQuestion.QuestionSource.EXAMINER).count()
+            
+            return _ok('Session status retrieved.', {
+                'paused': session.examiner_paused,
+                'ai_questions_asked': ai_asked,
+                'examiner_questions_asked': examiner_asked,
+                'max_ai_questions': session.max_total_questions,
+                'session_status': session.status
+            })
+        except Exception as e:
+            return _500(e)
+
+
+class ExaminerCreatePreemptiveQuestionView(APIView):
+    """POST /api/sessions/<session_id>/live-questions/preemptive/"""
+    permission_classes = [IsAuthenticated, IsExaminer]
+
+    def post(self, request, session_id):
+        try:
+            session = _get_session(session_id)
+            if not session:
+                return _err('Session not found.', code=404)
+            ep = _get_examiner_profile(request.user)
+            if not ep or not _is_assigned(ep, session.project):
+                return _err('You are not assigned to this project.', code=403)
+            
+            next_order = (
+                VivaQuestion.objects.filter(session=session)
+                .aggregate(m=Max('question_order'))['m'] or 0
+            ) + 1
+            question = VivaQuestion.objects.create(
+                session=session,
+                project=session.project,
+                question_text="",  # Blank initially
+                question_source=VivaQuestion.QuestionSource.EXAMINER,
+                question_order=next_order,
+            )
+            return _ok(
+                'Pre-emptive question created.',
+                _serialize_question(question),
+                201,
+            )
+        except Exception as e:
+            return _500(e)
+
+
+class ExaminerUpdatePreemptiveQuestionView(APIView):
+    """PATCH /api/sessions/<session_id>/live-questions/<question_id>/"""
+    permission_classes = [IsAuthenticated, IsExaminer]
+
+    def patch(self, request, session_id, question_id):
+        try:
+            session = _get_session(session_id)
+            if not session:
+                return _err('Session not found.', code=404)
+            ep = _get_examiner_profile(request.user)
+            if not ep or not _is_assigned(ep, session.project):
+                return _err('You are not assigned to this project.', code=403)
+            
+            question = VivaQuestion.objects.filter(
+                id=question_id,
+                session=session,
+                question_source=VivaQuestion.QuestionSource.EXAMINER,
+            ).first()
+            if not question:
+                return _err('Examiner question not found.', code=404)
+            
+            question_text = (request.data.get('question_text') or '').strip()
+            if question_text:
+                question.question_text = question_text
+                question.save(update_fields=['question_text'])
+                
+            return _ok('Question text updated.', _serialize_question(question))
         except Exception as e:
             return _500(e)

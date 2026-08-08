@@ -470,6 +470,9 @@ class EvaluationSession(models.Model):
     scheduled_end = models.DateTimeField()
     actual_start = models.DateTimeField(null=True, blank=True)
     
+    # When True, the AI viva pipeline skips generating the next question.
+    examiner_paused = models.BooleanField(default=False)
+    
     # Adaptive Viva Limits
     max_total_questions = models.IntegerField(default=25)
     max_questions_per_topic = models.IntegerField(default=2)
