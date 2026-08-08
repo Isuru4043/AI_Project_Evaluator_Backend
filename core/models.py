@@ -353,6 +353,7 @@ class RubricCriteria(models.Model):
     )
     description = models.TextField(null=True, blank=True)
     questions_to_ask = models.IntegerField(default=3)   # ← ADD THIS LINE ONLY
+    is_individual = models.BooleanField(default=False)
 
     class Meta:
         verbose_name = 'Rubric Criteria'
@@ -752,7 +753,9 @@ class VivaAnswer(models.Model):
     )
     student = models.ForeignKey(
         StudentProfile,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name='viva_answers',
     )
     transcribed_answer = models.TextField(null=True, blank=True)
@@ -924,6 +927,12 @@ class SessionSummaryReport(models.Model):
     class Meta:
         verbose_name = 'Session Summary Report'
         verbose_name_plural = 'Session Summary Reports'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['session', 'student'],
+                name='unique_summary_report_per_student',
+            ),
+        ]
 
     def __str__(self):
         return f"Report for {self.session} — Grade: {self.grade or 'N/A'}"

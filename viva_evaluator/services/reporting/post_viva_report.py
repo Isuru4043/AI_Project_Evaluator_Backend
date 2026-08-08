@@ -88,8 +88,17 @@ def generate_post_viva_report(session) -> Dict:
             for crit_id, bkt in state.bkt_states.items()
         }
 
-        overall_score = _compute_overall_score(per_criterion_data, rubric_meta)
-        final_grade = _grade_bracket_for(overall_score)
+        from viva_evaluator.services.scoring_service import ScoringService
+        from core.models import StudentProfile
+        try:
+            student = StudentProfile.objects.get(id=speaker_id) if speaker_id != 'group' else None
+        except Exception:
+            student = None
+            
+        scoring_result = ScoringService.aggregate_student_score(session, student)
+        
+        overall_score = scoring_result['percentage'] / 100.0 if scoring_result['grade'] != 'N/A' else 0.0
+        final_grade = scoring_result['grade']
 
         charts = _render_charts(
             bkt_trajectories=bkt_traj,
@@ -168,18 +177,9 @@ def _load_rubric_meta(project) -> List[Dict]:
 # =============================================================================
 
 def _aggregate_per_criterion(questions, rubric_meta: List[Dict]) -> List[Dict]:
-    """
-    For each criterion, average correctness/depth/consistency across all
-    answers tied to it. Reads the per-answer reasoning JSON (stored on
-    VivaAnswerExtension.llm_reasoning) plus the legacy ai_answer_score.
+    import json
+    from viva_evaluator.services.scoring_service import ScoringService
 
-    For Week 5+ answers the Analyzer's full 3D rubric is encoded into
-    the VivaAnswerExtension's *llm_reasoning* string AND also reflected in
-    the soft_score that drove BKT — but we don't currently round-trip the
-    full per-dimension JSON to the DB. We therefore use ai_answer_score as
-    a proxy for *correctness* and compute approximate Depth/Consistency
-    from the BKT delta plus reasoning sentiment heuristics.
-    """
     by_crit: Dict[str, Dict] = {}
 
     for q in questions:
@@ -207,20 +207,28 @@ def _aggregate_per_criterion(questions, rubric_meta: List[Dict]) -> List[Dict]:
         if not answer:
             continue
 
-        # ai_answer_score is on a 0..10 scale; normalize to 0..1 for the rubric
-        try:
-            soft = float(answer.ai_answer_score or 0) / 10.0
-        except (TypeError, ValueError):
-            soft = 0.5
-        soft = max(0.0, min(1.0, soft))
+        effective_score = ScoringService.get_effective_score_for_answer(answer)
+        if effective_score is None:
+            continue
+            
+        soft = max(0.0, min(1.0, effective_score / 10.0))
 
-        # Depth/consistency are not stored separately in the answer extension
-        # for legacy compatibility — we approximate them from soft_score and
-        # the next_difficulty signal so the radar chart isn't dominated by a
-        # single dimension. This is good enough for the report visualization;
-        # the underlying BKT update used the precise verified scores.
         depth_est = max(0.0, min(1.0, soft * 0.95))
         consistency_est = max(0.0, min(1.0, 0.6 + soft * 0.4))
+        
+        try:
+            ext = getattr(answer, 'extension', None)
+            if ext and ext.detailed_ai_analysis:
+                if isinstance(ext.detailed_ai_analysis, str):
+                    analysis = json.loads(ext.detailed_ai_analysis)
+                else:
+                    analysis = ext.detailed_ai_analysis
+                if 'rubric' in analysis:
+                    r = analysis['rubric']
+                    if 'depth' in r: depth_est = max(0.0, min(1.0, float(r['depth']) / 10.0))
+                    if 'consistency' in r: consistency_est = max(0.0, min(1.0, float(r['consistency']) / 10.0))
+        except Exception:
+            pass
 
         for crit_id in crit_ids:
             slot = by_crit[crit_id]
@@ -254,97 +262,7 @@ def _aggregate_per_criterion(questions, rubric_meta: List[Dict]) -> List[Dict]:
     return out
 
 
-# =============================================================================
-# Internals — overall score + grade bracket
-# =============================================================================
-
-# Weights used to combine 3D rubric into a per-criterion soft score.
-# Match the BKT update weights from the Analyzer.
-_DIM_WEIGHTS = {'correctness': 0.50, 'depth': 0.35, 'consistency': 0.15}
-
-
-def _per_criterion_soft(per_crit_entry: Dict) -> float:
-    return (
-        per_crit_entry['correctness'] * _DIM_WEIGHTS['correctness']
-        + per_crit_entry['depth']       * _DIM_WEIGHTS['depth']
-        + per_crit_entry['consistency'] * _DIM_WEIGHTS['consistency']
-    )
-
-
-def _compute_overall_score(per_crit_data: List[Dict], rubric_meta: List[Dict]) -> float:
-    """
-    Weighted combination using the rubric category weights. If a category's
-    weight_in_category sum is sensible we honor it; otherwise we fall back
-    to equal weighting within categories.
-
-    Returns 0..1.
-    """
-    if not per_crit_data:
-        return 0.0
-
-    meta_by_id = {m['id']: m for m in rubric_meta}
-    by_category: Dict[str, List] = {}
-
-    for entry in per_crit_data:
-        meta = meta_by_id.get(entry['criterion_id'])
-        if not meta:
-            continue
-        by_category.setdefault(meta['category_name'], []).append((entry, meta))
-
-    total = 0.0
-    weight_used = 0.0
-
-    for cat_name, items in by_category.items():
-        if not items:
-            continue
-            
-        valid_items = [(entry, meta) for entry, meta in items if entry['samples'] > 0]
-        if not valid_items:
-            continue
-            
-        cat_weight = float(items[0][1].get('category_weight_pct') or 0) / 100.0
-        if cat_weight <= 0:
-            continue
-
-        # Aggregate within-category
-        within_weights = [
-            float(meta.get('weight_in_category_pct') or 0)
-            for _, meta in valid_items
-        ]
-        within_sum = sum(within_weights)
-        cat_score = 0.0
-        
-        # We renormalize weights among the sampled criteria so that missing criteria
-        # don't implicitly drag down the score to zero.
-        if within_sum > 0:  
-            for (entry, _), w in zip(valid_items, within_weights):
-                cat_score += _per_criterion_soft(entry) * (w / within_sum)
-        else:
-            n = len(valid_items)
-            for entry, _ in valid_items:
-                cat_score += _per_criterion_soft(entry) / n
-
-        total += cat_score * cat_weight
-        weight_used += cat_weight
-
-    if weight_used <= 0:
-        # Fallback: simple mean across all sampled criteria
-        valid_entries = [e for e in per_crit_data if e['samples'] > 0]
-        if not valid_entries:
-            return 0.0
-        return sum(_per_criterion_soft(e) for e in valid_entries) / len(valid_entries)
-
-    return total / weight_used
-
-
-def _grade_bracket_for(score_0_1: float) -> str:
-    """Standard bracket from a 0..1 weighted score."""
-    if score_0_1 >= 0.85: return 'A'
-    if score_0_1 >= 0.70: return 'B'
-    if score_0_1 >= 0.55: return 'C'
-    if score_0_1 >= 0.40: return 'D'
-    return 'F'
-
+# Removed unused _compute_overall_score and _grade_bracket_for
 
 # =============================================================================
 # Internals — transcript + weak areas + authorship alerts

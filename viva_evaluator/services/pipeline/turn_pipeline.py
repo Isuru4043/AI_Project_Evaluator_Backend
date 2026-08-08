@@ -78,6 +78,7 @@ def load_rubric(project) -> List[Dict]:
                 'category':          category.category_name,
                 'questions_to_ask':  int(crit.questions_to_ask or 3),
                 'hints':             hints,
+                'is_individual':     crit.is_individual,
             })
     _RUBRIC_CACHE[proj_id] = out
     return out
@@ -217,16 +218,66 @@ def process_answer_and_pick_next(
     # Setup
     # ------------------------------------------------------------------
     rubric = load_rubric(session.project)
-    state = load_session_state(session, speaker_id=speaker_id)
+    # ------------------------------------------------------------------
+    # Split BKT Strategy (Phase 3)
+    # ------------------------------------------------------------------
+    group_state = load_session_state(session, speaker_id="group")
+    student_state = load_session_state(session, speaker_id=speaker_id) if speaker_id != "group" else None
 
-    # Initialize coverage entries for any criterion that isn't yet tracked
+    # Initialize coverage entries for group state
     for crit in rubric:
-        state.get_or_init_coverage(str(crit['id']), questions_to_ask=int(crit['questions_to_ask']))
-        state.get_or_init_bkt(str(crit['id']))
+        group_state.get_or_init_coverage(str(crit['id']), questions_to_ask=int(crit['questions_to_ask']))
+        group_state.get_or_init_bkt(str(crit['id']))
 
     # Resolve which topic was being asked about
     viva_topics = load_viva_topics(session)
     answered_topic = _resolve_answered_topic(prev_question_obj, viva_topics)
+    
+    is_individual_topic = False
+    for crit in rubric:
+        if str(crit['id']) in answered_topic['source_criteria_ids']:
+            is_individual_topic = crit.get('is_individual', False)
+            break
+            
+    active_state = group_state
+    
+    if student_state and is_individual_topic:
+        active_state = student_state
+        # Cold-start fallback: seed missing individual BKTs with current group BKT
+        import copy
+        for crit_id in answered_topic['source_criteria_ids']:
+            crit_id = str(crit_id)
+            if crit_id not in active_state.bkt_states and crit_id in group_state.bkt_states:
+                active_state.bkt_states[crit_id] = copy.deepcopy(group_state.bkt_states[crit_id])
+            if crit_id not in active_state.coverage and crit_id in group_state.coverage:
+                active_state.coverage[crit_id] = copy.deepcopy(group_state.coverage[crit_id])
+                
+        # Ensure coverage is initialized for the active state
+        for crit_id in answered_topic['source_criteria_ids']:
+            crit_id = str(crit_id)
+            active_state.get_or_init_coverage(crit_id)
+            active_state.get_or_init_bkt(crit_id)
+            
+    # For termination and strategy, we need a unified view of the student's mastery
+    def get_unified_state(g_state, s_state, rub):
+        from viva_evaluator.services.pipeline.session_state import SessionState
+        unified = SessionState()
+        unified.total_turns = g_state.total_turns
+        unified.intent_history = list(g_state.intent_history)
+        unified.clarification_streak = g_state.clarification_streak
+        unified.soft_score_history = list(g_state.soft_score_history)
+        
+        for c in rub:
+            c_id = str(c['id'])
+            if c.get('is_individual', False) and s_state:
+                unified.bkt_states[c_id] = s_state.bkt_states.get(c_id, g_state.bkt_states.get(c_id))
+                unified.coverage[c_id] = s_state.coverage.get(c_id, g_state.coverage.get(c_id))
+            else:
+                unified.bkt_states[c_id] = g_state.bkt_states.get(c_id)
+                unified.coverage[c_id] = g_state.coverage.get(c_id)
+        return unified
+        
+    unified_state = get_unified_state(group_state, student_state, rubric)
 
     # ------------------------------------------------------------------
     # Step A — Hybrid retrieval for the answered criterion
@@ -276,8 +327,8 @@ def process_answer_and_pick_next(
         _mark('A.5:triage(parallel)')
 
         gate_labels = CLARIFY_LABELS | RESTATE_LABELS
-        if triage['label'] in gate_labels and state.clarification_streak < CLARIFICATION_CAP:
-            state.clarification_streak += 1
+        if triage['label'] in gate_labels and group_state.clarification_streak < CLARIFICATION_CAP:
+            group_state.clarification_streak += 1
             prev_bloom = getattr(prev_question_obj, 'blooms_level', 'Analyze') or 'Analyze'
 
             if triage['label'] in RESTATE_LABELS:
@@ -311,11 +362,13 @@ def process_answer_and_pick_next(
                 ))
                 question_data['blooms_level'] = prev_bloom
 
-            save_session_state(session, state)
+            save_session_state(session, group_state, speaker_id="group")
+            if student_state:
+                save_session_state(session, student_state, speaker_id=speaker_id)
             logger.info(
                 '[turn] %s (streak=%d/%d) label=%s for topic=%s',
                 'RESTATE' if triage['label'] in RESTATE_LABELS else 'CLARIFICATION',
-                state.clarification_streak, CLARIFICATION_CAP,
+                group_state.clarification_streak, CLARIFICATION_CAP,
                 triage['label'], answered_topic['topic_name'],
             )
 
@@ -337,7 +390,7 @@ def process_answer_and_pick_next(
 
         # Not clarifying (real attempt, or clarification budget exhausted) →
         # reset the streak and proceed to normal scoring.
-        state.clarification_streak = 0
+        group_state.clarification_streak = 0
         analysis = future_analyzer.result()
         _mark('B:analyzer(parallel)')
 
@@ -356,7 +409,7 @@ def process_answer_and_pick_next(
     # ------------------------------------------------------------------
     # Step E — Pick next topic + run Strategist (instant <0.01s)
     # ------------------------------------------------------------------
-    next_topic = pick_next_topic(viva_topics, state, session)
+    next_topic = pick_next_topic(viva_topics, unified_state, session)
     if next_topic is None:
         next_topic = answered_topic
 
@@ -375,21 +428,21 @@ def process_answer_and_pick_next(
     first_crit_id = str(next_topic['source_criteria_ids'][0])
 
     strategy = select_strategy(StrategistInput(
-        p_lt=state.bkt_states[first_crit_id].p_lt,
+        p_lt=unified_state.bkt_states[first_crit_id].p_lt,
         analysis=analysis,
         kg_signals=retrieval_next,
-        intent_history=state.intent_history,
+        intent_history=group_state.intent_history,
         speech_confidence=confidence.get('flag'),
     ))
     _mark('E:strategist')
 
-    state.intent_history.append(strategy['socratic_intent'])
-    if len(state.intent_history) > 30:
-        state.intent_history = state.intent_history[-30:]
+    group_state.intent_history.append(strategy['socratic_intent'])
+    if len(group_state.intent_history) > 30:
+        group_state.intent_history = group_state.intent_history[-30:]
 
     next_difficulty = _bloom_to_difficulty(strategy['bloom_level'])
     is_first_for_topic = (
-        state.coverage[first_crit_id].turns == 0
+        unified_state.coverage[first_crit_id].turns == 0
     )
 
     recent_qs = list(
@@ -443,7 +496,7 @@ def process_answer_and_pick_next(
                     previous_question=prev_question_obj.question_text,
                     previous_answer=student_answer,
                     is_first_question=is_first_for_topic,
-                    question_number_in_criterion=state.coverage[first_crit_id].turns + 1,
+                    question_number_in_criterion=unified_state.coverage[first_crit_id].turns + 1,
                     weak_grounding=_grounding_is_weak(retrieval_next['chunks']),
                     session_id=str(session.id),
                 )
@@ -580,7 +633,7 @@ def process_answer_and_pick_next(
     # correct easy one (and a wrong easy answer costs more).
     # ------------------------------------------------------------------
     for crit_id in answered_topic['source_criteria_ids']:
-        ability_state = state.get_or_init_bkt(str(crit_id))
+        ability_state = active_state.get_or_init_bkt(str(crit_id))
         update_ability(
             ability_state,
             soft_score,
@@ -594,17 +647,25 @@ def process_answer_and_pick_next(
     # for strategist input — but termination needs the *current* counts so
     # we pre-update coverage here for all criteria in the answered topic.
     for crit_id in answered_topic['source_criteria_ids']:
-        cov = state.coverage[str(crit_id)]
+        cov = active_state.coverage[str(crit_id)]
         cov.turns += 1
         cov.sum_correctness += correctness
         if correctness >= 0.3:
             cov.correct_turns += 1
-    state.total_turns += 1
-    state.soft_score_history.append(round(soft_score, 4))
+            
+    # Always update global counters on group_state
+    group_state.total_turns += 1
+    group_state.soft_score_history.append(round(soft_score, 4))
 
-    decision = should_terminate(state, rubric, session=session)
+    # Update unified_state so it has the latest counts for termination check
+    unified_state = get_unified_state(group_state, student_state, rubric)
+
+    decision = should_terminate(unified_state, rubric, session=session)
     if decision.should_end:
-        save_session_state(session, state, speaker_id=speaker_id)
+        save_session_state(session, group_state, speaker_id="group")
+        if student_state:
+            save_session_state(session, student_state, speaker_id=speaker_id)
+            
         from core.models import EvaluationSession as ES
         session.status = ES.Status.COMPLETED
         session.save(update_fields=['status'])
@@ -635,7 +696,9 @@ def process_answer_and_pick_next(
     # ------------------------------------------------------------------
     # Step G — Persist state and print full latency timeline summary
     # ------------------------------------------------------------------
-    save_session_state(session, state, speaker_id=speaker_id)
+    save_session_state(session, group_state, speaker_id="group")
+    if student_state:
+        save_session_state(session, student_state, speaker_id=speaker_id)
     _mark('G:save')
     
     total_time = _t.time() - _turn_t0
@@ -664,7 +727,7 @@ def process_answer_and_pick_next(
             'bloom_level':          strategy['bloom_level'],
             'socratic_intent':      strategy['socratic_intent'],
             'difficulty':           next_difficulty,
-            'p_lt':                 state.bkt_states[str(next_topic['source_criteria_ids'][0])].p_lt,
+            'p_lt':                 unified_state.bkt_states[str(next_topic['source_criteria_ids'][0])].p_lt,
         },
     }
 

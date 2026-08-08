@@ -277,16 +277,14 @@ class AnswerSubmitView(APIView):
 
             submission = _resolve_session_submission(session)
             student_profile = None
-            try:
-                student_profile = request.user.student_profile
-            except AttributeError:
-                pass
-            if not student_profile:
+            if speaker_id != 'group':
+                try:
+                    student_profile = StudentProfile.objects.get(id=speaker_id)
+                except (StudentProfile.DoesNotExist, ValueError):
+                    pass
+            elif session.student:
+                # Individual session, use the session's student
                 student_profile = session.student
-            if not student_profile and session.group:
-                first_member = GroupMember.objects.filter(group=session.group).first()
-                if first_member:
-                    student_profile = first_member.student
 
             if not submission:
                 return Response(

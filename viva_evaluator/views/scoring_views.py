@@ -102,16 +102,22 @@ class FinalScoreSubmitView(APIView):
                 except RubricCriteria.DoesNotExist:
                     continue
 
-                # Get AI recommended score for this criterion
+                # Get AI recommended score for this criterion using the ScoringService
                 ai_score = None
                 try:
-                    # In a fully separated world, ai_score_recommendations would also belong to student.
-                    # For now, just grab the last one for the criteria.
-                    ai_rec = session.ai_score_recommendations.filter(
-                        criteria=criteria
-                    ).last()
-                    if ai_rec:
-                        ai_score = float(ai_rec.ai_recommended_score)
+                    # In Phase 2, AIScoreRecommendation is dead. We use the actual BKT/pipeline answers.
+                    from viva_evaluator.services.scoring_service import ScoringService
+                    student_obj = None
+                    if speaker_id != 'group':
+                        from core.models import StudentProfile
+                        student_obj = StudentProfile.objects.filter(id=speaker_id).first()
+                        
+                    scoring_result = ScoringService.aggregate_student_score(session, student_obj)
+                    if str(criteria.id) in scoring_result['per_criteria']:
+                        # The scoring service returns out of max_score, so normalize back to 10
+                        max_s = float(criteria.max_score)
+                        earned = float(scoring_result['per_criteria'][str(criteria.id)])
+                        ai_score = (earned / max_s) * 10.0 if max_s > 0 else 0
                 except Exception:
                     pass
 
@@ -142,13 +148,16 @@ class FinalScoreSubmitView(APIView):
                     'examiner_note': examiner_note,
                 })
 
-                total_final_score += float(examiner_final_score)
-                if ai_score:
-                    total_ai_score += ai_score
+            # Calculate actual final score and grade from backend source of truth
+            from viva_evaluator.services.scoring_service import ScoringService
+            scoring_result = ScoringService.aggregate_student_score(session, student)
+            
+            total_final_score = scoring_result['percentage']
+            grade = scoring_result['grade']
 
             summary, _ = SessionSummaryReport.objects.update_or_create(
                 session=session,
-                student=student if 'student' in locals() else None,
+                student=student,
                 defaults={
                     'total_ai_score': total_ai_score,
                     'total_final_score': total_final_score,
@@ -307,39 +316,11 @@ class ApproveSessionScoresView(APIView):
             if report.scores_status == SessionSummaryReport.ScoresStatus.APPROVED:
                 continue
 
-            # Recalculate the final score based on overrides for THIS student
-            total_possible = 0
-            total_earned = 0
+            from viva_evaluator.services.scoring_service import ScoringService
+            scoring_result = ScoringService.aggregate_student_score(session, report.student)
             
-            for q in session.viva_questions.all():
-                # Get the answer for THIS student, or if student is None (group mode), get the first answer
-                if report.student:
-                    answer = q.answers.filter(student=report.student).order_by('-answered_at').first()
-                else:
-                    answer = q.answers.order_by('-answered_at').first()
-                    
-                if not answer:
-                    continue
-                
-                total_possible += 10
-                if answer.examiner_override_score is not None:
-                    total_earned += float(answer.examiner_override_score)
-                else:
-                    try:
-                        if hasattr(answer, 'extension') and answer.extension.llm_score is not None:
-                            total_earned += float(answer.extension.llm_score)
-                    except Exception:
-                        pass
-                        
-            final_percentage = 0
-            if total_possible > 0:
-                final_percentage = round((total_earned / total_possible) * 100, 2)
-                
-            grade = "F"
-            if final_percentage >= 75: grade = "A"
-            elif final_percentage >= 65: grade = "B"
-            elif final_percentage >= 50: grade = "C"
-            elif final_percentage >= 35: grade = "S"
+            final_percentage = scoring_result['percentage']
+            grade = scoring_result['grade']
 
             report.total_final_score = final_percentage
             report.grade = grade

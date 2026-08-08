@@ -16,7 +16,7 @@ load_dotenv(BASE_DIR / '.env')
 
 configure_google_credentials()
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-2ll$i@i3@(g&rj&nlg@8+)=7dd^bw-^@vd6=$71k!7z_jlpurs'
+SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'django-insecure-dev-key-change-me')
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
@@ -97,7 +97,7 @@ DATABASES = {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': 'neondb',
         'USER': 'neondb_owner',
-        'PASSWORD': 'npg_OH6M0sYiFjAT',
+        'PASSWORD': os.environ.get('DATABASE_PASSWORD', ''),
         'HOST': 'ep-sweet-shape-ao5kxg2i.c-2.ap-southeast-1.aws.neon.tech',
         'PORT': '5432',
         'OPTIONS': {
