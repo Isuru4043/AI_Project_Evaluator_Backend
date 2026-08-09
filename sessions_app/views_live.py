@@ -283,6 +283,14 @@ class ExaminerEndSessionView(APIView):
             if not ep or not _is_assigned(ep, session.project):
                 return _err('You are not assigned to this project.', code=403)
             
+            # Safety net: fill blank examiner question texts before ending
+            blank_examiner_qs = VivaQuestion.objects.filter(
+                session=session,
+                question_source=VivaQuestion.QuestionSource.EXAMINER,
+                question_text='',
+            )
+            blank_examiner_qs.update(question_text='[Examiner asked question via voice]')
+            
             session.status = EvaluationSession.Status.COMPLETED
             session.examiner_paused = False
             session.save(update_fields=['status', 'examiner_paused'])
