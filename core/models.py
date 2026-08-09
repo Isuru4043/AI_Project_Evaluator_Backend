@@ -476,6 +476,7 @@ class EvaluationSession(models.Model):
     # Adaptive Viva Limits
     max_total_questions = models.IntegerField(default=25)
     max_questions_per_topic = models.IntegerField(default=2)
+    viva_weight_percentage = models.IntegerField(default=100)
     grouping_cache = models.ForeignKey(
         RubricGroupingCache,
         on_delete=models.SET_NULL,
