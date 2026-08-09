@@ -473,6 +473,7 @@ class ManualScheduleSerializer(serializers.Serializer):
     
     # Adaptive Viva fields
     max_total_questions = serializers.IntegerField(default=20, min_value=1)
+    viva_weight_percentage = serializers.IntegerField(default=100, min_value=1, max_value=100)
 
 
 class DateRangeEntrySerializer(serializers.Serializer):
@@ -501,6 +502,7 @@ class AutoScheduleSerializer(serializers.Serializer):
 
     # Adaptive Viva fields
     max_total_questions = serializers.IntegerField(default=20, min_value=1)
+    viva_weight_percentage = serializers.IntegerField(default=100, min_value=1, max_value=100)
 
 
 # =============================================================================
@@ -519,7 +521,8 @@ class EvaluationSessionSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'project', 'student_name', 'student_reg_no',
             'group_name', 'scheduled_start', 'scheduled_end',
-            'actual_start', 'location_room', 'status', 'demo_enabled',
+            'actual_start', 'location_room', 'status', 'demo_enabled', 'max_total_questions',
+            'viva_weight_percentage'
         ]
 
 

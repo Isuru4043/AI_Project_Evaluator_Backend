@@ -52,6 +52,9 @@ def generate_post_viva_report(session) -> Dict:
 
     rubric_meta = _load_rubric_meta(session.project)
     
+    # --- CLEAN UP SPEECH-TO-TEXT TRANSCRIPTS ---
+    _cleanup_transcripts(session)
+    
     # --- BATCH ANALYZE EXAMINER QUESTIONS ---
     _batch_analyze_examiner_questions(session, rubric_meta)
     
@@ -103,6 +106,8 @@ def generate_post_viva_report(session) -> Dict:
         
         overall_score = scoring_result['percentage'] / 100.0 if scoring_result['grade'] != 'N/A' else 0.0
         final_grade = scoring_result['grade']
+        viva_weight_percentage = session.viva_weight_percentage
+        scaled_score = round(overall_score * viva_weight_percentage, 2)
 
         charts = _render_charts(
             bkt_trajectories=bkt_traj,
@@ -127,6 +132,8 @@ def generate_post_viva_report(session) -> Dict:
             'session_id':           str(session.id),
             'speaker_id':           speaker_id,
             'overall_score':        round(overall_score, 3),
+            'viva_weight_percentage': viva_weight_percentage,
+            'scaled_score':         scaled_score,
             'final_grade_bracket':  final_grade,
             'per_criterion_means':  per_criterion_data,
             'bkt_trajectories':     bkt_traj,
@@ -267,7 +274,69 @@ def _aggregate_per_criterion(questions, rubric_meta: List[Dict]) -> List[Dict]:
     return out
 
 
-    return out
+# =============================================================================
+# Internals — transcript cleanup (speech-to-text polish)
+# =============================================================================
+
+_CLEANUP_PROMPT = (
+    "You are a transcript proofreader. Fix spelling errors, grammar issues, "
+    "and punctuation in this speech-to-text transcript. Keep the meaning "
+    "exactly the same. Do NOT add new content or rephrase. Only return the "
+    "corrected text, nothing else.\n\n"
+    "Transcript:\n{text}"
+)
+
+
+def _cleanup_transcripts(session):
+    """
+    Polish speech-to-text transcripts for both examiner questions and student
+    answers. Runs as part of the post-viva background pipeline so it adds
+    zero latency to the live Q&A loop.
+    """
+    from viva_evaluator.services.llm_service import llm_call
+    from core.models import VivaQuestion
+
+    try:
+        questions = session.viva_questions.all().prefetch_related('answers')
+
+        for q in questions:
+            # Clean up examiner question text (skip placeholders and AI questions)
+            if (
+                q.question_source == VivaQuestion.QuestionSource.EXAMINER
+                and q.question_text
+                and not q.question_text.startswith('[')
+            ):
+                try:
+                    cleaned = llm_call(
+                        _CLEANUP_PROMPT.format(text=q.question_text),
+                        model='fast',
+                        fallback=None,
+                    )
+                    if cleaned and len(cleaned.strip()) > 5:
+                        q.question_text = cleaned.strip()
+                        q.save(update_fields=['question_text'])
+                except Exception as exc:
+                    logger.debug('Transcript cleanup failed for question %s: %s', q.id, exc)
+
+            # Clean up student answer transcripts
+            for answer in q.answers.all():
+                raw = (answer.transcribed_answer or '').strip()
+                if not raw or len(raw) < 10:
+                    continue
+                try:
+                    cleaned = llm_call(
+                        _CLEANUP_PROMPT.format(text=raw),
+                        model='fast',
+                        fallback=None,
+                    )
+                    if cleaned and len(cleaned.strip()) > 5:
+                        answer.transcribed_answer = cleaned.strip()
+                        answer.save(update_fields=['transcribed_answer'])
+                except Exception as exc:
+                    logger.debug('Transcript cleanup failed for answer %s: %s', answer.id, exc)
+
+    except Exception as exc:
+        logger.warning('Transcript cleanup step failed (non-fatal): %s', exc)
 
 
 def _map_examiner_question_to_criterion(question_text: str, rubric_meta: List[Dict]) -> Optional[Dict]:
