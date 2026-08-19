@@ -54,8 +54,15 @@ INSTALLED_APPS = [
     'cloudinary_storage',
     'agora_service',
     'cv_analysis',
+    'physical_evaluation',
     'django_q',
 ]
+
+# Physical evaluation kiosk defaults. The kiosk lease is intentionally short
+# lived and can only call the physical-session and shared-viva endpoints.
+PHYSICAL_KIOSK_TOKEN_LIFETIME_HOURS = int(
+    os.getenv('PHYSICAL_KIOSK_TOKEN_LIFETIME_HOURS', '12')
+)
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',  # Must be at the very top

@@ -57,6 +57,12 @@ class ManualScheduleView(APIView):
             created = []
             with transaction.atomic():
                 for entry in ser.validated_data['sessions']:
+                    room = entry.get('location_room', '')
+                    if not room and project.evaluation_mode == Project.EvaluationMode.PHYSICAL:
+                        try:
+                            room = project.physical_config.location
+                        except Exception:
+                            return _err('Physical project location is not configured.')
                     if not project.is_group_project:
                         # Individual project
                         sid = entry.get('student_id')
@@ -72,7 +78,7 @@ class ManualScheduleView(APIView):
                             project=project, student=sp, group=None,
                             scheduled_start=entry['scheduled_start'],
                             scheduled_end=entry['scheduled_end'],
-                            location_room=entry.get('location_room', ''),
+                            location_room=room,
                             status='scheduled',
                             demo_enabled=demo_enabled,
                             max_total_questions=max_total_questions,
@@ -93,7 +99,7 @@ class ManualScheduleView(APIView):
                             project=project, student=None, group=group,
                             scheduled_start=entry['scheduled_start'],
                             scheduled_end=entry['scheduled_end'],
-                            location_room=entry.get('location_room', ''),
+                            location_room=room,
                             status='scheduled',
                             agora_channel_name=f"group_{group.id}",
                             demo_enabled=demo_enabled,
@@ -134,6 +140,11 @@ class AutoScheduleView(APIView):
             date_ranges = ser.validated_data['date_ranges']
             duration = ser.validated_data['duration_per_slot_minutes']
             room = ser.validated_data.get('location_room', '')
+            if not room and project.evaluation_mode == Project.EvaluationMode.PHYSICAL:
+                try:
+                    room = project.physical_config.location
+                except Exception:
+                    return _err('Physical project location is not configured.')
 
             # Build time slots
             slots = []

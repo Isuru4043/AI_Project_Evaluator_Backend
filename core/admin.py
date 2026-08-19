@@ -49,7 +49,7 @@ class StudentProfileAdmin(admin.ModelAdmin):
 
 @admin.register(Project)
 class ProjectAdmin(admin.ModelAdmin):
-	list_display = ("project_name", "status", "academic_year", "created_at")
+	list_display = ("project_name", "evaluation_mode", "status", "academic_year", "created_at")
 	search_fields = ("project_name",)
 
 

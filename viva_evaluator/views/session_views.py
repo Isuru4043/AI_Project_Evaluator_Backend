@@ -18,6 +18,9 @@ from viva_evaluator.views._helpers import (
     _difficulty_signal_from_score,
     _get_or_create_index_status,
 )
+from authentication.authentication import CookieJWTAuthentication
+from physical_evaluation.authentication import PhysicalKioskAuthentication
+from physical_evaluation.permissions import CanAccessSharedVivaSession
 
 
 class SessionStartView(APIView):
@@ -32,7 +35,8 @@ class SessionStartView(APIView):
         "session_id": "uuid-of-evaluation-session"
     }
     """
-    permission_classes = [IsAuthenticated]
+    authentication_classes = [PhysicalKioskAuthentication, CookieJWTAuthentication]
+    permission_classes = [IsAuthenticated, CanAccessSharedVivaSession]
 
     def post(self, request):
         session_id = request.data.get('session_id')
@@ -187,8 +191,11 @@ class SessionStartView(APIView):
             from core.models import EvaluationSession as ES
             session.status = ES.Status.IN_PROGRESS
             from django.utils import timezone
-            session.actual_start = timezone.now()
-            session.save()
+            if session.actual_start is None:
+                session.actual_start = timezone.now()
+                session.save(update_fields=['status', 'actual_start'])
+            else:
+                session.save(update_fields=['status'])
 
             return Response(
                 {
@@ -245,7 +252,8 @@ class AnswerSubmitView(APIView):
         "answer_text": "student's answer here"
     }
     """
-    permission_classes = [IsAuthenticated]
+    authentication_classes = [PhysicalKioskAuthentication, CookieJWTAuthentication]
+    permission_classes = [IsAuthenticated, CanAccessSharedVivaSession]
 
     def post(self, request, session_id):
         question_id = request.data.get('question_id')
@@ -281,7 +289,25 @@ class AnswerSubmitView(APIView):
                 try:
                     student_profile = StudentProfile.objects.get(id=speaker_id)
                 except (StudentProfile.DoesNotExist, ValueError):
-                    pass
+                    return Response(
+                        {"error": "Invalid speaker_id."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                belongs_to_session = (
+                    session.student_id == student_profile.id
+                    or (
+                        session.group_id
+                        and GroupMember.objects.filter(
+                            group_id=session.group_id,
+                            student=student_profile,
+                        ).exists()
+                    )
+                )
+                if not belongs_to_session:
+                    return Response(
+                        {"error": "speaker_id is not a participant of this session."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
             elif session.student:
                 # Individual session, use the session's student
                 student_profile = session.student
@@ -290,6 +316,57 @@ class AnswerSubmitView(APIView):
                 return Response(
                     {"error": "No submission found for this session."},
                     status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # A browser/proxy timeout does not necessarily cancel the running
+            # scoring request. If the student retries after the first request
+            # has completed, replay the next unanswered question instead of
+            # scoring and saving the same answer twice.
+            existing_answers = VivaAnswer.objects.filter(question=question)
+            if student_profile is None:
+                existing_answers = existing_answers.filter(student__isnull=True)
+            else:
+                existing_answers = existing_answers.filter(student=student_profile)
+
+            if existing_answers.exists():
+                next_question = VivaQuestion.objects.filter(
+                    session=session,
+                    question_order__gt=question.question_order,
+                    answers__isnull=True,
+                ).order_by('question_order').first()
+
+                if next_question is not None:
+                    extension = getattr(next_question, 'extension', None)
+                    return Response(
+                        {
+                            "answer_saved": True,
+                            "duplicate_ignored": True,
+                            "session_complete": False,
+                            "message": "This answer was already received. Continuing with the next unanswered question.",
+                            "next_question": {
+                                "question_id": str(next_question.id),
+                                "question_text": next_question.question_text,
+                                "blooms_level": next_question.blooms_level,
+                                "difficulty": extension.difficulty_level if extension else "medium",
+                                "criterion": (
+                                    extension.criteria.criteria_name
+                                    if extension and extension.criteria
+                                    else next_question.viva_topic_name
+                                ),
+                                "question_number": next_question.question_order,
+                            },
+                        },
+                        status=status.HTTP_200_OK,
+                    )
+
+                return Response(
+                    {
+                        "answer_saved": True,
+                        "duplicate_ignored": True,
+                        "session_complete": session.status == EvaluationSession.Status.COMPLETED,
+                        "message": "This answer was already received.",
+                    },
+                    status=status.HTTP_200_OK,
                 )
 
             # =================================================================
@@ -611,7 +688,8 @@ class SessionStatusView(APIView):
     Returns current status of a session.
     Frontend polls this to know if session is scheduled, in progress, or complete.
     """
-    permission_classes = [IsAuthenticated]
+    authentication_classes = [PhysicalKioskAuthentication, CookieJWTAuthentication]
+    permission_classes = [IsAuthenticated, CanAccessSharedVivaSession]
 
     def get(self, request, session_id):
         from core.models import EvaluationSession
@@ -656,7 +734,8 @@ class CurrentQuestionView(APIView):
     Examiner-interjected questions are delivered through the separate
     live-questions endpoints, so they are excluded here.
     """
-    permission_classes = [IsAuthenticated]
+    authentication_classes = [PhysicalKioskAuthentication, CookieJWTAuthentication]
+    permission_classes = [IsAuthenticated, CanAccessSharedVivaSession]
 
     def get(self, request, session_id):
         from core.models import EvaluationSession, VivaQuestion
@@ -834,4 +913,3 @@ class SessionDetailedReportView(APIView):
                 "error": str(e),
                 "traceback": tb_module.format_exc(),
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
