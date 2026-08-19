@@ -46,6 +46,7 @@ class ManualScheduleView(APIView):
 
             demo_enabled = ser.validated_data.get('demo_enabled', False)
             max_total_questions = ser.validated_data.get('max_total_questions', 20)
+            viva_weight_percentage = ser.validated_data.get('viva_weight_percentage', 100)
 
             # Generate or fetch adaptive viva grouping cache
             try:
@@ -75,6 +76,7 @@ class ManualScheduleView(APIView):
                             status='scheduled',
                             demo_enabled=demo_enabled,
                             max_total_questions=max_total_questions,
+                            viva_weight_percentage=viva_weight_percentage,
                             grouping_cache=grouping_cache,
                         )
                         created.append(session)
@@ -96,6 +98,7 @@ class ManualScheduleView(APIView):
                             agora_channel_name=f"group_{group.id}",
                             demo_enabled=demo_enabled,
                             max_total_questions=max_total_questions,
+                            viva_weight_percentage=viva_weight_percentage,
                             grouping_cache=grouping_cache,
                         )
                         created.append(session)
@@ -175,6 +178,7 @@ class AutoScheduleView(APIView):
 
             demo_enabled = ser.validated_data.get('demo_enabled', False)
             max_total_questions = ser.validated_data.get('max_total_questions', 20)
+            viva_weight_percentage = ser.validated_data.get('viva_weight_percentage', 100)
 
             # Generate or fetch adaptive viva grouping cache
             try:
@@ -198,6 +202,7 @@ class AutoScheduleView(APIView):
                             location_room=room, status='scheduled',
                             demo_enabled=demo_enabled,
                             max_total_questions=max_total_questions,
+                            viva_weight_percentage=viva_weight_percentage,
                             grouping_cache=grouping_cache,
                         )
                         created.append(session)
@@ -209,6 +214,7 @@ class AutoScheduleView(APIView):
                             agora_channel_name=f"group_{entity.id}",
                             demo_enabled=demo_enabled,
                             max_total_questions=max_total_questions,
+                            viva_weight_percentage=viva_weight_percentage,
                             grouping_cache=grouping_cache,
                         )
                         created.append(session)
@@ -244,6 +250,7 @@ class SessionListView(APIView):
                     gid = str(s.group_id) if s.group_id else 'ungrouped'
                     if gid not in groups:
                         groups[gid] = {
+                            'id': str(s.id),
                             'group_id': gid,
                             'group_name': s.group.group_name if s.group else None,
                             'scheduled_start': s.scheduled_start,

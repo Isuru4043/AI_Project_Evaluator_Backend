@@ -23,6 +23,12 @@ from sessions_app.views import (
     PresencePingView,
 )
 from sessions_app.views_live import (
+    ExaminerSessionStatusView,
+    ExaminerTakeoverView,
+    ExaminerResumeView,
+    ExaminerEndSessionView,
+    ExaminerCreatePreemptiveQuestionView,
+    ExaminerUpdatePreemptiveQuestionView,
     LiveQuestionAnswerView,
     LiveQuestionCreateView,
     LiveQuestionListView,
@@ -136,6 +142,36 @@ urlpatterns = [
         'sessions/<uuid:session_id>/live-questions/<uuid:question_id>/answer/',
         LiveQuestionAnswerView.as_view(),
         name='live-question-answer',
+    ),
+    path(
+        'sessions/<uuid:session_id>/live-questions/takeover/',
+        ExaminerTakeoverView.as_view(),
+        name='live-question-takeover',
+    ),
+    path(
+        'sessions/<uuid:session_id>/live-questions/resume/',
+        ExaminerResumeView.as_view(),
+        name='live-question-resume',
+    ),
+    path(
+        'sessions/<uuid:session_id>/live-questions/end-session/',
+        ExaminerEndSessionView.as_view(),
+        name='live-question-end-session',
+    ),
+    path(
+        'sessions/<uuid:session_id>/live-questions/status/',
+        ExaminerSessionStatusView.as_view(),
+        name='live-question-status',
+    ),
+    path(
+        'sessions/<uuid:session_id>/live-questions/preemptive/',
+        ExaminerCreatePreemptiveQuestionView.as_view(),
+        name='live-question-preemptive',
+    ),
+    path(
+        'sessions/<uuid:session_id>/live-questions/<uuid:question_id>/',
+        ExaminerUpdatePreemptiveQuestionView.as_view(),
+        name='live-question-preemptive-update',
     ),
 
     # ── Demo Capture (presentation monitoring) ───────────────────────────

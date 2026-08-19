@@ -251,6 +251,7 @@ class AnswerSubmitView(APIView):
         question_id = request.data.get('question_id')
         answer_text = request.data.get('answer_text', '').strip()
         speech_metrics = request.data.get('speech_metrics')   # Week 6: optional
+        speaker_id = request.data.get('speaker_id', 'group')
 
         if not question_id or not answer_text:
             return Response(
@@ -276,16 +277,14 @@ class AnswerSubmitView(APIView):
 
             submission = _resolve_session_submission(session)
             student_profile = None
-            try:
-                student_profile = request.user.student_profile
-            except AttributeError:
-                pass
-            if not student_profile:
+            if speaker_id != 'group':
+                try:
+                    student_profile = StudentProfile.objects.get(id=speaker_id)
+                except (StudentProfile.DoesNotExist, ValueError):
+                    pass
+            elif session.student:
+                # Individual session, use the session's student
                 student_profile = session.student
-            if not student_profile and session.group:
-                first_member = GroupMember.objects.filter(group=session.group).first()
-                if first_member:
-                    student_profile = first_member.student
 
             if not submission:
                 return Response(
@@ -304,6 +303,8 @@ class AnswerSubmitView(APIView):
                 prev_question_obj=question,
                 student_answer=answer_text,
                 speech_metrics=speech_metrics,
+                speaker_id=speaker_id,
+                examiner_paused=session.examiner_paused,
             )
 
             # =================================================================
@@ -436,6 +437,19 @@ class AnswerSubmitView(APIView):
                     status=status.HTTP_200_OK,
                 )
 
+            # ---- Examiner Paused --------------------------------------------
+            if session.examiner_paused:
+                return Response(
+                    {
+                        "answer_saved": True,
+                        "session_complete": False,
+                        "paused_by_examiner": True,
+                        "rubric": rubric_payload,
+                        "speech_confidence": confidence,
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
             # ---- Save next question -----------------------------------------
             payload = result['next_question_payload']
             next_topic = payload['topic']
@@ -528,9 +542,13 @@ class SessionReportView(APIView):
             from viva_evaluator.services.reporting import generate_post_viva_report
 
             session = EvaluationSession.objects.get(id=session_id)
-            report = generate_post_viva_report(session)
-            report['session_status'] = session.status
-            return Response(report, status=status.HTTP_200_OK)
+            reports = generate_post_viva_report(session)
+            return Response({
+                "reports": reports,
+                "session_status": session.status,
+                # Safe fallback for frontend until it's fully updated:
+                "data": next(iter(reports.values())) if reports else None
+            }, status=status.HTTP_200_OK)
 
         except EvaluationSession.DoesNotExist:
             return Response({"error": "Session not found."}, status=status.HTTP_404_NOT_FOUND)
@@ -715,19 +733,47 @@ class SessionDetailedReportView(APIView):
             }
 
             # Get summary report if exists
-            report_data = None
+            # Get summary reports for all students in the session
+            reports_data = {}
+            from core.models import SessionSummaryReport
             try:
-                summary = session.summary_report
-                report_data = {
-                    "total_ai_score": summary.total_ai_score,
-                    "total_final_score": summary.total_final_score,
-                    "grade": summary.grade,
-                    "overall_feedback": summary.overall_feedback,
-                    "emotional_summary": summary.emotional_summary,
-                    "integrity_flags_summary": summary.integrity_flags_summary,
-                    "scores_status": summary.scores_status,
-                    "scores_approved_at": summary.scores_approved_at.isoformat() if summary.scores_approved_at else None,
-                }
+                # If session is completed, ensure reports exist so examiners can approve scores
+                from core.models import EvaluationSession as ES
+                if session.status == ES.Status.COMPLETED:
+                    raw_state = getattr(session, 'bkt_state_json', None) or {}
+                    if 'bkt_states' in raw_state or 'total_turns' in raw_state:
+                        raw_state = {'group': raw_state}
+                    if not raw_state:
+                        # Fallback for empty sessions
+                        if session.group:
+                            for student in session.group.students.all():
+                                SessionSummaryReport.objects.get_or_create(session=session, student=student)
+                        else:
+                            SessionSummaryReport.objects.get_or_create(session=session, student=session.student)
+                    else:
+                        for speaker_id in raw_state.keys():
+                            if speaker_id == 'group':
+                                SessionSummaryReport.objects.get_or_create(session=session, student=None)
+                            else:
+                                SessionSummaryReport.objects.get_or_create(session=session, student_id=speaker_id)
+
+                summaries = session.summary_reports.all()
+                for summary in summaries:
+                    # In a group session with individual tracking, the student might be linked
+                    # If not, it defaults to 'group'
+                    student_key = str(summary.student.id) if summary.student else 'group'
+                    student_name = summary.student.user.full_name if summary.student and getattr(summary.student, 'user', None) else 'Group'
+                    reports_data[student_key] = {
+                        "student_name": student_name,
+                        "total_ai_score": summary.total_ai_score,
+                        "total_final_score": summary.total_final_score,
+                        "grade": summary.grade,
+                        "overall_feedback": summary.overall_feedback,
+                        "emotional_summary": summary.emotional_summary,
+                        "integrity_flags_summary": summary.integrity_flags_summary,
+                        "scores_status": summary.scores_status,
+                        "scores_approved_at": summary.scores_approved_at.isoformat() if summary.scores_approved_at else None,
+                    }
             except Exception:
                 pass
 
@@ -778,7 +824,8 @@ class SessionDetailedReportView(APIView):
 
             return Response({
                 "session": session_data,
-                "report": report_data,
+                "reports": reports_data,
+                "report": next(iter(reports_data.values())) if reports_data else None,
                 "timeline": timeline,
             }, status=status.HTTP_200_OK)
 

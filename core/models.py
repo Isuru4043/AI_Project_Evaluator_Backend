@@ -353,6 +353,7 @@ class RubricCriteria(models.Model):
     )
     description = models.TextField(null=True, blank=True)
     questions_to_ask = models.IntegerField(default=3)   # ← ADD THIS LINE ONLY
+    is_individual = models.BooleanField(default=False)
 
     class Meta:
         verbose_name = 'Rubric Criteria'
@@ -469,9 +470,13 @@ class EvaluationSession(models.Model):
     scheduled_end = models.DateTimeField()
     actual_start = models.DateTimeField(null=True, blank=True)
     
+    # When True, the AI viva pipeline skips generating the next question.
+    examiner_paused = models.BooleanField(default=False)
+    
     # Adaptive Viva Limits
     max_total_questions = models.IntegerField(default=25)
     max_questions_per_topic = models.IntegerField(default=2)
+    viva_weight_percentage = models.IntegerField(default=100)
     grouping_cache = models.ForeignKey(
         RubricGroupingCache,
         on_delete=models.SET_NULL,
@@ -752,7 +757,9 @@ class VivaAnswer(models.Model):
     )
     student = models.ForeignKey(
         StudentProfile,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name='viva_answers',
     )
     transcribed_answer = models.TextField(null=True, blank=True)
@@ -831,6 +838,14 @@ class FinalScore(models.Model):
         on_delete=models.CASCADE,
         related_name='final_scores',
     )
+    student = models.ForeignKey(
+        'StudentProfile',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='final_scores_per_student',
+        help_text="The specific student this score belongs to in a group session."
+    )
     examiner = models.ForeignKey(
         ExaminerProfile,
         on_delete=models.CASCADE,
@@ -867,10 +882,18 @@ class SessionSummaryReport(models.Model):
     """Aggregated summary report for an evaluation session."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    session = models.OneToOneField(
+    session = models.ForeignKey(
         EvaluationSession,
         on_delete=models.CASCADE,
-        related_name='summary_report',
+        related_name='summary_reports',
+    )
+    student = models.ForeignKey(
+        'StudentProfile',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='summary_reports_per_student',
+        help_text="The specific student this report belongs to in a group session."
     )
     total_ai_score = models.DecimalField(
         max_digits=6, decimal_places=2, null=True, blank=True,
@@ -908,6 +931,12 @@ class SessionSummaryReport(models.Model):
     class Meta:
         verbose_name = 'Session Summary Report'
         verbose_name_plural = 'Session Summary Reports'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['session', 'student'],
+                name='unique_summary_report_per_student',
+            ),
+        ]
 
     def __str__(self):
         return f"Report for {self.session} — Grade: {self.grade or 'N/A'}"
