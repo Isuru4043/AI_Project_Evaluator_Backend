@@ -10,7 +10,13 @@ from requests import HTTPError
 from core.models import CodeSubmission, GeneratedVivaQuestion
 from code_analysis.services.report_agent import CodeAnalysisReportAgent
 from .gemini_service import GeminiService
-from .repo_service import cleanup_path, clone_repo, iter_code_files, safe_extract_zip
+from .repo_service import (
+    EXCLUDED_DIRS,
+    cleanup_path,
+    clone_repo,
+    iter_code_files,
+    safe_extract_zip,
+)
 from .sonarqube_service import SonarQubeService
 
 logger = logging.getLogger(__name__)
@@ -304,32 +310,102 @@ class CodeAnalysisService:
         save_kg_for_submission(project_submission, graph)
 
 
+ROOT_MANIFESTS = (
+    (("pom.xml",), "java", "maven", "mvn -q test"),
+    (("build.gradle", "build.gradle.kts"), "java", "gradle", "gradle test"),
+    (("package.json",), "javascript", "npm", "npm install && npm run build"),
+    (("requirements.txt", "pyproject.toml", "setup.py", "Pipfile"),
+     "python", "pip", ""),
+    (("CMakeLists.txt",), "cpp", "cmake",
+     "cmake -S . -B build && cmake --build build"),
+    (("Makefile", "makefile", "GNUmakefile"), "cpp", "make", "make"),
+)
+
+SOURCE_EXTENSION_LANGUAGE = {
+    ".py": "python",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".ts": "javascript",
+    ".tsx": "javascript",
+    ".java": "java",
+    ".c": "cpp",
+    ".h": "cpp",
+    ".cc": "cpp",
+    ".cpp": "cpp",
+    ".cxx": "cpp",
+    ".hpp": "cpp",
+    ".cs": "csharp",
+    ".go": "go",
+    ".rb": "ruby",
+    ".php": "php",
+    ".kt": "kotlin",
+    ".swift": "swift",
+    ".rs": "rust",
+}
+
+
+def find_project_root(repo_path):
+    """Descend past wrapper directories to the directory that holds the project.
+
+    A GitHub "Download ZIP" extracts to a single `<repo>-<branch>/` folder, so
+    for zip submissions every manifest sits one level below the extraction root.
+    """
+    current = Path(repo_path)
+    for _ in range(3):
+        try:
+            entries = [p for p in current.iterdir() if p.name not in EXCLUDED_DIRS]
+        except OSError:
+            break
+        subdirs = [p for p in entries if p.is_dir()]
+        if len(subdirs) != 1 or any(p.is_file() for p in entries):
+            break
+        current = subdirs[0]
+    return current
+
+
 def detect_language_and_build(repo_path):
-    repo_path = Path(repo_path)
-    files = {p.name for p in repo_path.glob("**/*") if p.is_file()}
+    root = find_project_root(repo_path)
 
-    if "pom.xml" in files:
-        return "java", "maven", "mvn -q test"
-    if "build.gradle" in files or "build.gradle.kts" in files:
-        return "java", "gradle", "gradle test"
-    if "package.json" in files:
-        return "javascript", "npm", "npm install && npm run build"
-    if "requirements.txt" in files or "pyproject.toml" in files:
-        return "python", "pip", ""
-    if "CMakeLists.txt" in files:
-        return "cpp", "cmake", "cmake -S . -B build && cmake --build build"
-    if "Makefile" in files:
-        return "cpp", "make", "make"
+    # Anchored at the project root on purpose. A manifest deeper in the tree
+    # belongs to a language binding or an example, not to the project itself:
+    # OpenCV ships a pom.xml under its Java bindings and fmt a build.gradle,
+    # and matching those anywhere reported both C++ projects as Java.
+    try:
+        root_files = {p.name for p in root.iterdir() if p.is_file()}
+    except OSError:
+        root_files = set()
 
-    extensions = {}
-    for file_path in repo_path.rglob("*"):
-        if file_path.is_file():
-            ext = file_path.suffix.lower()
-            extensions[ext] = extensions.get(ext, 0) + 1
+    for names, language, build_system, build_command in ROOT_MANIFESTS:
+        if root_files.intersection(names):
+            return language, build_system, build_command
 
-    if extensions:
-        language = max(extensions, key=extensions.get).lstrip(".")
-        return language, "unknown", ""
+    return _detect_from_extensions(root)
+
+
+def _detect_from_extensions(root):
+    """Fallback for a project with no recognised root manifest.
+
+    Counts source files only. The previous behaviour counted every extension in
+    the tree, so `.json`, `.md` and `.git` internals routinely outvoted the code
+    and the detector reported languages like "md".
+    """
+    by_language = {}
+    by_extension = {}
+
+    for file_path in iter_code_files(root):
+        extension = file_path.suffix.lower()
+        by_extension[extension] = by_extension.get(extension, 0) + 1
+        language = SOURCE_EXTENSION_LANGUAGE.get(extension)
+        if language:
+            by_language[language] = by_language.get(language, 0) + 1
+
+    if by_language:
+        return max(by_language, key=by_language.get), "unknown", ""
+
+    # No recognised programming language — fall back to the commonest
+    # non-vendored file type so markup-only submissions still report something.
+    if by_extension:
+        return max(by_extension, key=by_extension.get).lstrip("."), "unknown", ""
 
     return "unknown", "unknown", ""
 
