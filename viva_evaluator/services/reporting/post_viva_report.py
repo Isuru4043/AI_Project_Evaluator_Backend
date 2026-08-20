@@ -41,8 +41,13 @@ def generate_post_viva_report(session) -> Dict:
     """
     Build the full report dict for one EvaluationSession.
     Now returns a dictionary mapped by speaker_id.
+    Accepts either an EvaluationSession instance or a session_id (UUID/str).
     """
+    from core.models import EvaluationSession
     from viva_evaluator.services.pipeline.session_state import load_session_state
+
+    if not isinstance(session, EvaluationSession):
+        session = EvaluationSession.objects.select_related('project').get(id=session)
 
     raw_state = getattr(session, 'bkt_state_json', None) or {}
     if 'bkt_states' in raw_state or 'total_turns' in raw_state:
