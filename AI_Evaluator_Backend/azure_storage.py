@@ -3,11 +3,18 @@ Azure Blob Storage helper functions for uploading reports,
 videos, and audio files, plus SAS URL generation.
 """
 
+import base64
 import os
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 
 from azure.core.exceptions import ResourceExistsError
-from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
+from azure.storage.blob import (
+    BlobServiceClient,
+    BlobSasPermissions,
+    ContentSettings,
+    generate_blob_sas,
+)
 
 
 # =============================================================================
@@ -129,6 +136,53 @@ def upload_video_to_blob(file, project_id, session_id):
     except Exception as e:
         print(f"[AZURE ERROR] Video upload failed: {str(e)}")
         raise Exception(f"Video upload failed: {str(e)}")
+
+
+def physical_video_blob_path(project_id, session_id, extension='webm'):
+    """Stable blob name used by the physical evaluation chunk uploader."""
+    safe_extension = 'mp4' if str(extension).lower() == 'mp4' else 'webm'
+    filename = f'physical-evaluation-{session_id}.{safe_extension}'
+    return f'{project_id}/{session_id}/{filename}'
+
+
+def physical_video_block_id(chunk_index):
+    """Return a deterministic, fixed-width Azure block ID for one chunk."""
+    raw = f'{int(chunk_index):08d}'.encode('ascii')
+    return base64.b64encode(raw).decode('ascii')
+
+
+@lru_cache(maxsize=1)
+def _physical_video_container_client():
+    """Create/check the physical video container once per server process."""
+    return _ensure_container(AZURE_CONTAINER_VIDEOS)
+
+
+def stage_physical_video_block(file, blob_path, chunk_index):
+    """Stream one small MediaRecorder chunk into an uncommitted Azure block."""
+    try:
+        blob_client = _physical_video_container_client().get_blob_client(blob_path)
+        block_id = physical_video_block_id(chunk_index)
+        kwargs = {'length': file.size} if getattr(file, 'size', None) is not None else {}
+        blob_client.stage_block(block_id=block_id, data=file, **kwargs)
+        return block_id
+    except Exception as e:
+        print(f"[AZURE ERROR] Physical video chunk upload failed: {str(e)}")
+        raise Exception(f"Physical video chunk upload failed: {str(e)}")
+
+
+def commit_physical_video_blocks(blob_path, chunk_count, content_type='video/webm'):
+    """Commit staged chunks in order, making one playable video blob visible."""
+    try:
+        blob_client = _physical_video_container_client().get_blob_client(blob_path)
+        block_ids = [physical_video_block_id(index) for index in range(int(chunk_count))]
+        blob_client.commit_block_list(
+            block_ids,
+            content_settings=ContentSettings(content_type=content_type or 'video/webm'),
+        )
+        return blob_client.url
+    except Exception as e:
+        print(f"[AZURE ERROR] Physical video finalization failed: {str(e)}")
+        raise Exception(f"Physical video finalization failed: {str(e)}")
 
 
 # =============================================================================

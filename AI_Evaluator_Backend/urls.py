@@ -31,6 +31,9 @@ urlpatterns = [
 
     # CV/behavioral analysis — /api/sessions/<id>/cv/...
     path('api/', include('cv_analysis.urls')),
+
+    # Physical evaluation kiosk — /api/physical/...
+    path('api/physical/', include('physical_evaluation.urls')),
 ]
 
 # Media file serving
