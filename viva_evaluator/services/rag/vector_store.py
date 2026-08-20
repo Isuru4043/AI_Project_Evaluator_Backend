@@ -82,6 +82,7 @@ class SubmissionVectorStore:
             if idx < 0 or idx >= len(self._chunks):
                 continue
             chunk = dict(self._chunks[idx])  # shallow copy
+            chunk['chunk_idx'] = int(idx)
             if source_filter and chunk.get('source') != source_filter:
                 continue
             chunk['score'] = float(score)
@@ -234,10 +235,17 @@ def invalidate_index_cache(submission) -> None:
 
 
 def _invalidate_lexical(submission) -> None:
-    """Drop the cached BM25 index for a submission (best-effort)."""
+    """Drop cached retrieval artifacts for a submission (best-effort)."""
     try:
         from viva_evaluator.services.rag.lexical import invalidate as _lex_invalidate
         _lex_invalidate(str(submission.id))
+    except Exception:
+        pass
+    try:
+        from viva_evaluator.services.rag.retrieval import (
+            invalidate_submission_retrieval_cache,
+        )
+        invalidate_submission_retrieval_cache(str(submission.id))
     except Exception:
         pass
 

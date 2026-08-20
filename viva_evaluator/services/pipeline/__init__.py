@@ -1,15 +1,9 @@
 """
 Pipeline — orchestrates a single viva turn end-to-end.
 
-Replaces the legacy session_manager.py glue with a clean state machine:
-    1. Load session memory (BKT states, transcript, intent history)
-    2. Hybrid retrieval (FAISS + KG)
-    3. Analyzer agent → 3D rubric + soft score
-    4. BKT update for the active criterion
-    5. Strategist agent → next Bloom level + intent
-    6. Termination check
-    7. Questioner agent → next question
-    8. Save updated session state
+Authoritative turn order:
+    assessment → fairness → ability → termination → planning → generation
+    → persistence
 
 session_state.py: typed view over EvaluationSession.bkt_state_json + intent history.
 termination.py:    three-condition termination logic + 25-turn hard cap.
@@ -25,11 +19,31 @@ from viva_evaluator.services.pipeline.termination import (
     should_terminate,
     TerminationDecision,
 )
+from viva_evaluator.services.pipeline.context import (
+    load_rubric,
+    load_viva_topics,
+)
+from viva_evaluator.services.pipeline.contracts import (
+    AnswerAssessment,
+    EvidenceReference,
+    FairnessAdjustedAssessment,
+    NextQuestionPlan,
+    PlannedQuestion,
+    QuestionGroundingContext,
+    QuestionEvidencePackage,
+    ValidatedQuestion,
+    VivaTopicRef,
+)
 from viva_evaluator.services.pipeline.turn_pipeline import (
     process_answer_and_pick_next,
-    load_rubric,
-    pick_next_topic,
-    load_viva_topics,
+)
+from viva_evaluator.services.pipeline.topic_selector import pick_next_topic
+from viva_evaluator.services.pipeline.stages.question_planning import (
+    plan_next_question,
+)
+from viva_evaluator.services.pipeline.orchestrator import (
+    VivaPipeline,
+    VivaPipelineInputError,
 )
 
 __all__ = [
@@ -38,8 +52,20 @@ __all__ = [
     'save_session_state',
     'should_terminate',
     'TerminationDecision',
+    'AnswerAssessment',
+    'EvidenceReference',
+    'FairnessAdjustedAssessment',
+    'NextQuestionPlan',
+    'PlannedQuestion',
+    'QuestionGroundingContext',
+    'QuestionEvidencePackage',
+    'ValidatedQuestion',
+    'VivaTopicRef',
     'process_answer_and_pick_next',
     'load_rubric',
     'pick_next_topic',
+    'plan_next_question',
     'load_viva_topics',
+    'VivaPipeline',
+    'VivaPipelineInputError',
 ]

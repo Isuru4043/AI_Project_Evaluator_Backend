@@ -7,6 +7,8 @@ from django.utils import timezone
 from urllib.request import urlopen
 
 from core.models import ProjectSubmission
+from projects.permissions import IsExaminer
+from viva_evaluator.permissions import IsAssignedProjectExaminer
 from viva_evaluator.models import SubmissionIndexStatus
 from viva_evaluator.serializers import (
     SubmissionUploadSerializer,
@@ -20,6 +22,16 @@ from viva_evaluator.views._helpers import (
 )
 
 
+def _assign_creator_as_lead(project, user):
+    from core.models import ProjectExaminer
+
+    ProjectExaminer.objects.get_or_create(
+        project=project,
+        examiner=user.examiner_profile,
+        defaults={'role_in_project': ProjectExaminer.RoleInProject.LEAD},
+    )
+
+
 class ProjectCreateView(APIView):
     """
     POST /api/viva/projects/
@@ -27,7 +39,7 @@ class ProjectCreateView(APIView):
     Examiner creates a project with full rubric in one call.
     Returns warnings if weights do not add up to 100%.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsExaminer]
 
     def post(self, request):
         from viva_evaluator.serializers import (
@@ -42,6 +54,7 @@ class ProjectCreateView(APIView):
 
         if serializer.is_valid():
             project = serializer.save()
+            _assign_creator_as_lead(project, request.user)
             response_data = ProjectDetailSerializer(project).data
 
             # Include warnings if any
@@ -62,7 +75,7 @@ class ProjectDetailView(APIView):
 
     Returns full project details including rubric.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAssignedProjectExaminer]
 
     def get(self, request, project_id):
         from core.models import Project
@@ -85,12 +98,14 @@ class ProjectListView(APIView):
     GET  /api/viva/projects/ — Returns all projects
     POST /api/viva/projects/ — Creates a new project with rubric
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsExaminer]
 
     def get(self, request):
         from core.models import Project
         from viva_evaluator.serializers import ProjectDetailSerializer
-        projects = Project.objects.all().order_by('-created_at')
+        projects = Project.objects.filter(
+            project_examiners__examiner=request.user.examiner_profile,
+        ).distinct().order_by('-created_at')
         serializer = ProjectDetailSerializer(projects, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -105,6 +120,7 @@ class ProjectListView(APIView):
         )
         if serializer.is_valid():
             project = serializer.save()
+            _assign_creator_as_lead(project, request.user)
             response_data = ProjectDetailSerializer(project).data
             warnings = serializer.context.get('warnings', [])
             if warnings:
@@ -121,7 +137,7 @@ class StudentListView(APIView):
 
     Returns all students. Used by examiner when creating a session.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsExaminer]
 
     def get(self, request):
         from core.models import StudentProfile
@@ -149,7 +165,7 @@ class ModuleMaterialListView(APIView):
     """
     GET /api/viva/projects/<project_id>/module-materials/
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAssignedProjectExaminer]
 
     def get(self, request, project_id):
         from core.models import ModuleMaterial
@@ -166,7 +182,7 @@ class ModuleMaterialUploadView(APIView):
     """
     POST /api/viva/projects/<project_id>/module-materials/upload/
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAssignedProjectExaminer]
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request, project_id):
@@ -220,7 +236,7 @@ class ModuleMaterialDeleteView(APIView):
     """
     DELETE /api/viva/projects/<project_id>/module-materials/<material_id>/
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAssignedProjectExaminer]
 
     def delete(self, request, project_id, material_id):
         from core.models import ModuleMaterial

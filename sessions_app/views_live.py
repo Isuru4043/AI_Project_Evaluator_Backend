@@ -28,6 +28,7 @@ from core.models import (
 )
 from projects.permissions import IsExaminer, IsStudent
 from sessions_app.views import _err, _get_examiner_profile, _is_assigned, _ok, _500
+from viva_evaluator.permissions import VivaSessionPermission
 
 
 def _get_session(session_id):
@@ -204,11 +205,16 @@ class LiveQuestionAnswerView(APIView):
             if not answer_text:
                 return _err('answer_text is required.')
 
-            answer = VivaAnswer.objects.create(
+            answer, created = VivaAnswer.objects.get_or_create(
                 question=question,
-                student=profile,
-                transcribed_answer=answer_text,
+                deduplication_key=f"student:{profile.id}",
+                defaults={
+                    'student': profile,
+                    'transcribed_answer': answer_text,
+                },
             )
+            if not created:
+                return _err('This question has already been answered.')
             return _ok(
                 'Answer recorded.',
                 _serialize_question(question, answer),
@@ -304,7 +310,7 @@ class ExaminerEndSessionView(APIView):
 
 class ExaminerSessionStatusView(APIView):
     """GET /api/sessions/<session_id>/live-questions/status/"""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, VivaSessionPermission]
 
     def get(self, request, session_id):
         try:

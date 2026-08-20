@@ -121,3 +121,10 @@ def invalidate_module_cache(project_id: str) -> None:
     """Drop cached store for a project (call after re-indexing materials)."""
     key = f"module_materials_{project_id}"
     _MODULE_CACHE.pop(key, None)
+    try:
+        from viva_evaluator.services.rag.retrieval import (
+            invalidate_module_retrieval_cache,
+        )
+        invalidate_module_retrieval_cache(str(project_id))
+    except Exception:
+        pass

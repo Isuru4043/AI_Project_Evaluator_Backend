@@ -61,6 +61,7 @@ def assess_understanding(inp: CharitableInput) -> Dict:
                 'confidence': 0.5,
                 'rationale': 'charitable check unavailable; no adjustment',
             },
+            operation='fairness_charitable',
         )
     except Exception as exc:
         # Never let a fairness rescue failure block the turn. On error, simply

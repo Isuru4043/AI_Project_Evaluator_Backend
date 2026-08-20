@@ -89,6 +89,7 @@ def triage_response(inp: TriageInput) -> Dict:
                 'confidence': 0.5,
                 'rationale':  'triage unavailable; defaulting to score',
             },
+            operation='response_triage',
         )
     except Exception as exc:
         # A fairness check must never block the turn. On any failure (incl.

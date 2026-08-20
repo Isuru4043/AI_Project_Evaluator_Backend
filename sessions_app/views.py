@@ -23,6 +23,7 @@ from sessions_app.serializers import (
     StudentSessionStatusSerializer, VivaQuestionCreateSerializer,
     VivaQuestionSerializer, VivaQuestionUpdateSerializer,
 )
+from viva_evaluator.permissions import VivaSessionPermission
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -804,7 +805,7 @@ class PresencePingView(APIView):
     Receives a presence heartbeat from an active student or examiner in the room.
     Updates their SessionPresence timestamp to keep them marked as active.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, VivaSessionPermission]
 
     def post(self, request, session_id):
         try:

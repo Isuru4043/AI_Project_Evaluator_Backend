@@ -58,6 +58,7 @@ def classify_inconsistency(inp: ConsistencyInput) -> Dict:
                 'confidence': 0.5,
                 'rationale': 'consistency check unavailable; penalty kept',
             },
+            operation='fairness_consistency',
         )
     except Exception as exc:
         logger.warning('consistency_check failed (%s); keeping penalty', exc)

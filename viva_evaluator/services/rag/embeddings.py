@@ -7,10 +7,17 @@ DESIGN:
     - Used for both indexing (chunks) and querying (live questions).
 """
 
+import hashlib
 import logging
 from typing import List, Optional
 
 import numpy as np
+
+from viva_evaluator.services.rag.cache import (
+    BoundedTTLCache,
+    env_float,
+    env_int,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +35,10 @@ EMBEDDING_DIM = 384
 # =============================================================================
 
 _model: Optional[object] = None
+_QUERY_EMBEDDING_CACHE = BoundedTTLCache(
+    max_entries=env_int("RAG_QUERY_EMBED_CACHE_SIZE", 256),
+    ttl_seconds=env_float("RAG_QUERY_EMBED_CACHE_TTL_SECONDS", 900.0),
+)
 
 
 def _get_model():
@@ -73,7 +84,23 @@ def embed_text(text: str) -> np.ndarray:
     """
     Embed a single string into a (384,) float32 vector.
     """
-    return embed_texts([text])[0]
+    normalized = str(text or '').strip()
+    cache_key = (
+        EMBEDDING_MODEL,
+        hashlib.sha256(normalized.encode('utf-8')).hexdigest(),
+    )
+    hit, cached = _QUERY_EMBEDDING_CACHE.get(cache_key)
+    if hit and cached is not None:
+        return cached.copy()
+
+    embedded = embed_texts([normalized])[0]
+    _QUERY_EMBEDDING_CACHE.set(cache_key, embedded.copy())
+    return embedded
+
+
+def clear_query_embedding_cache() -> None:
+    """Clear cached live-query vectors; indexing embeddings are unaffected."""
+    _QUERY_EMBEDDING_CACHE.invalidate()
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:

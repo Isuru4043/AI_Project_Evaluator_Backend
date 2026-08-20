@@ -57,6 +57,12 @@ def index_module_material(material) -> bool:
     import numpy as np
     from viva_evaluator.services.rag.chunking import chunk_text
     from viva_evaluator.services.rag.embeddings import embed_texts, EMBEDDING_DIM
+    from viva_evaluator.services.rag.faiss_store import invalidate_module_cache
+
+    # Prevent a stale query result from surviving while this material is being
+    # replaced. Invalidate again after success in case a concurrent request
+    # rebuilt the cache during indexing.
+    invalidate_module_cache(str(material.project_id))
     
     try:
         import urllib.parse
@@ -128,6 +134,7 @@ def index_module_material(material) -> bool:
 
         material.processing_status = ModuleMaterial.ProcessingStatus.COMPLETED
         material.save()
+        invalidate_module_cache(str(material.project_id))
         return True
 
     except Exception as e:

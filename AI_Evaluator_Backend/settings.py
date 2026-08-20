@@ -1,5 +1,6 @@
 
 
+import json
 import os
 from pathlib import Path
 from datetime import timedelta
@@ -263,6 +264,19 @@ GOOGLE_CLOUD_PROJECT = os.getenv('GOOGLE_CLOUD_PROJECT', '').strip()
 GOOGLE_CLOUD_LOCATION = os.getenv('GOOGLE_CLOUD_LOCATION', 'global').strip()
 GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-3.1-flash-lite').strip()
 
+# Optional per-million-token prices used only for telemetry cost estimates.
+# Keep provider pricing in deployment configuration because it changes over
+# time. Invalid or absent JSON disables monetary estimates while token metrics
+# continue to work.
+try:
+    LLM_MODEL_PRICING = json.loads(
+        os.getenv('LLM_MODEL_PRICING_JSON', '{}')
+    )
+except (json.JSONDecodeError, TypeError):
+    LLM_MODEL_PRICING = {}
+if not isinstance(LLM_MODEL_PRICING, dict):
+    LLM_MODEL_PRICING = {}
+
 # Resolve relative credential paths from the repository root so authentication
 # works consistently under manage.py, Gunicorn, background workers, and scripts.
 GOOGLE_APPLICATION_CREDENTIALS = os.getenv(
@@ -388,6 +402,61 @@ LOGGING = {
         },
     },
 }
+
+# Question-validation rollout policy when the Tier-2 Critic cannot be reached:
+#   degraded_tier1 — serve the Tier-1-valid generated question with an audit flag
+#   safe_fallback  — replace it with a deterministic Tier-1-valid question
+#   fail_closed    — return safe_question_unavailable (HTTP 503)
+VIVA_QUESTION_CRITIC_UNAVAILABLE_POLICY = os.getenv(
+    'VIVA_QUESTION_CRITIC_UNAVAILABLE_POLICY',
+    'degraded_tier1',
+).strip().lower()
+
+# Speculative question speech. The API key remains server-side; the browser
+# only requests audio for a persisted question through an authenticated route.
+ELEVENLABS_TTS_ENABLED = os.getenv(
+    'ELEVENLABS_TTS_ENABLED', 'false'
+).lower() == 'true'
+ELEVENLABS_API_KEY = os.getenv('ELEVENLABS_API_KEY', '').strip()
+ELEVENLABS_VOICE_ID = os.getenv('ELEVENLABS_VOICE_ID', '').strip()
+ELEVENLABS_MODEL_ID = os.getenv(
+    'ELEVENLABS_MODEL_ID', 'eleven_flash_v2_5'
+).strip()
+ELEVENLABS_OUTPUT_FORMAT = os.getenv(
+    'ELEVENLABS_OUTPUT_FORMAT', 'mp3_44100_128'
+).strip()
+ELEVENLABS_TIMEOUT_SECONDS = float(
+    os.getenv('ELEVENLABS_TIMEOUT_SECONDS', '20')
+)
+ELEVENLABS_TTS_CACHE_MAX_JOBS = int(
+    os.getenv('ELEVENLABS_TTS_CACHE_MAX_JOBS', '256')
+)
+ELEVENLABS_PRICE_PER_1000_CHARACTERS_USD = float(
+    os.getenv('ELEVENLABS_PRICE_PER_1000_CHARACTERS_USD', '0')
+)
+
+# Offline performance gates used by question_validation_report --enforce.
+# They never interrupt a live viva; tune them after collecting a representative
+# baseline for the deployment region and selected provider models.
+VIVA_PERF_MIN_TURNS = int(os.getenv('VIVA_PERF_MIN_TURNS', '20'))
+VIVA_PERF_MAX_P95_TURN_LATENCY_MS = float(
+    os.getenv('VIVA_PERF_MAX_P95_TURN_LATENCY_MS', '30000')
+)
+VIVA_PERF_MAX_MEAN_CALLS_PER_TURN = float(
+    os.getenv('VIVA_PERF_MAX_MEAN_CALLS_PER_TURN', '5')
+)
+VIVA_PERF_MAX_DEGRADED_RATE = float(
+    os.getenv('VIVA_PERF_MAX_DEGRADED_RATE', '0.10')
+)
+VIVA_PERF_MAX_FALLBACK_RATE = float(
+    os.getenv('VIVA_PERF_MAX_FALLBACK_RATE', '0.05')
+)
+VIVA_PERF_MIN_TIER1_PASS_RATE = float(
+    os.getenv('VIVA_PERF_MIN_TIER1_PASS_RATE', '0.95')
+)
+VIVA_PERF_MAX_MEAN_COST_PER_TURN_USD = float(
+    os.getenv('VIVA_PERF_MAX_MEAN_COST_PER_TURN_USD', '0')
+)
 
 # =============================================================================
 # Agora RTC & STT Configuration

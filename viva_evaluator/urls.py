@@ -22,6 +22,7 @@ from viva_evaluator.views import (
     SessionListView,
     SessionStatusView,
     CurrentQuestionView,
+    QuestionAudioView,
     FinalScoreSubmitView,
     RubricCategoryUpdateView,
     RubricCriteriaUpdateView,
@@ -51,6 +52,7 @@ urlpatterns = [
     path('sessions/<uuid:session_id>/detailed-report/', SessionDetailedReportView.as_view(), name='session-detailed-report'),
     path('sessions/<uuid:session_id>/status/', SessionStatusView.as_view(), name='session-status'),
     path('sessions/<uuid:session_id>/current/', CurrentQuestionView.as_view(), name='session-current'),
+    path('sessions/<uuid:session_id>/questions/<uuid:question_id>/audio/', QuestionAudioView.as_view(), name='question-audio'),
     path('sessions/<uuid:session_id>/final-scores/', FinalScoreSubmitView.as_view(), name='final-scores'),
 
     # Human-in-the-Loop: per-question score editing + bulk approval

@@ -5,14 +5,17 @@ From v3 spec, Phase 3 step 3.8:
 
     Loop terminates when ALL THREE are simultaneously true:
         1. Rubric coverage   : every criterion has received >= questions_to_ask
-                               turns where Correctness > 0.3
+                               attempted questions
         2. Min session length: total_turns >= MIN_TOTAL_TURNS
         3. BKT convergence   : for every concept C, either
                                   posterior SD σ < ABILITY_SD_THRESHOLD
                                   (ability measured precisely)
                                OR concept has reached MAX_TURNS_PER_CONCEPT
 
-    Hard cap: if total_turns >= HARD_TURN_CAP, terminate regardless.
+    Backstops:
+        - If every concept reaches MAX_TURNS_PER_CONCEPT after coverage, end
+          even when a very small rubric cannot reach MIN_TOTAL_TURNS.
+        - If total_turns >= HARD_TURN_CAP, terminate regardless.
 
 These limits are per the v3 spec. They can be made examiner-configurable in
 Phase 0 polish; for the FYP we hard-code the literature defaults.
@@ -20,7 +23,7 @@ Phase 0 polish; for the FYP we hard-code the literature defaults.
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from viva_evaluator.services.pipeline.session_state import SessionState
 
@@ -59,26 +62,25 @@ class TerminationDecision:
 def should_terminate(
     state: SessionState,
     all_criteria: List[Dict],
-    session=None,
+    *,
+    ai_question_count: Optional[int] = None,
+    hard_cap: int = HARD_TURN_CAP,
 ) -> TerminationDecision:
     """
     Evaluate the three termination conditions plus hard cap.
 
     Args:
         state:        Current session state (BKT + coverage + total_turns).
-        all_criteria: List of criterion dicts in rubric order. Each must have
-                      'id' and 'questions_to_ask'.
+        all_criteria:     Criterion dictionaries in rubric order.
+        ai_question_count: Number of persisted AI questions in the session.
+                           Defaults to state.total_turns for non-DB callers.
+        hard_cap:         Examiner-configured maximum question count.
 
     Returns:
         TerminationDecision flagging which conditions hold.
     """
     # ----- Hard cap (overrides everything) ----------------------------------
-    if session:
-        ai_turns = session.viva_questions.filter(question_source='ai').count()
-    else:
-        ai_turns = state.total_turns
-
-    hard_cap = getattr(session, 'max_total_questions', HARD_TURN_CAP) if session else HARD_TURN_CAP
+    ai_turns = state.total_turns if ai_question_count is None else ai_question_count
     if ai_turns >= hard_cap:
         return TerminationDecision(
             should_end=True,
@@ -98,11 +100,25 @@ def should_terminate(
     # ----- Condition 3: BKT convergence -------------------------------------
     bkt_converged, conv_reason = _check_bkt_convergence(state, all_criteria)
 
+    capacity_exhausted = bool(all_criteria) and all(
+        (
+            state.coverage.get(str(criterion["id"])).turns
+            if state.coverage.get(str(criterion["id"]))
+            else 0
+        ) >= MAX_TURNS_PER_CONCEPT
+        for criterion in all_criteria
+    )
     all_met = coverage_met and min_turns_met and bkt_converged
+    should_end = all_met or (coverage_met and capacity_exhausted)
     if all_met:
         reason = (
             f'coverage_met=True, min_turns_met=True ({state.total_turns}/{MIN_TOTAL_TURNS}), '
             f'bkt_converged=True'
+        )
+    elif coverage_met and capacity_exhausted:
+        reason = (
+            "coverage_met=True; all concepts reached their per-concept "
+            f"cap ({MAX_TURNS_PER_CONCEPT})"
         )
     else:
         reason_parts = []
@@ -114,7 +130,7 @@ def should_terminate(
         reason = '; '.join(reason_parts)
 
     return TerminationDecision(
-        should_end=all_met,
+        should_end=should_end,
         reason=reason,
         coverage_met=coverage_met,
         min_turns_met=min_turns_met,
@@ -129,9 +145,11 @@ def should_terminate(
 
 def _check_coverage(state: SessionState, all_criteria: List[Dict]) -> tuple:
     """
-    Every criterion must have at minimum its questions_to_ask turns,
-    AND criteria with weak mastery (P_Lt < 0.4) need either more turns
-    until they hit MAX_TURNS_PER_CONCEPT.
+    Every criterion must have its configured minimum attempted questions.
+
+    Correctness is deliberately excluded: a wrong but genuine answer is still
+    an assessment attempt. Weak mastery and uncertainty are handled separately
+    by the convergence/revisit rule below.
     """
     incomplete = []
     for crit in all_criteria:
@@ -140,18 +158,9 @@ def _check_coverage(state: SessionState, all_criteria: List[Dict]) -> tuple:
         required = int(crit.get('questions_to_ask', 3))
 
         turns = cov.turns if cov else 0
-        correct_turns = cov.correct_turns if cov else 0
-
-        if correct_turns < required:
-            incomplete.append(f"{crit.get('name', crit_id)}: {correct_turns}/{required}")
-            continue
-
-        # Weak mastery → extend up to MAX_TURNS_PER_CONCEPT
-        bkt = state.bkt_states.get(crit_id)
-        if bkt and bkt.p_lt < WEAK_MASTERY_THRESHOLD and turns < MAX_TURNS_PER_CONCEPT:
+        if turns < required:
             incomplete.append(
-                f"{crit.get('name', crit_id)}: weak mastery {bkt.p_lt:.2f}, "
-                f"turns {turns}/{MAX_TURNS_PER_CONCEPT}"
+                f"{crit.get('name', crit_id)}: attempts {turns}/{required}"
             )
 
     if incomplete:
@@ -164,7 +173,7 @@ def _check_coverage(state: SessionState, all_criteria: List[Dict]) -> tuple:
 def _check_bkt_convergence(state: SessionState, all_criteria: List[Dict]) -> tuple:
     """
     Every concept must satisfy at least one of:
-      - std(delta_last3) < BKT_CONVERGENCE_THRESHOLD
+      - posterior ability uncertainty is converged and mastery is not weak
       - turns >= MAX_TURNS_PER_CONCEPT
     """
     not_converged = []
@@ -181,6 +190,14 @@ def _check_bkt_convergence(state: SessionState, all_criteria: List[Dict]) -> tup
             not_converged.append(
                 f"{crit.get('name', crit_id)}: insufficient history "
                 f"(turns={turns})"
+            )
+            continue
+
+        if bkt.p_lt < WEAK_MASTERY_THRESHOLD:
+            not_converged.append(
+                f"{crit.get('name', crit_id)}: weak mastery revisit "
+                f"(P_Lt={bkt.p_lt:.2f}, turns={turns}/"
+                f"{MAX_TURNS_PER_CONCEPT})"
             )
             continue
 
