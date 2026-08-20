@@ -7,6 +7,9 @@ from django.utils import timezone
 from urllib.request import urlopen
 
 from core.models import ProjectSubmission
+from projects.permissions import IsExaminer
+from viva_evaluator.permissions import IsAssignedProjectExaminer
+from viva_evaluator.views.project_views import _assign_creator_as_lead
 from viva_evaluator.models import SubmissionIndexStatus
 from viva_evaluator.serializers import (
     SubmissionUploadSerializer,
@@ -26,7 +29,7 @@ class RubricCategoryCreateView(APIView):
 
     Add a rubric category to an existing project.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAssignedProjectExaminer]
 
     def post(self, request, project_id):
         from core.models import Project, RubricCategory
@@ -57,7 +60,7 @@ class RubricCriteriaCreateView(APIView):
     Add a criterion to an existing rubric category.
     Includes optional question hints and questions_to_ask count.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAssignedProjectExaminer]
 
     def post(self, request, category_id):
         from core.models import RubricCategory
@@ -86,7 +89,7 @@ class QuestionHintCreateView(APIView):
 
     Add question hints to an existing criterion.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAssignedProjectExaminer]
 
     def post(self, request, criteria_id):
         from core.models import RubricCriteria
@@ -121,7 +124,7 @@ class RubricUploadPreviewView(APIView):
     Response: structured rubric JSON for examiner to review and edit.
     """
     parser_classes = [MultiPartParser, FormParser]
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsExaminer]
 
     def post(self, request):
         rubric_file = request.FILES.get('rubric_file')
@@ -192,7 +195,7 @@ class RubricConfirmSaveView(APIView):
     """
     POST /api/viva/rubric/confirm-save/
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsExaminer]
 
     def post(self, request):
         from viva_evaluator.serializers import (
@@ -209,6 +212,7 @@ class RubricConfirmSaveView(APIView):
 
         if serializer.is_valid():
             project = serializer.save()
+            _assign_creator_as_lead(project, request.user)
             response_data = ProjectDetailSerializer(project).data
 
             warnings = serializer.context.get('warnings', [])
@@ -234,7 +238,7 @@ class RubricCategoryUpdateView(APIView):
 
     Examiner updates a rubric category's name, weight, or description.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAssignedProjectExaminer]
 
     def patch(self, request, category_id):
         from core.models import RubricCategory
@@ -262,7 +266,7 @@ class RubricCriteriaUpdateView(APIView):
 
     Examiner updates a rubric criterion's fields.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAssignedProjectExaminer]
 
     def patch(self, request, criteria_id):
         from core.models import RubricCriteria
@@ -290,7 +294,7 @@ class QuestionHintDeleteView(APIView):
 
     Examiner removes a question hint from a criterion.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAssignedProjectExaminer]
 
     def delete(self, request, hint_id):
         from viva_evaluator.models import CriteriaQuestionHint

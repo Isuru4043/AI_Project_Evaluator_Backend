@@ -53,6 +53,7 @@ def save_kg_for_submission(submission, graph) -> int:
 
     # KG changed — drop stale cache
     _KG_CACHE.pop(str(submission.id), None)
+    _invalidate_signal_cache(submission)
 
     n_edges = graph.number_of_edges()
     n_nodes = graph.number_of_nodes()
@@ -96,6 +97,17 @@ def load_kg_for_submission(submission):
 def invalidate_kg_cache(submission) -> None:
     """Drop the cached graph for a submission."""
     _KG_CACHE.pop(str(submission.id), None)
+    _invalidate_signal_cache(submission)
+
+
+def _invalidate_signal_cache(submission) -> None:
+    try:
+        from viva_evaluator.services.rag.retrieval import (
+            invalidate_kg_signal_cache,
+        )
+        invalidate_kg_signal_cache(str(submission.id))
+    except Exception:
+        pass
 
 
 # =============================================================================

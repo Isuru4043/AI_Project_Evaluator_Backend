@@ -62,6 +62,7 @@ def assess_self_correction(inp: SelfCorrectionInput) -> Dict:
             max_retries=1,
             fallback={'is_correction': False, 'improved': False,
                       'confidence': 0.5, 'rationale': 'self-correction check unavailable'},
+            operation='fairness_self_correction',
         )
     except Exception as exc:
         logger.warning('self_correction check failed (%s); no credit', exc)

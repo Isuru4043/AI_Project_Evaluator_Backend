@@ -16,8 +16,12 @@ Run via management commands:
 """
 
 from viva_evaluator.services.evaluation.metrics import (
+    compute_llm_telemetry_metrics,
     compute_question_metrics,
+    compute_tts_metrics,
+    format_llm_telemetry_report,
     format_metrics_table,
+    persisted_audit_to_result,
 )
 from viva_evaluator.services.evaluation.calibration import (
     compute_calibration,
@@ -27,7 +31,11 @@ from viva_evaluator.services.evaluation.calibration import (
 
 __all__ = [
     'compute_question_metrics',
+    'compute_llm_telemetry_metrics',
+    'compute_tts_metrics',
+    'format_llm_telemetry_report',
     'format_metrics_table',
+    'persisted_audit_to_result',
     'compute_calibration',
     'calibration_from_db',
     'format_calibration_report',

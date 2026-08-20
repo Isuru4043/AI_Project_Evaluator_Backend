@@ -7,6 +7,7 @@ from django.utils import timezone
 from urllib.request import urlopen
 
 from core.models import ProjectSubmission
+from viva_evaluator.permissions import IsAssignedSessionExaminer
 from viva_evaluator.models import SubmissionIndexStatus
 from viva_evaluator.serializers import (
     SubmissionUploadSerializer,
@@ -40,7 +41,7 @@ class FinalScoreSubmitView(APIView):
         "grade": "A"
     }
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAssignedSessionExaminer]
 
     def post(self, request, session_id):
         from core.models import (
@@ -200,7 +201,7 @@ class PatchAnswerScoreView(APIView):
         "override_note": "Student showed understanding but missed edge cases."
     }
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAssignedSessionExaminer]
 
     def patch(self, request, session_id, answer_id):
         from core.models import EvaluationSession, VivaAnswer
@@ -279,7 +280,7 @@ class ApproveSessionScoresView(APIView):
 
     No request body required.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAssignedSessionExaminer]
 
     def post(self, request, session_id):
         from core.models import EvaluationSession, SessionSummaryReport

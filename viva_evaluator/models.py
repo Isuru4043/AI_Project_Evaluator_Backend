@@ -1,6 +1,61 @@
 import uuid
 from django.db import models
-from core.models import ProjectSubmission, VivaQuestion, VivaAnswer, RubricCriteria
+from core.models import (
+    EvaluationSession,
+    ProjectSubmission,
+    VivaQuestion,
+    VivaAnswer,
+    RubricCriteria,
+)
+
+
+class VivaAnswerProcessingClaim(models.Model):
+    """Database lease and replay record for one logical answer submission."""
+
+    class Status(models.TextChoices):
+        PROCESSING = 'processing', 'Processing'
+        COMPLETED = 'completed', 'Completed'
+        FAILED = 'failed', 'Failed'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    session = models.ForeignKey(
+        EvaluationSession,
+        on_delete=models.CASCADE,
+        related_name='answer_processing_claims',
+    )
+    question = models.ForeignKey(
+        VivaQuestion,
+        on_delete=models.CASCADE,
+        related_name='processing_claims',
+    )
+    speaker_key = models.CharField(max_length=100)
+    idempotency_key = models.CharField(max_length=160)
+    request_hash = models.CharField(max_length=64)
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PROCESSING,
+    )
+    owner_token = models.UUIDField(default=uuid.uuid4)
+    lease_expires_at = models.DateTimeField()
+    response_payload = models.JSONField(null=True, blank=True)
+    response_status = models.PositiveSmallIntegerField(default=200)
+    error_code = models.CharField(max_length=100, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['question', 'speaker_key'],
+                name='uniq_answer_claim_question_speaker',
+            ),
+            models.UniqueConstraint(
+                fields=['session', 'idempotency_key'],
+                name='uniq_answer_claim_session_key',
+            ),
+        ]
+        indexes = [models.Index(fields=['status', 'lease_expires_at'])]
 
 
 class SubmissionIndexStatus(models.Model):
@@ -69,6 +124,14 @@ class VivaQuestionExtension(models.Model):
         MEDIUM = 'medium', 'Medium'
         HARD   = 'hard',   'Hard'
 
+    class ValidationStatus(models.TextChoices):
+        NOT_APPLICABLE = 'not_applicable', 'Not applicable'
+        FULLY_VALIDATED = 'fully_validated', 'Fully validated'
+        TIER1_ONLY_POLICY = 'tier1_only_policy', 'Tier 1 only by policy'
+        CRITIC_UNAVAILABLE = 'critic_unavailable', 'Critic unavailable'
+        SAFE_FALLBACK = 'safe_fallback', 'Safe fallback'
+        REJECTED = 'rejected', 'Rejected'
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
     question = models.OneToOneField(
@@ -90,6 +153,16 @@ class VivaQuestionExtension(models.Model):
         choices=DifficultyLevel.choices,
         default=DifficultyLevel.MEDIUM,
     )
+
+    validation_status = models.CharField(
+        max_length=32,
+        choices=ValidationStatus.choices,
+        default=ValidationStatus.NOT_APPLICABLE,
+        db_index=True,
+    )
+    validation_degraded = models.BooleanField(default=False, db_index=True)
+    fallback_used = models.BooleanField(default=False)
+    generation_audit = models.JSONField(default=dict, blank=True)
 
     class Meta:
         verbose_name = 'Viva Question Extension'

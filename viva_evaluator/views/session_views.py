@@ -1,26 +1,30 @@
+import logging
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import IsAuthenticated
-from django.utils import timezone
-from urllib.request import urlopen
+from django.http import HttpResponse
 
-from core.models import ProjectSubmission
+logger = logging.getLogger(__name__)
+
 from viva_evaluator.models import SubmissionIndexStatus
-from viva_evaluator.serializers import (
-    SubmissionUploadSerializer,
-    SubmissionIndexStatusSerializer,
-)
 
 from viva_evaluator.views._helpers import (
     _resolve_session_submission,
-    _difficulty_signal_from_score,
     _get_or_create_index_status,
 )
 from authentication.authentication import CookieJWTAuthentication
 from physical_evaluation.authentication import PhysicalKioskAuthentication
-from physical_evaluation.permissions import CanAccessSharedVivaSession
+from physical_evaluation.models import PhysicalKioskAccess
+from viva_evaluator.permissions import (
+    CanParticipateInVivaSession,
+    IsAssignedProjectExaminer,
+    IsAssignedSessionExaminer,
+    VivaSessionPermission,
+)
+from viva_evaluator.services.pipeline.exceptions import (
+    QuestionGenerationUnavailableError,
+)
 
 
 class SessionStartView(APIView):
@@ -36,7 +40,7 @@ class SessionStartView(APIView):
     }
     """
     authentication_classes = [PhysicalKioskAuthentication, CookieJWTAuthentication]
-    permission_classes = [IsAuthenticated, CanAccessSharedVivaSession]
+    permission_classes = [IsAuthenticated, VivaSessionPermission]
 
     def post(self, request):
         session_id = request.data.get('session_id')
@@ -49,13 +53,10 @@ class SessionStartView(APIView):
 
         try:
             from core.models import EvaluationSession
-            from viva_evaluator.services.session_manager import get_session_context
-            from viva_evaluator.services.agents import (
-                generate_anchored_question, QuestionerInput,
+            from viva_evaluator.services.pipeline.orchestrator import (
+                VivaPipeline,
+                VivaPipelineInputError,
             )
-            from viva_evaluator.services.rag.retrieval import retrieve_hybrid_for_turn
-            from viva_evaluator.models import VivaQuestionExtension
-            from core.models import VivaQuestion
 
             session = EvaluationSession.objects.get(id=session_id)
             submission = _resolve_session_submission(session)
@@ -80,146 +81,32 @@ class SessionStartView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # Get session context to find first criterion
-            context = get_session_context(session_id)
-
-            # If project has no rubric criteria configured, treat as misconfiguration
-            if not context.get('all_criteria'):
-                return Response(
-                    {"error": "No rubric configured for this project. Please add rubric criteria before starting a viva session."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-            if context['is_complete']:
+            if session.status == EvaluationSession.Status.COMPLETED:
                 return Response(
                     {"error": "This session is already complete."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-
-            if session.status == 'in_progress' and session.viva_questions.exists():
-                latest_q = session.viva_questions.order_by('question_order').last()
-                ext = latest_q.extension if hasattr(latest_q, 'extension') else None
-                return Response(
-                    {
-                        "message": "Session resumed.",
-                        "session_id": session_id,
-                        "question_id": str(latest_q.id),
-                        "question_text": latest_q.question_text,
-                        "blooms_level": latest_q.blooms_level,
-                        "difficulty": ext.difficulty_level if ext else "medium",
-                        "criterion": ext.criteria.criteria_name if ext and ext.criteria else "",
-                        "question_number": latest_q.question_order,
-                    },
-                    status=status.HTTP_200_OK,
+            try:
+                payload = VivaPipeline().start_session(
+                    session=session,
+                    submission=submission,
                 )
-
-            # =================================================================
-            # Determine the first topic via the new pipeline
-            # =================================================================
-            from viva_evaluator.services.pipeline.session_state import load_session_state
-            from viva_evaluator.services.pipeline.turn_pipeline import load_rubric, load_viva_topics, pick_next_topic, _grounding_is_weak
-            
-            state = load_session_state(session)
-            rubric = load_rubric(session.project)
-            for crit in rubric:
-                state.get_or_init_coverage(str(crit['id']), questions_to_ask=int(crit['questions_to_ask']))
-                state.get_or_init_bkt(str(crit['id']))
-                
-            viva_topics = load_viva_topics(session)
-            next_topic = pick_next_topic(viva_topics, state, session)
-            
-            if not next_topic:
-                # Should only happen if session budget is 0
-                next_topic = viva_topics[0] if viva_topics else {
-                    'topic_name': 'General', 'topic_focus': '', 'source_criteria_ids': []
-                }
-
-            # =================================================================
-            # Hybrid retrieval — pull both FAISS chunks AND KG signals
-            # =================================================================
-            retrieval = retrieve_hybrid_for_turn(
-                submission=submission,
-                criterion_name=next_topic['topic_name'],
-                criterion_description=next_topic['topic_focus'],
-                last_answer='',
-                top_k=3,
-            )
-            retrieved = retrieval['chunks']
-
-            # =================================================================
-            # Generate the anchored question via the new pipeline.
-            # =================================================================
-            question_data = generate_anchored_question(QuestionerInput(
-                criterion_name=next_topic['topic_name'],
-                criterion_description=next_topic['topic_focus'],
-                retrieved_chunks=retrieved,
-                kg_signals=retrieval,
-                difficulty='medium',
-                question_hints=[],
-                recent_questions=[],
-                is_first_question=True,
-                question_number_in_criterion=1,
-                weak_grounding=_grounding_is_weak(retrieved),
-                session_id=str(session.id),
-            ))
-
-            # Save the question to DB
-            question_order = context['total_questions_asked'] + 1
-            question = VivaQuestion.objects.create(
-                session=session,
-                question_text=question_data['question_text'],
-                blooms_level=question_data.get('blooms_level', 'Understand'),
-                question_order=question_order,
-                question_source='ai',
-                viva_topic_name=next_topic['topic_name'],
-                source_criteria_ids=next_topic['source_criteria_ids'],
-            )
-
-            # Save extension with criterion and difficulty (using the first criterion)
-            from core.models import RubricCriteria
-            if next_topic['source_criteria_ids']:
-                first_crit_id = next_topic['source_criteria_ids'][0]
-                criterion_obj = RubricCriteria.objects.filter(id=first_crit_id).first()
-                if criterion_obj:
-                    VivaQuestionExtension.objects.create(
-                        question=question,
-                        criteria=criterion_obj,
-                        difficulty_level=question_data.get('difficulty', 'medium'),
-                    )
-
-            # Mark session as in progress
-            from core.models import EvaluationSession as ES
-            session.status = ES.Status.IN_PROGRESS
-            from django.utils import timezone
-            if session.actual_start is None:
-                session.actual_start = timezone.now()
-                session.save(update_fields=['status', 'actual_start'])
-            else:
-                session.save(update_fields=['status'])
-
-            return Response(
-                {
-                    "message": "Session started.",
-                    "session_id": session_id,
-                    "question_id": str(question.id),
-                    "question_text": question.question_text,
-                    "blooms_level": question.blooms_level,
-                    "difficulty": question_data.get('difficulty', 'medium'),
-                    "criterion": next_topic['topic_name'],
-                    "question_number": question_order,
-                    "tier1_passed": question_data.get('tier1_passed', False),
-                    "tier1_failures": question_data.get('tier1_failures', []),
-                    "critic_passed": question_data.get('critic_passed', True),
-                    "critic_critique": question_data.get('critic_critique', ''),
-                    "critic_scores": question_data.get('critic_scores', {}),
-                },
-                status=status.HTTP_200_OK,
-            )
+            except VivaPipelineInputError as exc:
+                return Response(
+                    {"error": str(exc)},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            return Response(payload, status=status.HTTP_200_OK)
 
         except EvaluationSession.DoesNotExist:
             return Response(
                 {"error": "Session not found."},
                 status=status.HTTP_404_NOT_FOUND,
+            )
+        except QuestionGenerationUnavailableError as exc:
+            return Response(
+                {"error": str(exc), "code": exc.code},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
         except Exception as e:
             from viva_evaluator.services.llm_service import LLMQuotaError
@@ -253,9 +140,10 @@ class AnswerSubmitView(APIView):
     }
     """
     authentication_classes = [PhysicalKioskAuthentication, CookieJWTAuthentication]
-    permission_classes = [IsAuthenticated, CanAccessSharedVivaSession]
+    permission_classes = [IsAuthenticated, CanParticipateInVivaSession]
 
     def post(self, request, session_id):
+        claim = None
         question_id = request.data.get('question_id')
         answer_text = request.data.get('answer_text', '').strip()
         speech_metrics = request.data.get('speech_metrics')   # Week 6: optional
@@ -270,15 +158,9 @@ class AnswerSubmitView(APIView):
         try:
             from core.models import (
                 EvaluationSession, VivaQuestion,
-                VivaAnswer, RubricCriteria,
                 GroupMember, StudentProfile,
             )
-            from viva_evaluator.models import (
-                VivaAnswerExtension, VivaQuestionExtension,
-            )
-            from viva_evaluator.services.pipeline import (
-                process_answer_and_pick_next,
-            )
+            from viva_evaluator.services.pipeline.orchestrator import VivaPipeline
 
             session = EvaluationSession.objects.get(id=session_id)
             question = VivaQuestion.objects.get(id=question_id, session=session)
@@ -312,283 +194,92 @@ class AnswerSubmitView(APIView):
                 # Individual session, use the session's student
                 student_profile = session.student
 
+            if not isinstance(request.auth, PhysicalKioskAccess):
+                caller_student = getattr(request.user, 'student_profile', None)
+                if speaker_id != 'group' and (
+                    caller_student is None or caller_student.id != student_profile.id
+                ):
+                    return Response(
+                        {"error": "You cannot submit an answer for another participant."},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+
             if not submission:
                 return Response(
                     {"error": "No submission found for this session."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # A browser/proxy timeout does not necessarily cancel the running
-            # scoring request. If the student retries after the first request
-            # has completed, replay the next unanswered question instead of
-            # scoring and saving the same answer twice.
-            existing_answers = VivaAnswer.objects.filter(question=question)
-            if student_profile is None:
-                existing_answers = existing_answers.filter(student__isnull=True)
-            else:
-                existing_answers = existing_answers.filter(student=student_profile)
-
-            if existing_answers.exists():
-                next_question = VivaQuestion.objects.filter(
-                    session=session,
-                    question_order__gt=question.question_order,
-                    answers__isnull=True,
-                ).order_by('question_order').first()
-
-                if next_question is not None:
-                    extension = getattr(next_question, 'extension', None)
-                    return Response(
-                        {
-                            "answer_saved": True,
-                            "duplicate_ignored": True,
-                            "session_complete": False,
-                            "message": "This answer was already received. Continuing with the next unanswered question.",
-                            "next_question": {
-                                "question_id": str(next_question.id),
-                                "question_text": next_question.question_text,
-                                "blooms_level": next_question.blooms_level,
-                                "difficulty": extension.difficulty_level if extension else "medium",
-                                "criterion": (
-                                    extension.criteria.criteria_name
-                                    if extension and extension.criteria
-                                    else next_question.viva_topic_name
-                                ),
-                                "question_number": next_question.question_order,
-                            },
-                        },
-                        status=status.HTTP_200_OK,
-                    )
-
-                return Response(
-                    {
-                        "answer_saved": True,
-                        "duplicate_ignored": True,
-                        "session_complete": session.status == EvaluationSession.Status.COMPLETED,
-                        "message": "This answer was already received.",
-                    },
-                    status=status.HTTP_200_OK,
-                )
-
-            # =================================================================
-            # WEEK 5 — single pipeline call replaces legacy answer_evaluator
-            # + session_manager glue. Runs Analyzer → BKT update →
-            # termination check → Strategist → Questioner.
-            # =================================================================
-            result = process_answer_and_pick_next(
-                session=session,
-                submission=submission,
-                prev_question_obj=question,
-                student_answer=answer_text,
-                speech_metrics=speech_metrics,
-                speaker_id=speaker_id,
-                examiner_paused=session.examiner_paused,
+            from viva_evaluator.services.answer_idempotency import (
+                IdempotencyConflict, acquire_claim, complete_claim,
+                request_fingerprint, resolve_idempotency_key, speaker_key,
             )
-
-            # =================================================================
-            # A1 — Response Triage / clarification branch.
-            # The student didn't understand the question, so scoring was
-            # SUSPENDED. Record the response for the transcript as UNSCORED
-            # (ai_answer_score = None), then return a clarified re-ask.
-            # No score, no ability change, no turn consumed.
-            # =================================================================
-            if result.get('clarification'):
-                triage = result.get('triage', {})
-
-                # Audit-only record of the (confused) response — unscored.
-                VivaAnswer.objects.create(
-                    question=question,
-                    student=student_profile,
-                    transcribed_answer=answer_text,
-                    ai_answer_score=None,
-                )
-
-                payload = result['clarified_question_payload']
-                qd = payload['question_data']
-                total_asked = session.viva_questions.count()
-
-                clarified_q = VivaQuestion.objects.create(
-                    session=session,
-                    question_text=qd['question_text'],
-                    blooms_level=qd.get('blooms_level', payload['bloom_level']),
-                    question_order=total_asked + 1,
-                    question_source='ai',
-                    viva_topic_name=payload['topic']['topic_name'],
-                    source_criteria_ids=payload['topic']['source_criteria_ids'],
-                )
-                try:
-                    if payload['topic']['source_criteria_ids']:
-                        crit_obj = RubricCriteria.objects.get(id=payload['topic']['source_criteria_ids'][0])
-                        VivaQuestionExtension.objects.create(
-                            question=clarified_q,
-                            criteria=crit_obj,
-                            difficulty_level=qd.get('difficulty', payload['difficulty']),
-                        )
-                except RubricCriteria.DoesNotExist:
-                    pass
-
-                _is_restate = triage.get('label') == 'GARBLED_TRANSCRIPTION'
-                _msg = (
-                    "I didn't catch that clearly — could you say your answer again? "
-                    "This was not scored."
-                    if _is_restate else
-                    "It looks like the question may have been unclear. "
-                    "Here's a clearer version — this was not scored."
-                )
-                return Response(
-                    {
-                        "answer_saved": True,
-                        "scored": False,
-                        "clarification": True,
-                        "clarification_attempt": result.get('clarification_attempt'),
-                        "triage": {
-                            "label":     triage.get('label'),
-                            "rationale": triage.get('rationale'),
-                        },
-                        "message": _msg,
-                        "next_question": {
-                            "question_id":     str(clarified_q.id),
-                            "question_text":   clarified_q.question_text,
-                            "blooms_level":    clarified_q.blooms_level,
-                            "difficulty":      qd.get('difficulty', payload['difficulty']),
-                            "criterion":       payload['topic']['topic_name'],
-                            "question_number": total_asked + 1,
-                            "is_clarification": not _is_restate,
-                            "is_restate":       _is_restate,
-                        },
-                    },
-                    status=status.HTTP_200_OK,
-                )
-
-            analysis = result['analysis']
-            soft_score = result['soft_score']
-            confidence = result.get('speech_confidence') or {}
-
-            # Build a unified rubric scores block for the response.
-            rubric_payload = {
-                'correctness': analysis.get('correctness', {}),
-                'depth':       analysis.get('depth', {}),
-                'consistency': analysis.get('consistency', {}),
-                'soft_score':  soft_score,
-                'reasoning':   analysis.get('reasoning', ''),
-                'gap_identified':       analysis.get('gap_identified', ''),
-                'revealed_assumption':  analysis.get('revealed_assumption', ''),
-                'contradicts_code_flag': analysis.get('contradicts_code_flag', False),
-                'charitable':           analysis.get('charitable', {'applied': False}),
-                'consistency_adjustment': analysis.get('consistency_adjustment', {'applied': False}),
-                'self_correction':      analysis.get('self_correction', {'applied': False}),
-            }
-
-            detailed_analysis = {
-                "rubric": rubric_payload,
-                "strategy": result.get('strategy', {}),
-                "speech_confidence": confidence
-            }
-
-            # Persist the answer + extension (audit trail).
-            answer = VivaAnswer.objects.create(
-                question=question,
-                student=student_profile,
-                transcribed_answer=answer_text,
-                # ai_answer_score is on a 0-10 scale historically; map from soft_score
-                ai_answer_score=round(soft_score * 10.0, 2),
-            )
-            VivaAnswerExtension.objects.create(
-                answer=answer,
-                llm_score=round(soft_score * 10.0, 2),
-                llm_reasoning=analysis.get('reasoning', '') or '',
-                next_difficulty_signal=_difficulty_signal_from_score(soft_score),
-                detailed_ai_analysis=detailed_analysis,
-            )
-
-            # ---- Session complete -------------------------------------------
-            if result['session_complete']:
-                return Response(
-                    {
-                        "answer_saved": True,
-                        "session_complete": True,
-                        "termination_reason": result.get('termination_reason'),
-                        "rubric": rubric_payload,
-                        "speech_confidence": confidence,
-                        "message": "All termination conditions satisfied — session complete.",
-                    },
-                    status=status.HTTP_200_OK,
-                )
-
-            # ---- Examiner Paused --------------------------------------------
-            if session.examiner_paused:
-                return Response(
-                    {
-                        "answer_saved": True,
-                        "session_complete": False,
-                        "paused_by_examiner": True,
-                        "rubric": rubric_payload,
-                        "speech_confidence": confidence,
-                    },
-                    status=status.HTTP_200_OK,
-                )
-
-            # ---- Save next question -----------------------------------------
-            payload = result['next_question_payload']
-            next_topic = payload['topic']
-            qd = payload['question_data']
-
-            total_asked = session.viva_questions.count()
-
-            next_question = VivaQuestion.objects.create(
-                session=session,
-                question_text=qd['question_text'],
-                blooms_level=qd.get('blooms_level', payload['bloom_level']),
-                question_order=total_asked + 1,
-                question_source='ai',
-                viva_topic_name=next_topic['topic_name'],
-                source_criteria_ids=next_topic['source_criteria_ids'],
+            logical_speaker = (
+                f"student:{student_profile.id}"
+                if student_profile is not None
+                else speaker_key(str(speaker_id))
             )
             try:
-                if next_topic['source_criteria_ids']:
-                    next_criterion_obj = RubricCriteria.objects.get(id=next_topic['source_criteria_ids'][0])
-                    VivaQuestionExtension.objects.create(
-                        question=next_question,
-                        criteria=next_criterion_obj,
-                        difficulty_level=qd.get('difficulty', payload['difficulty']),
-                    )
-            except RubricCriteria.DoesNotExist:
-                pass
+                idempotency_key = resolve_idempotency_key(
+                    request, question_id=question.id, speaker_id=logical_speaker,
+                )
+            except ValueError as exc:
+                return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                claim_result = acquire_claim(
+                    session=session,
+                    question=question,
+                    speaker=logical_speaker,
+                    idempotency_key=idempotency_key,
+                    request_hash=request_fingerprint(
+                        answer_text=answer_text,
+                        speech_metrics=speech_metrics,
+                        speaker_id=logical_speaker,
+                    ),
+                )
+            except IdempotencyConflict as exc:
+                return Response(
+                    {"error": str(exc), "code": "idempotency_conflict"},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            claim = claim_result.claim
+            if claim_result.action == "replay":
+                response = Response(claim.response_payload, status=claim.response_status)
+                response["Idempotency-Replayed"] = "true"
+                return response
+            if claim_result.action == "in_progress":
+                response = Response(
+                    {"error": "This answer is already being processed.", "code": "answer_processing"},
+                    status=status.HTTP_409_CONFLICT,
+                )
+                response["Retry-After"] = "1"
+                return response
 
-            return Response(
-                {
-                    "answer_saved": True,
-                    "session_complete": False,
-                    "rubric": rubric_payload,
-                    "speech_confidence": confidence,
-                    "strategy": {
-                        "bloom_level":     payload['bloom_level'],
-                        "socratic_intent": payload['socratic_intent'],
-                        "p_lt":            round(payload['p_lt'], 3),
-                        "rationale":       result['strategy'].get('rationale', ''),
-                    },
-                    "next_question": {
-                        "question_id":     str(next_question.id),
-                        "question_text":   next_question.question_text,
-                        "blooms_level":    payload['bloom_level'],
-                        "difficulty":      payload['difficulty'],
-                        "criterion":       next_topic['topic_name'],
-                        "question_number": total_asked + 1,
-                        "tier1_passed":    qd.get('tier1_passed', False),
-                        "tier1_failures":  qd.get('tier1_failures', []),
-                        "critic_passed":   qd.get('critic_passed', True),
-                        "critic_critique": qd.get('critic_critique', ''),
-                        "critic_scores":   qd.get('critic_scores', {}),
-                        "attempts":        qd.get('attempts', 1),
-                    },
-                },
-                status=status.HTTP_200_OK,
+            payload = VivaPipeline().submit_answer(
+                session=session,
+                submission=submission,
+                question=question,
+                answer_text=answer_text,
+                speech_metrics=speech_metrics,
+                speaker_id=speaker_id,
+                student_profile=student_profile,
             )
+            complete_claim(claim, payload, status.HTTP_200_OK)
+            return Response(payload, status=status.HTTP_200_OK)
 
         except EvaluationSession.DoesNotExist:
             return Response({"error": "Session not found."}, status=status.HTTP_404_NOT_FOUND)
         except VivaQuestion.DoesNotExist:
             return Response({"error": "Question not found."}, status=status.HTTP_404_NOT_FOUND)
+        except QuestionGenerationUnavailableError as exc:
+            return Response(
+                {"error": str(exc), "code": exc.code},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         except Exception as e:
+            if claim is not None:
+                from viva_evaluator.services.answer_idempotency import fail_claim
+                fail_claim(claim)
             from viva_evaluator.services.llm_service import LLMQuotaError
             if isinstance(e, LLMQuotaError):
                 return Response(
@@ -611,7 +302,7 @@ class SessionReportView(APIView):
     session is COMPLETED so examiners can review mid-session if needed —
     the report just reflects whatever turns have happened so far.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAssignedSessionExaminer]
 
     def get(self, request, session_id):
         try:
@@ -639,7 +330,7 @@ class EvaluationSessionCreateView(APIView):
 
     Examiner creates a viva session linking project, student, submission.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAssignedProjectExaminer]
 
     def post(self, request):
         from viva_evaluator.serializers import (
@@ -662,7 +353,7 @@ class SessionListView(APIView):
 
     Returns all sessions for a project.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAssignedProjectExaminer]
 
     def get(self, request, project_id):
         from core.models import EvaluationSession, Project
@@ -689,7 +380,7 @@ class SessionStatusView(APIView):
     Frontend polls this to know if session is scheduled, in progress, or complete.
     """
     authentication_classes = [PhysicalKioskAuthentication, CookieJWTAuthentication]
-    permission_classes = [IsAuthenticated, CanAccessSharedVivaSession]
+    permission_classes = [IsAuthenticated, VivaSessionPermission]
 
     def get(self, request, session_id):
         from core.models import EvaluationSession
@@ -735,10 +426,13 @@ class CurrentQuestionView(APIView):
     live-questions endpoints, so they are excluded here.
     """
     authentication_classes = [PhysicalKioskAuthentication, CookieJWTAuthentication]
-    permission_classes = [IsAuthenticated, CanAccessSharedVivaSession]
+    permission_classes = [IsAuthenticated, VivaSessionPermission]
 
     def get(self, request, session_id):
         from core.models import EvaluationSession, VivaQuestion
+        from viva_evaluator.services.pipeline.presenter import (
+            persisted_validation_metadata,
+        )
 
         session = EvaluationSession.objects.filter(id=session_id).first()
         if not session:
@@ -770,11 +464,105 @@ class CurrentQuestionView(APIView):
                         ext.criteria.criteria_name if ext and ext.criteria else ""
                     ),
                     "question_number": latest_q.question_order,
+                    **persisted_validation_metadata(latest_q),
                 },
                 "session_complete": session.status == 'completed',
             },
             status=status.HTTP_200_OK,
         )
+
+
+class QuestionAudioView(APIView):
+    """Return a signed URL for direct Azure streaming, or 202 while pending."""
+
+    authentication_classes = [PhysicalKioskAuthentication, CookieJWTAuthentication]
+    permission_classes = [IsAuthenticated, VivaSessionPermission]
+
+    def get(self, request, session_id, question_id):
+        from core.models import VivaQuestion
+        from viva_evaluator.services.tts import (
+            get_tts_audio,
+            get_tts_signed_url,
+            get_tts_status,
+        )
+
+        logger.info("[QuestionAudioView] Incoming audio request for question_id=%s, session_id=%s", question_id, session_id)
+
+        question = (
+            VivaQuestion.objects.select_related("extension")
+            .filter(id=question_id, session_id=session_id)
+            .first()
+        )
+        if question is None:
+            logger.warning("[QuestionAudioView] Question %s not found in session %s", question_id, session_id)
+            return Response(
+                {"error": "Question not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            audit = dict(question.extension.generation_audit or {})
+        except Exception:
+            audit = {}
+        tts = dict(audit.get("tts") or {})
+        cache_key = str(tts.get("cache_key") or "")
+        if (
+            not cache_key
+            or tts.get("candidate_hash") != audit.get("candidate_hash")
+        ):
+            logger.warning("[QuestionAudioView] TTS cache_key missing or candidate_hash mismatch for question %s", question_id)
+            return Response(
+                {"tts_status": "unavailable"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        current = get_tts_status(cache_key)
+        current_status = current.get("status", "pending")
+        logger.info("[QuestionAudioView] Status for key=%s is '%s'", cache_key[:12], current_status)
+
+        if current_status == "ready":
+            # Try signed URL first (browser streams directly from Azure)
+            signed = get_tts_signed_url(cache_key)
+            if signed is not None:
+                logger.info("[QuestionAudioView] Returning 200 JSON with signed Azure URL for question %s", question_id)
+                return Response(
+                    {
+                        "tts_status": "ready",
+                        "audio_url": signed["audio_url"],
+                        "cache_hit": signed["cache_hit"],
+                    }
+                )
+
+            # Fallback: proxy the bytes through Django
+            logger.info("[QuestionAudioView] SAS URL failed; falling back to binary proxy through Django")
+            try:
+                audio = get_tts_audio(cache_key)
+            except Exception:
+                audio = None
+            if audio is not None:
+                audio_bytes, mime_type, audio_status = audio
+                response = HttpResponse(audio_bytes, content_type=mime_type)
+                response["Cache-Control"] = "private, max-age=3600"
+                response["Content-Length"] = str(len(audio_bytes))
+                response["X-TTS-Cache-Hit"] = str(
+                    audio_status.get("cache_hit") is True
+                ).lower()
+                return response
+
+        if current_status == "pending":
+            logger.info("[QuestionAudioView] Audio still generating. Returning 202 Accepted (Retry-After: 0.2)")
+            response = Response(
+                {"tts_status": "pending"},
+                status=status.HTTP_202_ACCEPTED,
+            )
+            response["Retry-After"] = "0.2"
+            return response
+        logger.warning("[QuestionAudioView] Returning 503 for tts_status='%s'", current_status)
+        return Response(
+            {"tts_status": current_status},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
 
 class SessionDetailedReportView(APIView):
     """
@@ -785,7 +573,7 @@ class SessionDetailedReportView(APIView):
     granular AI reasoning (gaps identified, strategies, soft scores) stored
     in the detailed_ai_analysis JSON field.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAssignedSessionExaminer]
 
     def get(self, request, session_id):
         from core.models import EvaluationSession, VivaQuestion
@@ -888,6 +676,18 @@ class SessionDetailedReportView(APIView):
                     "difficulty": q_ext.difficulty_level if q_ext else None,
                     "criterion": q_ext.criteria.criteria_name if q_ext and q_ext.criteria else getattr(q, 'viva_topic_name', None),
                     "asked_at": str(getattr(q, 'asked_at', None) or q.generated_at),
+                    "validation_status": (
+                        q_ext.validation_status if q_ext else 'not_applicable'
+                    ),
+                    "validation_degraded": bool(
+                        q_ext.validation_degraded if q_ext else False
+                    ),
+                    "fallback_used": bool(
+                        q_ext.fallback_used if q_ext else False
+                    ),
+                    "generation_audit": (
+                        q_ext.generation_audit if q_ext else {}
+                    ),
                     "answer": {
                         "answer_id": str(answer.id),
                         "transcribed_answer": answer.transcribed_answer,

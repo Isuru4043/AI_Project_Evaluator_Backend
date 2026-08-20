@@ -13,18 +13,13 @@ WEEK 5 EVOLUTION:
     For now we accept difficulty/blooms as inputs and skip Critic.
 """
 
-import logging
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict
+from typing import TYPE_CHECKING, List, Optional, Dict
 
-from viva_evaluator.services.llm_service import llm_call
 from viva_evaluator.services.rag.retrieval import format_chunks_for_prompt
-from viva_evaluator.services.agents.tier1_validator import (
-    validate_question,
-    Tier1Result,
-)
 
-logger = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from viva_evaluator.services.pipeline.contracts import QuestionEvidencePackage
 
 
 # =============================================================================
@@ -48,6 +43,9 @@ class QuestionerInput:
     module_chunks: List[Dict] = field(default_factory=list)           # Module materials chunks
     kg_signals: Optional[Dict] = None                 # Week 3: hybrid retrieval output
     difficulty: str = 'medium'                        # 'easy' | 'medium' | 'hard'
+    target_bloom: Optional[str] = None                 # exact Strategist selection
+    socratic_intent: str = ''                         # exact Strategist intent
+    intent_prompt_hint: str = ''                      # how to express that intent
     question_hints: List[str] = field(default_factory=list)
     recent_questions: List[str] = field(default_factory=list)
     previous_question: Optional[str] = None           # for follow-up mode
@@ -64,6 +62,7 @@ class QuestionerInput:
     # instead of inventing specific details the student may never have written.
     weak_grounding: bool = False
     session_id: Optional[str] = None
+    evidence_package: Optional["QuestionEvidencePackage"] = None
 
 
 # =============================================================================
@@ -95,108 +94,24 @@ def generate_anchored_question(
             critic_critique
             attempts            -- total LLM calls
     """
-    blooms = DIFFICULTY_TO_BLOOMS.get(inp.difficulty, 'Analyze')
-
-    prompt = _build_prompt(inp, blooms, retry_reason=None)
-    response = llm_call(
-        prompt,
-        model='reasoning',
-        expect_json=True,
-        fallback={'question_text': '', 'blooms_level': blooms, 'difficulty': inp.difficulty},
+    # Compatibility facade for legacy callers.  Generation and validation are
+    # intentionally separate stages so a raw candidate can be consumed (for
+    # example by speculative TTS) before validation finishes.
+    from viva_evaluator.services.pipeline.stages.candidate_generation import (
+        generate_question_candidate,
     )
-    question_text = (response.get('question_text') or '').strip()
-
-    # ---- Tier 1 and Tier 2 (Critic) parallel execution ---------------------
-    import concurrent.futures
-    from viva_evaluator.services.agents.critic import critique_question, CriticInput
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        future_tier1 = executor.submit(validate_question, question_text, recent_questions=inp.recent_questions)
-
-        future_critic = None
-        if enable_critic:
-            critic_inp = CriticInput(
-                question_text=question_text,
-                target_bloom=blooms,
-                target_intent=_intent_label_from_kg(inp.kg_signals),
-                retrieved_chunks=inp.retrieved_chunks,
-                module_chunks=inp.module_chunks,
-                student_last_answer=inp.previous_answer,
-            )
-            future_critic = executor.submit(critique_question, critic_inp)
-
-        result = future_tier1.result()
-        attempts = 1
-
-        initial_critic_result = None
-        if future_critic:
-            initial_critic_result = future_critic.result()
-
-    # One Tier 1 retry with failure reasons fed back into the prompt
-    if not result.passed and max_retries > 0:
-        logger.info(
-            'questioner: Tier 1 failed (%s). Retrying with failure context.',
-            result.reason_string(),
-        )
-        retry_prompt = _build_prompt(inp, blooms, retry_reason=result.reason_string())
-        retry_response = llm_call(
-            retry_prompt,
-            model='reasoning',
-            expect_json=True,
-            fallback={'question_text': question_text, 'blooms_level': blooms, 'difficulty': inp.difficulty},
-        )
-        retry_text = (retry_response.get('question_text') or '').strip()
-        retry_result = validate_question(retry_text, recent_questions=inp.recent_questions)
-        attempts = 2
-
-        # Use retry only if it's strictly better
-        if retry_result.passed or (not result.passed and len(retry_result.failures) < len(result.failures)):
-            question_text = retry_text
-            result = retry_result
-            response = retry_response
-            initial_critic_result = None  # Invalidated since question text changed
-
-    # ---- Tier 2 (Critic) — only if Tier 1 passed --------------------------
-    critic_passed = True
-    critic_critique = ''
-    critic_data = None
-    critic_ran = False
-
-    # Optimization: if Tier 1 passed with high confidence (spoken length 18-45 words, low similarity),
-    # skip Critic LLM call to save ~1.4s latency.
-    is_high_confidence_tier1 = (
-        result.passed
-        and 18 <= result.word_count <= 45
-        and result.similarity_to_recent < 0.65
-        and not inp.clarify_mode
+    from viva_evaluator.services.pipeline.stages.question_validation import (
+        validate_question_candidate,
     )
 
-    if enable_critic and result.passed and question_text and not is_high_confidence_tier1:
-        critic_ran = True
-        critic_passed, critic_critique, attempts, response, question_text, result, critic_data = (
-            _run_critic_loop(
-                inp=inp,
-                blooms=blooms,
-                question_text=question_text,
-                response=response,
-                tier1_result=result,
-                attempts=attempts,
-                initial_critic_result=initial_critic_result,
-            )
-        )
-
-    return {
-        'question_text':   question_text,
-        'blooms_level':    response.get('blooms_level', blooms),
-        'difficulty':      response.get('difficulty', inp.difficulty),
-        'tier1_passed':    result.passed,
-        'tier1_failures':  result.failures,
-        'critic_ran':      critic_ran,
-        'critic_passed':   critic_passed if critic_ran else None,
-        'critic_critique': critic_critique,
-        'critic_scores':   critic_data or {},
-        'attempts':        attempts,
-    }
+    candidate = generate_question_candidate(inp)
+    validated = validate_question_candidate(
+        inp,
+        candidate,
+        max_retries=max_retries,
+        enable_critic=enable_critic,
+    )
+    return validated.to_legacy_dict()
 
 
 # =============================================================================
@@ -336,10 +251,11 @@ HARD RULES — your question MUST follow ALL of these:
 
 11. NO EXTERNAL ALTERNATIVES. Do NOT ask the student to compare their choice
     against external technologies, frameworks, or algorithms that they did
-    NOT explicitly mention in their report or code. 
+    NOT explicitly mention in their report/code and that is not supplied as
+    an authorized KG alternative evidence item.
     For example, if they used "AES-256-GCM", do NOT ask "Why didn't you use
-    AES-CBC?" unless AES-CBC is explicitly in the retrieved sources. It is
-    unfair to test them on alternatives they haven't studied.
+    AES-CBC?" unless AES-CBC is explicitly in retrieved evidence. It is unfair
+    to test them on an unsupported alternative.
 """
 
 
@@ -348,6 +264,11 @@ def _build_prompt(
     blooms_level: str,
     retry_reason: Optional[str],
 ) -> str:
+    from viva_evaluator.services.pipeline.evidence import (
+        ensure_question_evidence_package,
+    )
+
+    evidence_package = ensure_question_evidence_package(inp)
     sources_block = format_chunks_for_prompt(inp.retrieved_chunks, max_chars=2400)
 
     # Hybrid retrieval - KG signals
@@ -358,61 +279,33 @@ def _build_prompt(
         if kg_text:
             kg_block = f"\nKNOWLEDGE GRAPH SIGNALS:\n{kg_text}\n"
 
-    # Presentation Demo Context (Canary-Qwen + Qwen2.5-VL alignment)
     demo_block = ''
-    if inp.session_id:
-        try:
-            from core.models import DemoCapturedSegment, EvaluationSession
-            session = EvaluationSession.objects.select_related('student').get(id=inp.session_id)
-            segments = DemoCapturedSegment.objects.filter(
-                session=session,
-                student=session.student,
-                is_processed=True
-            ).order_by('sequence_number', 'timestamp')
-
-            audio_segs = [s for s in segments if s.segment_type == DemoCapturedSegment.SegmentType.AUDIO]
-            slide_segs = [s for s in segments if s.segment_type == DemoCapturedSegment.SegmentType.SLIDE]
-
-            if audio_segs or slide_segs:
-                demo_lines = []
-                for audio in audio_segs:
-                    # Find the slide whose relative timestamp is closest to but <= audio.end_time
-                    matched_slide = None
-                    for slide in slide_segs:
-                        if slide.start_time <= audio.end_time:
-                            matched_slide = slide
-                    
-                    slide_context = "(No slide showing)"
-                    if matched_slide:
-                        slide_context = f"Slide {matched_slide.sequence_number}: {matched_slide.processed_text}"
-                    
-                    demo_lines.append(
-                        f"- [{audio.start_time:.1f}s - {audio.end_time:.1f}s] {slide_context}\n"
-                        f"  Student said: \"{audio.processed_text}\""
-                    )
-                
-                # If there are only slide segments (e.g. no audio segments processed yet)
-                if not audio_segs and slide_segs:
-                    for slide in slide_segs:
-                        demo_lines.append(
-                            f"- Slide {slide.sequence_number} [offset {slide.start_time:.1f}s]: {slide.processed_text}"
-                        )
-
-                if demo_lines:
-                    demo_block = (
-                        "\nPRESENTATION DEMO CONTEXT (What the student actually showed and said in their presentation):\n"
-                        + "\n".join(demo_lines) + "\n"
-                    )
-        except Exception as e:
-            logger.exception("Failed to build presentation demo context in questioner prompt.")
+    presentation_references = evidence_package.of_type("presentation_segment")
+    if presentation_references:
+        demo_lines = [
+            f"- [{reference.evidence_id}] {reference.content}"
+            for reference in presentation_references
+        ]
+        demo_block = (
+            "\nPRESENTATION DEMO EVIDENCE (what the student showed or said):\n"
+            + "\n".join(demo_lines)
+            + "\n"
+        )
 
 
     if inp.is_first_question or not inp.previous_question:
         conversation_block = '(This is the opening question for this criterion.)'
     else:
+        previous_answer_references = evidence_package.of_type("previous_answer")
+        previous_answer_id = (
+            previous_answer_references[0].evidence_id
+            if previous_answer_references
+            else "previous-answer:unavailable"
+        )
         conversation_block = (
             f"PREVIOUS QUESTION (from you):\n{inp.previous_question}\n\n"
-            f"STUDENT'S ANSWER (their exact words):\n{inp.previous_answer or '(no answer)'}"
+            f"STUDENT'S ANSWER [{previous_answer_id}] (their exact words):\n"
+            f"{inp.previous_answer or '(no answer)'}"
         )
 
     hints_block = ''
@@ -421,6 +314,15 @@ def _build_prompt(
         hints_block = (
             "\nEXAMINER'S SUGGESTED FOCUS AREAS (use as loose guidelines, not exact wording):\n"
             f"{hints_text}\n"
+        )
+
+    strategy_block = ''
+    if inp.socratic_intent or inp.intent_prompt_hint:
+        strategy_block = (
+            "\nSOCRATIC QUESTIONING STRATEGY:\n"
+            f"Intent: {inp.socratic_intent or 'general_probe'}\n"
+            f"Guidance: {inp.intent_prompt_hint or 'Ask one focused follow-up.'}\n"
+            "Express this strategy in the question without naming the strategy itself.\n"
         )
 
     retry_block = ''
@@ -471,6 +373,11 @@ def _build_prompt(
             f"{module_text}\n"
         )
 
+    evidence_catalog = '\n'.join(
+        f"- {reference.evidence_id} ({reference.evidence_type})"
+        for reference in evidence_package.references
+    ) or "- (no attributable evidence available)"
+
     return f"""You are an academic viva examiner conducting an oral examination.
 
 RUBRIC CRITERION:
@@ -484,9 +391,12 @@ their project — every concrete reference must come from here):
 {kg_block}
 {demo_block}
 {module_block}
+AVAILABLE EVIDENCE IDS (return only IDs from this list):
+{evidence_catalog}
+
 CONVERSATION CONTEXT:
 {conversation_block}
-{hints_block}{retry_block}{clarify_block}{weak_grounding_block}
+{hints_block}{strategy_block}{retry_block}{clarify_block}{weak_grounding_block}
 TARGET BLOOM'S LEVEL: {blooms_level}
 PHRASING STYLE FOR THIS LEVEL: {bloom_phrasing}
 
@@ -494,11 +404,17 @@ PHRASING STYLE FOR THIS LEVEL: {bloom_phrasing}
 
 Generate ONE viva question following all the rules above.
 
+For source_reference_ids, list every evidence ID that directly supports a
+specific factual anchor in the question. Never invent an ID. When LIMITED
+SOURCE MATERIAL applies and the question makes no specific factual claim, an
+empty list is allowed.
+
 Respond ONLY with valid JSON (no markdown, no extra text):
 {{
     "question_text": "your question here",
-    "blooms_level": "{blooms_level}",
-    "difficulty": "{inp.difficulty}"
+    "source_reference_ids": ["one-or-more IDs from AVAILABLE EVIDENCE IDS"],
+    "target_bloom": "{blooms_level}",
+    "socratic_intent": "{inp.socratic_intent or 'general_probe'}"
 }}
 """
 
@@ -512,161 +428,3 @@ def _bloom_phrasing_hint(blooms_level: str) -> str:
         'Evaluate':   'judgment — "Was X the right tradeoff given your stated objective Y?"',
         'Create':     'redesign — "If you redesigned this, what would change and why?"',
     }.get(blooms_level, 'analysis-level reasoning')
-
-
-# =============================================================================
-# Tier 2 — Critic loop (Week 6)
-# =============================================================================
-
-# Tier 2 critic retry budget. 1 retry (= up to 2 critic evaluations) keeps
-# worst-case latency bounded while still catching most quality issues; the
-# best-candidate fallback guarantees we never ship a blank question.
-CRITIC_MAX_RETRIES = 1
-
-
-def _run_critic_loop(
-    inp: 'QuestionerInput',
-    blooms: str,
-    question_text: str,
-    response: Dict,
-    tier1_result: 'Tier1Result',
-    attempts: int,
-    initial_critic_result: Optional[Dict] = None,
-):
-    """
-    Run the Critic on the candidate question. On fail, regenerate with the
-    critique appended to the Questioner prompt. Up to 2 critic retries.
-
-    Returns:
-        (critic_passed, critic_critique, attempts, response, question_text,
-         tier1_result, critic_data)
-
-    The best (highest-scoring) candidate is returned even if all retries
-    fail Tier 2 — we don't want a blank question, just the best we got.
-    """
-    from viva_evaluator.services.agents.critic import critique_question, CriticInput
-
-    best_text = question_text
-    best_response = response
-    best_tier1 = tier1_result
-    best_critic_score = -1.0
-    best_critic_data: Dict = {}
-    best_critic_critique = ''
-    best_critic_passed = False
-
-    current_text = question_text
-    current_response = response
-    current_tier1 = tier1_result
-
-    for attempt_idx in range(CRITIC_MAX_RETRIES + 1):
-        if attempt_idx == 0 and initial_critic_result:
-            critic_result = initial_critic_result
-        else:
-            critic_result = critique_question(CriticInput(
-                question_text=current_text,
-                target_bloom=blooms,
-                target_intent=_intent_label_from_kg(inp.kg_signals),
-                retrieved_chunks=inp.retrieved_chunks,
-                module_chunks=inp.module_chunks,
-                student_last_answer=inp.previous_answer,
-            ))
-
-        critic_score = (
-            critic_result['specificity_score']
-            + critic_result['bloom_alignment_score']
-            + critic_result['boundary_check_score']
-        ) / 3.0
-        if critic_result['hallucination_flag']:
-            critic_score *= 0.5  # halve score for hallucination
-
-        if critic_score > best_critic_score:
-            best_text = current_text
-            best_response = current_response
-            best_tier1 = current_tier1
-            best_critic_score = critic_score
-            best_critic_data = {
-                'specificity':     critic_result['specificity_score'],
-                'bloom_alignment': critic_result['bloom_alignment_score'],
-                'boundary_check':  critic_result['boundary_check_score'],
-                'hallucination':   critic_result['hallucination_flag'],
-            }
-            best_critic_passed = critic_result['passed']
-            best_critic_critique = critic_result['critique']
-
-        if critic_result['passed']:
-            logger.info(
-                'questioner: Critic PASS attempt=%d spec=%.2f bloom=%.2f',
-                attempt_idx + 1,
-                critic_result['specificity_score'],
-                critic_result['bloom_alignment_score'],
-            )
-            return (
-                True, '', attempts, current_response,
-                current_text, current_tier1, best_critic_data,
-            )
-
-        # Critic failed — log and prepare retry (unless last attempt)
-        logger.info(
-            'questioner: Critic FAIL attempt=%d critique=%r',
-            attempt_idx + 1,
-            critic_result['critique'][:120],
-        )
-
-        if attempt_idx >= CRITIC_MAX_RETRIES:
-            break
-
-        # Retry: append the critique as a retry reason for the Questioner
-        retry_reason = f"critic feedback: {critic_result['critique']}"
-        retry_prompt = _build_prompt(inp, blooms, retry_reason=retry_reason)
-        retry_response = llm_call(
-            retry_prompt,
-            model='reasoning',
-            expect_json=True,
-            fallback={
-                'question_text': current_text,
-                'blooms_level': blooms,
-                'difficulty': inp.difficulty,
-            },
-        )
-        retry_text = (retry_response.get('question_text') or '').strip()
-
-        # Re-run Tier 1 on the retry; only proceed if it still passes Tier 1
-        retry_tier1 = validate_question(retry_text, recent_questions=inp.recent_questions)
-        attempts += 1
-
-        if retry_tier1.passed and retry_text:
-            current_text = retry_text
-            current_response = retry_response
-            current_tier1 = retry_tier1
-        else:
-            logger.info(
-                'questioner: Critic retry failed Tier 1 (%s) — keeping previous candidate.',
-                retry_tier1.reason_string(),
-            )
-            # Don't update current_*; the best-seen so far is preserved
-            break
-
-    # All retries exhausted — return best-seen candidate
-    logger.info(
-        'questioner: Critic exhausted retries, returning best (score=%.2f)',
-        best_critic_score,
-    )
-    return (
-        best_critic_passed, best_critic_critique, attempts, best_response,
-        best_text, best_tier1, best_critic_data,
-    )
-
-
-def _intent_label_from_kg(kg_signals: Optional[Dict]) -> str:
-    """
-    Best-effort intent label for the Critic. The Strategist's chosen intent
-    isn't currently passed through QuestionerInput; until that's plumbed in,
-    we infer one from the KG signals or fall back to a generic label.
-    """
-    if not kg_signals:
-        return 'general_probe'
-    if kg_signals.get('contradicts_code_alerts'):
-        return 'challenge_contradiction'
-    if kg_signals.get('depends_on_topics'):
-        return 'exploring_alternatives'
-    return 'general_probe'

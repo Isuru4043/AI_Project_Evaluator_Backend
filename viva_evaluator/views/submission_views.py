@@ -8,6 +8,7 @@ from urllib.request import urlopen
 
 from core.models import ProjectSubmission
 from viva_evaluator.models import SubmissionIndexStatus
+from viva_evaluator.permissions import CanAccessProjectSubmission
 from viva_evaluator.serializers import (
     SubmissionUploadSerializer,
     SubmissionIndexStatusSerializer,
@@ -135,7 +136,7 @@ class SubmissionStatusView(APIView):
     Returns the current processing status of a submission.
     Frontend checks this before allowing a session to start.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, CanAccessProjectSubmission]
 
     def get(self, request, submission_id):
         try:

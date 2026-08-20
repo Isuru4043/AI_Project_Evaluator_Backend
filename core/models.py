@@ -771,6 +771,12 @@ class VivaAnswer(models.Model):
         blank=True,
         related_name='viva_answers',
     )
+    deduplication_key = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True,
+        help_text='Stable speaker key used to prevent duplicate answers.',
+    )
     transcribed_answer = models.TextField(null=True, blank=True)
     audio_clip_url = models.TextField(null=True, blank=True)
     response_delay_ms = models.IntegerField(null=True, blank=True)
@@ -795,6 +801,13 @@ class VivaAnswer(models.Model):
     class Meta:
         verbose_name = 'Viva Answer'
         verbose_name_plural = 'Viva Answers'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['question', 'deduplication_key'],
+                condition=models.Q(deduplication_key__isnull=False),
+                name='uniq_viva_answer_question_speaker',
+            ),
+        ]
 
     def __str__(self):
         return f"Answer by {self.student} to {self.question}"

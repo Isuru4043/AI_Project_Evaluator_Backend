@@ -17,6 +17,7 @@ from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from viva_evaluator.permissions import VivaSessionPermission
 
 from django_q.tasks import async_task
 
@@ -50,7 +51,7 @@ class StartWarmupView(APIView):
     With Gemini Multimodal, no GPU container warming is needed as Google's
     managed multimodal APIs are always-on.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, VivaSessionPermission]
 
     def post(self, request, session_id):
         session = _get_session_or_404(session_id)
@@ -75,7 +76,7 @@ class DemoAudioUploadView(APIView):
     Saves the file to Azure Blob via the model's FileField, then enqueues
     a background task to transcribe it on Modal.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, VivaSessionPermission]
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request, session_id):
@@ -136,7 +137,7 @@ class DemoScreenshotUploadView(APIView):
     current frame differs from the previous one — so bandwidth is only
     spent on genuine slide transitions.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, VivaSessionPermission]
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request, session_id):
@@ -197,7 +198,7 @@ class DemoQueueStatusView(APIView):
     The frontend polls this after "End Demo" is clicked to determine
     when it is safe to transition to the viva phase.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, VivaSessionPermission]
 
     def get(self, request, session_id):
         session = _get_session_or_404(session_id)

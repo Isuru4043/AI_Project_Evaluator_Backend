@@ -107,6 +107,7 @@ def analyze_answer(inp: AnalyzerInput) -> Dict:
         expect_json=True,
         max_retries=1,
         fallback=_fallback_analysis(),
+        operation='answer_analysis',
     )
 
     # Defensive: ensure shape is correct
