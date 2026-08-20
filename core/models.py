@@ -188,6 +188,10 @@ class Project(models.Model):
         ACTIVE = 'active', 'Active'
         COMPLETED = 'completed', 'Completed'
 
+    class EvaluationMode(models.TextChoices):
+        REMOTE = 'remote', 'Remote'
+        PHYSICAL = 'physical', 'Physical'
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     project_name = models.CharField(max_length=255)
     description = models.TextField(null=True, blank=True)
@@ -199,6 +203,11 @@ class Project(models.Model):
         default=Status.DRAFT,
     )
     academic_year = models.CharField(max_length=50, null=True, blank=True)
+    evaluation_mode = models.CharField(
+        max_length=20,
+        choices=EvaluationMode.choices,
+        default=EvaluationMode.REMOTE,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

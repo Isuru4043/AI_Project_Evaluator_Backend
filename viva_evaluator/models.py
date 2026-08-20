@@ -91,6 +91,17 @@ class VivaQuestionExtension(models.Model):
         default=DifficultyLevel.MEDIUM,
     )
 
+    # Persist question-generation validation metadata. These defaults keep
+    # ordinary question creation compatible with sessions that do not produce
+    # validation audit details.
+    fallback_used = models.BooleanField(default=False)
+    generation_audit = models.JSONField(default=dict, blank=True)
+    validation_degraded = models.BooleanField(default=False)
+    validation_status = models.CharField(
+        max_length=32,
+        default='not_applicable',
+    )
+
     class Meta:
         verbose_name = 'Viva Question Extension'
         verbose_name_plural = 'Viva Question Extensions'

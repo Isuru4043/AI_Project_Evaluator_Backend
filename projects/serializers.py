@@ -68,6 +68,29 @@ class ProjectCreateSerializer(serializers.Serializer):
     is_group_project = serializers.BooleanField(default=False)
     submission_deadline = serializers.DateTimeField(required=False, allow_null=True, default=None)
     academic_year = serializers.CharField(max_length=50, required=False, allow_blank=True, allow_null=True, default=None)
+    evaluation_mode = serializers.ChoiceField(
+        choices=Project.EvaluationMode.choices,
+        default=Project.EvaluationMode.REMOTE,
+    )
+    physical_location = serializers.CharField(
+        max_length=255, required=False, allow_blank=True, default='',
+    )
+    physical_panel_pin = serializers.CharField(
+        min_length=4, max_length=128, required=False, allow_blank=True,
+        trim_whitespace=False, write_only=True, default='',
+    )
+
+    def validate(self, attrs):
+        mode = attrs.get('evaluation_mode', Project.EvaluationMode.REMOTE)
+        if mode == Project.EvaluationMode.PHYSICAL:
+            errors = {}
+            if not attrs.get('physical_location', '').strip():
+                errors['physical_location'] = 'A location is required for a physical project.'
+            if not attrs.get('physical_panel_pin'):
+                errors['physical_panel_pin'] = 'A panel PIN/password is required for a physical project.'
+            if errors:
+                raise serializers.ValidationError(errors)
+        return attrs
 
 
 class ProjectUpdateSerializer(serializers.Serializer):
@@ -103,13 +126,15 @@ class ProjectSerializer(serializers.ModelSerializer):
     examiners = serializers.SerializerMethodField()
     enrolled_students_count = serializers.SerializerMethodField()
     sessions_count = serializers.SerializerMethodField()
+    physical_location = serializers.SerializerMethodField()
 
     class Meta:
         model = Project
         fields = [
             'id', 'project_name', 'description', 'is_group_project',
             'submission_deadline', 'status', 'academic_year', 'created_at',
-            'examiners', 'enrolled_students_count', 'sessions_count',
+            'evaluation_mode', 'physical_location', 'examiners',
+            'enrolled_students_count', 'sessions_count',
         ]
 
     def get_examiners(self, obj):
@@ -130,19 +155,26 @@ class ProjectSerializer(serializers.ModelSerializer):
         # evaluation_sessions is prefetched
         return len(obj.evaluation_sessions.all())
 
+    def get_physical_location(self, obj):
+        try:
+            return obj.physical_config.location
+        except Exception:
+            return None
+
 
 class ProjectDetailSerializer(serializers.ModelSerializer):
     """Detailed project serializer including rubrics."""
 
     examiners = serializers.SerializerMethodField()
     rubrics = serializers.SerializerMethodField()
+    physical_location = serializers.SerializerMethodField()
 
     class Meta:
         model = Project
         fields = [
             'id', 'project_name', 'description', 'is_group_project',
             'submission_deadline', 'status', 'academic_year', 'created_at',
-            'examiners', 'rubrics',
+            'evaluation_mode', 'physical_location', 'examiners', 'rubrics',
         ]
 
     def get_examiners(self, obj):
@@ -152,6 +184,12 @@ class ProjectDetailSerializer(serializers.ModelSerializer):
     def get_rubrics(self, obj):
         qs = obj.rubric_categories.prefetch_related('criteria').all()
         return RubricCategorySerializer(qs, many=True).data
+
+    def get_physical_location(self, obj):
+        try:
+            return obj.physical_config.location
+        except Exception:
+            return None
 
 
 # =============================================================================
@@ -195,12 +233,14 @@ class AvailableProjectSerializer(serializers.ModelSerializer):
     """Serializes active projects the student has NOT enrolled in."""
 
     lead_examiner_name = serializers.SerializerMethodField()
+    physical_location = serializers.SerializerMethodField()
 
     class Meta:
         model = Project
         fields = [
             'id', 'project_name', 'description', 'is_group_project',
-            'submission_deadline', 'lead_examiner_name',
+            'submission_deadline', 'evaluation_mode', 'physical_location',
+            'lead_examiner_name',
         ]
 
     def get_lead_examiner_name(self, obj):
@@ -214,6 +254,12 @@ class AvailableProjectSerializer(serializers.ModelSerializer):
             return lead.examiner.user.full_name
         return None
 
+    def get_physical_location(self, obj):
+        try:
+            return obj.physical_config.location
+        except Exception:
+            return None
+
 
 class MyEnrollmentSerializer(serializers.ModelSerializer):
     """Serializes projects from the student's enrolled perspective."""
@@ -221,13 +267,15 @@ class MyEnrollmentSerializer(serializers.ModelSerializer):
     submission_status = serializers.SerializerMethodField()
     session_details = serializers.SerializerMethodField()
     group_info = serializers.SerializerMethodField()
+    physical_location = serializers.SerializerMethodField()
 
     class Meta:
         model = Project
         fields = [
             'id', 'project_name', 'description', 'is_group_project',
             'submission_deadline', 'status', 'academic_year',
-            'submission_status', 'session_details', 'group_info',
+            'evaluation_mode', 'physical_location', 'submission_status',
+            'session_details', 'group_info',
         ]
 
     def get_submission_status(self, obj):
@@ -324,6 +372,12 @@ class MyEnrollmentSerializer(serializers.ModelSerializer):
                 'members': list(members),
             }
         return None
+
+    def get_physical_location(self, obj):
+        try:
+            return obj.physical_config.location
+        except Exception:
+            return None
 
 
 # =============================================================================

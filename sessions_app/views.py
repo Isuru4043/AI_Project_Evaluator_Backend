@@ -168,6 +168,12 @@ def _student_session_or_error(request, session_id):
     if not session:
         return None, None, _err('Session not found.', code=404)
 
+    if session.project.evaluation_mode == Project.EvaluationMode.PHYSICAL:
+        return None, None, _err(
+            'Physical evaluations must be started from the restricted physical session panel.',
+            code=403,
+        )
+
     is_participant = (
         (session.student_id == sp.id) or
         (session.group_id and GroupMember.objects.filter(
@@ -193,6 +199,11 @@ class SessionPanelOpenView(APIView):
             project = Project.objects.filter(id=project_id).first()
             if not project:
                 return _err('Project not found.', code=404)
+            if project.evaluation_mode == Project.EvaluationMode.PHYSICAL:
+                return _err(
+                    'Use the restricted physical session panel for this project.',
+                    code=400,
+                )
 
             ep = _get_examiner_profile(request.user)
             if not ep or not _is_assigned(ep, project):
@@ -278,6 +289,8 @@ class StartDemoView(APIView):
             ).select_related('project', 'student__user', 'group').first()
             if not session:
                 return _err('Session not found.', code=404)
+            if session.project.evaluation_mode == Project.EvaluationMode.PHYSICAL:
+                return _err('Physical sessions must be started from the physical session panel.')
 
             ep = _get_examiner_profile(request.user)
             if not ep or not _is_assigned(ep, session.project):
@@ -336,6 +349,8 @@ class CompleteDemoView(APIView):
             ).select_related('project', 'group').first()
             if not session:
                 return _err('Session not found.', code=404)
+            if session.project.evaluation_mode == Project.EvaluationMode.PHYSICAL:
+                return _err('Physical demos must be completed from the physical session panel.')
 
             ep = _get_examiner_profile(request.user)
             if not ep or not _is_assigned(ep, session.project):
@@ -464,6 +479,8 @@ class EndVivaView(APIView):
             ).select_related('project', 'group').first()
             if not session:
                 return _err('Session not found.', code=404)
+            if session.project.evaluation_mode == Project.EvaluationMode.PHYSICAL:
+                return _err('Physical sessions must be finalized from the physical session panel.')
 
             ep = _get_examiner_profile(request.user)
             if not ep or not _is_assigned(ep, session.project):

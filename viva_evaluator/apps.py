@@ -1,4 +1,5 @@
 from django.apps import AppConfig
+from django.conf import settings
 import logging
 
 logger = logging.getLogger(__name__)
@@ -9,6 +10,8 @@ class VivaEvaluatorConfig(AppConfig):
     name = 'viva_evaluator'
 
     def ready(self):
+        if getattr(settings, 'TESTING', False):
+            return
         # Warm up SBERT and CrossEncoder ML models in a daemon thread at server boot
         # so HTTP requests experience zero cold-start delay.
         import threading
@@ -42,4 +45,3 @@ class VivaEvaluatorConfig(AppConfig):
             _schedule_tasks()
         except Exception as e:
             logger.warning('[boot] Task scheduling failed (DB might not be ready): %s', e)
-

@@ -98,17 +98,31 @@ class ProjectCreateView(APIView):
                 return _err('Examiner profile not found.', code=404)
 
             with transaction.atomic():
+                evaluation_mode = ser.validated_data.get(
+                    'evaluation_mode', Project.EvaluationMode.REMOTE,
+                )
                 project = Project.objects.create(
                     project_name=ser.validated_data['project_name'],
                     description=ser.validated_data.get('description'),
                     is_group_project=ser.validated_data.get('is_group_project', False),
                     submission_deadline=ser.validated_data.get('submission_deadline'),
                     academic_year=ser.validated_data.get('academic_year'),
+                    evaluation_mode=evaluation_mode,
                     status='draft',
                 )
                 ProjectExaminer.objects.create(
                     project=project, examiner=ep, role_in_project='lead',
                 )
+                if evaluation_mode == Project.EvaluationMode.PHYSICAL:
+                    from physical_evaluation.models import PhysicalProjectConfig
+
+                    config = PhysicalProjectConfig(
+                        project=project,
+                        location=ser.validated_data['physical_location'].strip(),
+                        created_by=ep,
+                    )
+                    config.set_panel_pin(ser.validated_data['physical_panel_pin'])
+                    config.save()
 
             return _ok('Project created successfully.', ProjectSerializer(project).data, 201)
         except Exception as e:
@@ -203,6 +217,17 @@ class ProjectActivateView(APIView):
                 return _err('Project not found.', code=404)
             if project.status != 'draft':
                 return _err(f'Project is already "{project.status}". Only draft projects can be activated.')
+            if project.evaluation_mode == Project.EvaluationMode.PHYSICAL:
+                try:
+                    config = project.physical_config
+                except Exception:
+                    return _err(
+                        'Configure the physical location and panel PIN before activating this project.'
+                    )
+                if not config.location or not config.panel_pin_hash:
+                    return _err(
+                        'Configure the physical location and panel PIN before activating this project.'
+                    )
             project.status = 'active'
             project.save()
             return _ok('Project activated successfully.')
@@ -370,7 +395,7 @@ class AvailableProjectsView(APIView):
             )
             # Use Django's prefetch_related_objects to prefetch on the list/slice
             from django.db.models import prefetch_related_objects
-            prefetch_related_objects(paginated_queryset, prefetch_obj)
+            prefetch_related_objects(paginated_queryset, prefetch_obj, 'physical_config')
 
             data = AvailableProjectSerializer(paginated_queryset, many=True).data
             return paginator.get_paginated_response(data)
@@ -492,7 +517,9 @@ class MyEnrollmentsView(APIView):
             ).values_list('group__project_id', flat=True)
 
             project_ids = set(list(ind_ids) + list(grp_ids))
-            projects = Project.objects.filter(id__in=project_ids).order_by('-created_at')
+            projects = Project.objects.filter(id__in=project_ids).select_related(
+                'physical_config',
+            ).order_by('-created_at')
 
             # 5. Paginate (9 per page)
             from rest_framework.pagination import PageNumberPagination
