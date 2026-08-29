@@ -66,6 +66,118 @@ def parse_vtt_to_text(vtt_content: str) -> str:
     return ' '.join(text_parts)
 
 
+def parse_vtt_to_speaker_turns(vtt_content: str) -> List[Dict]:
+    """
+    Extract WHO spoke WHEN from a WebVTT transcript.
+
+    Agora's STT bot labels each cue with the publisher it heard, as a WebVTT
+    voice span::
+
+        00:00:04.120 --> 00:00:09.480
+        <v 1274918203>The architecture uses a message queue because...</v>
+
+    ``parse_vtt_to_text`` deliberately strips those tags — it feeds the RAG
+    pipeline, which wants prose. This function keeps them, because the tag is
+    the speaker's Agora UID, and ``attribution.services.ingest`` maps that UID
+    back to a student. Same file, two readings: what was said, and who said it.
+
+    Cues with no voice tag are returned with ``speaker=None`` rather than
+    dropped, so a window shows as contested rather than silent.
+
+    Args:
+        vtt_content: Raw .vtt file contents as a string.
+
+    Returns:
+        [{'speaker': str|None, 't_start_ms': int, 't_end_ms': int, 'text': str}]
+        ordered by start time. Offsets are relative to the caption clock, which
+        shares its origin with the recording.
+    """
+    turns: List[Dict] = []
+    pending_start = pending_end = None
+    buffer: List[str] = []
+    speaker = None
+
+    def flush():
+        nonlocal pending_start, pending_end, buffer, speaker
+        if pending_start is not None and buffer:
+            text = ' '.join(buffer).strip()
+            if text:
+                turns.append({
+                    'speaker': speaker,
+                    't_start_ms': pending_start,
+                    't_end_ms': pending_end,
+                    'text': text,
+                })
+        pending_start = pending_end = None
+        buffer = []
+        speaker = None
+
+    for raw in vtt_content.strip().splitlines():
+        line = raw.strip()
+        if not line:
+            flush()
+            continue
+        if line.upper().startswith(('WEBVTT', 'NOTE')) or line.isdigit():
+            continue
+
+        if '-->' in line:
+            flush()
+            start, end = _parse_cue_timing(line)
+            if start is None:
+                continue
+            pending_start, pending_end = start, end
+            continue
+
+        if pending_start is None:
+            continue
+
+        voice = _VOICE_TAG_RE.match(line)
+        if voice:
+            speaker = voice.group(1).strip() or None
+            line = line[voice.end():]
+
+        clean = re.sub(r'<[^>]+>', '', line).strip()
+        if clean:
+            buffer.append(clean)
+
+    flush()
+    turns.sort(key=lambda t: t['t_start_ms'])
+    return turns
+
+
+# <v 1274918203> / <v.loud Speaker Name> — the UID or name is the payload.
+_VOICE_TAG_RE = re.compile(r'<v[^\s>]*\s+([^>]+)>')
+
+_TIMESTAMP_RE = re.compile(
+    r'(?:(\d+):)?(\d{1,2}):(\d{2})[.,](\d{1,3})'
+)
+
+
+def _parse_cue_timing(line: str):
+    """'00:00:04.120 --> 00:00:09.480' -> (4120, 9480). (None, None) if unparseable."""
+    parts = line.split('-->')
+    if len(parts) != 2:
+        return None, None
+    start = _timestamp_to_ms(parts[0])
+    end = _timestamp_to_ms(parts[1])
+    if start is None or end is None or end <= start:
+        return None, None
+    return start, end
+
+
+def _timestamp_to_ms(fragment: str):
+    match = _TIMESTAMP_RE.search(fragment)
+    if not match:
+        return None
+    hours, minutes, seconds, millis = match.groups()
+    return (
+        int(hours or 0) * 3_600_000
+        + int(minutes) * 60_000
+        + int(seconds) * 1000
+        + int(millis.ljust(3, '0'))
+    )
+
+
 def parse_vtt_to_chunks(
     vtt_content: str,
     session_id: str = '',

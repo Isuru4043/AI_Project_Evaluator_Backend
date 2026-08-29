@@ -32,6 +32,9 @@ urlpatterns = [
     # CV/behavioral analysis — /api/sessions/<id>/cv/...
     path('api/', include('cv_analysis.urls')),
 
+    # Speaker attribution — /api/sessions/<id>/attribution/...
+    path('api/', include('attribution.urls')),
+
     # Physical evaluation kiosk — /api/physical/...
     path('api/physical/', include('physical_evaluation.urls')),
 ]

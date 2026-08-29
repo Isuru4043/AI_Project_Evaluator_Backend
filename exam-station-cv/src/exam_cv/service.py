@@ -36,6 +36,20 @@ from .speaker.attribution import (
 )
 
 
+# Prefix marking a face we can see and track consistently but cannot name.
+# Namespaced so it can never collide with a real roster student_id.
+UNKNOWN_TRACK_PREFIX = "unknown_track:"
+
+
+def unknown_track_id(track_id) -> str:
+    """Stable pseudo-identity for one unrecognised face track."""
+    return f"{UNKNOWN_TRACK_PREFIX}{track_id}"
+
+
+def is_unknown_id(student_id) -> bool:
+    return bool(student_id) and str(student_id).startswith(UNKNOWN_TRACK_PREFIX)
+
+
 @dataclass
 class RunnerConfig:
     window_ms: int = 800       # speaker-decision window
@@ -57,6 +71,7 @@ class SessionRunner:
         audio=None,                # capture.audio.AudioCapture or None
         sink: Optional[ArtifactSink] = None,
         config: RunnerConfig = RunnerConfig(),
+        live_sink=None,            # contracts.sink.LiveEvidenceSink or None
     ):
         self.manifest = manifest
         self.frames = frames
@@ -69,12 +84,16 @@ class SessionRunner:
         self.audio = audio
         self.sink = sink or FileSink(self.output_dir)
         self.cfg = config
+        # Optional: streams attribution turns to the platform as they close,
+        # so the adaptive questioner knows who answered before the session
+        # ends. None keeps this loop entirely offline (the default).
+        self.live_sink = live_sink
 
         self.events_path = self.output_dir / f"session_{manifest.session_id}_events.jsonl"
         self._individual = manifest.mode == SessionMode.INDIVIDUAL
 
     def _assign_identities(self, observations, frame, roster_ids) -> list:
-        """student_id (or None = unknown face) for each observation.
+        """student_id for each observation, or an UNKNOWN_TRACK pseudo-id.
 
         Individual mode never embeds: the roster holds one student, so the
         PRIMARY face — the largest, i.e. the one at the camera — is them, and
@@ -82,6 +101,19 @@ class SessionRunner:
         exactly the extra-person case the integrity flags exist for, so those
         faces must resolve to unknown rather than being run through a
         recognition model that individual mode deliberately never loads.
+
+        Group mode gives an unrecognised face a STABLE pseudo-identity keyed on
+        its track (``unknown_track:7``) instead of dropping it. Dropping it was
+        the old behaviour and it silently cost real marks: a student who never
+        uploaded an enrolment photo could answer all session and have every
+        turn discarded, so their work vanished into the group total. With a
+        pseudo-identity their turns accumulate in one place, and an examiner
+        can hand the whole pile to the right person afterwards.
+
+        A pseudo-id is not a guess about WHO someone is — only that the same
+        someone keeps appearing. Callers tell the two apart with
+        ``is_unknown_id`` and still raise the extra-person flags they always
+        did.
         """
         if self._individual:
             if not observations:
@@ -90,16 +122,33 @@ class SessionRunner:
                 observations,
                 key=lambda o: (o.bbox[2] - o.bbox[0]) * (o.bbox[3] - o.bbox[1]),
             )
-            return [roster_ids[0] if o is primary else None for o in observations]
+            return [
+                roster_ids[0] if o is primary else unknown_track_id(o.track_id)
+                for o in observations
+            ]
 
         return [
             self.identity.resolve(
                 obs.track_id,
                 frame.t_ms,
                 crop_provider=lambda o=obs: self.mesh.crop(frame.image, o),
-            )
+            ) or unknown_track_id(obs.track_id)
             for obs in observations
         ]
+
+    def _emit_live(self, turn) -> None:
+        """Hand a closed turn to the live sink, if one is attached.
+
+        Never raises: a dropped turn costs live attribution for one answer,
+        which the end-of-session artifact recovers. A raise here would take
+        down the frame loop mid-viva.
+        """
+        if self.live_sink is None:
+            return
+        try:
+            self.live_sink.push(turn)
+        except Exception:
+            pass
 
     def run(self):
         from .faces.mesh import (  # local import keeps fakes numpy-only
@@ -144,11 +193,13 @@ class SessionRunner:
                     observations,
                     self._assign_identities(observations, frame, roster_ids),
                 ):
-                    if sid is None:
+                    # Unnamed faces still count toward the extra-person flags,
+                    # AND still get their lips tracked so their turns are
+                    # attributable to them later.
+                    if is_unknown_id(sid):
                         unknown_faces += 1
-                    else:
-                        identified[sid] = obs
-                        lips.push(sid, frame.t_ms, mouth_aspect_ratio(obs.landmarks))
+                    identified[sid] = obs
+                    lips.push(sid, frame.t_ms, mouth_aspect_ratio(obs.landmarks))
 
                 if frame.t_ms >= next_window:
                     voice = (
@@ -163,10 +214,19 @@ class SessionRunner:
                             lip_scores=lips.scores(),
                         )
                     )
-                    if decision.student_id is not None:
-                        speaker_candidates = {decision.student_id} & set(roster_ids) or set(roster_ids)
+                    # Whoever is speaking earns the expensive gaze path, named
+                    # or not — an unenrolled student's attention is measured
+                    # the same as anyone else's. UNCERTAIN_SPEAKER names no one,
+                    # so it widens the candidates back to the whole roster.
+                    speaker = decision.student_id
+                    if speaker is not None:
+                        if speaker in roster_ids or is_unknown_id(speaker):
+                            speaker_candidates = {speaker}
+                        else:
+                            speaker_candidates = set(roster_ids)
                     for turn in segmenter.push(decision):
                         append_event(self.events_path, turn)
+                        self._emit_live(turn)
                     next_window += self.cfg.window_ms
 
                 # ---- tick-rate path (behavioral, advisory) ------------------
@@ -178,9 +238,12 @@ class SessionRunner:
                         tick_obs,
                         self._assign_identities(tick_obs, frame, roster_ids),
                     ):
-                        if sid is None:
+                        # Unnamed faces are counted for the extra-person flag
+                        # but still get gaze: it is keyed to their pseudo-id,
+                        # so when an examiner names them their attention record
+                        # arrives with them rather than having been discarded.
+                        if is_unknown_id(sid):
                             tick_unknown += 1
-                            continue
                         # Rule 5: iris-grade gaze only for speaker candidates;
                         # everyone else gets the coarse head-pose proxy.
                         if sid in speaker_candidates:
@@ -202,10 +265,16 @@ class SessionRunner:
             # ---- end of session ------------------------------------------
             for turn in segmenter.flush():
                 append_event(self.events_path, turn)
+                self._emit_live(turn)
         finally:
             self.frames.close()
             if self.audio is not None:
                 self.audio.close()
+            if self.live_sink is not None:
+                try:
+                    self.live_sink.flush()
+                except Exception:
+                    pass  # already best-effort; the artifact is authoritative
 
         recording: Optional[RecordingRef] = None
         if self.recorder is not None:
@@ -235,6 +304,20 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=Path("./sessions"))
     parser.add_argument("--camera", type=int, default=0)
     parser.add_argument("--no-record", action="store_true")
+    parser.add_argument(
+        "--backend-url",
+        default="",
+        help="Platform attribution endpoint for this session, e.g. "
+             "https://host/api/sessions/<session_id>/attribution. Streams "
+             "speaking turns live and uploads the artifact at the end. "
+             "Omit to run fully offline (files only).",
+    )
+    parser.add_argument(
+        "--backend-token",
+        default="",
+        help="Shared station secret, sent as X-Station-Token. Falls back to "
+             "the EXAM_STATION_TOKEN environment variable.",
+    )
     args = parser.parse_args()
 
     if args.manifest:
@@ -296,6 +379,31 @@ def main() -> None:
             voice_state["active"] = vad.is_speech(block)
         return voice_state["active"]
 
+    # Optional platform link. Without it the station runs exactly as before:
+    # everything to disk, nothing on the network.
+    sink = None
+    live_sink = None
+    if args.backend_url:
+        import os
+
+        from .contracts.sink import BackendSink, LiveEvidenceSink
+
+        token = args.backend_token or os.environ.get("EXAM_STATION_TOKEN", "")
+        if not token:
+            print(
+                "warning: --backend-url given without a token; the platform "
+                "will reject these posts",
+                flush=True,
+            )
+        sink = BackendSink(args.backend_url, token=token)
+        live_sink = LiveEvidenceSink(
+            args.backend_url,
+            session_id=manifest.session_id,
+            t0_utc=manifest.t0_utc,
+            token=token,
+        )
+        print(f"streaming attribution to {args.backend_url}", flush=True)
+
     runner = SessionRunner(
         manifest=manifest,
         frames=camera,
@@ -305,6 +413,8 @@ def main() -> None:
         voice_active_fn=voice_active,
         recorder=recorder,
         audio=audio,
+        sink=sink,
+        live_sink=live_sink,
     )
     summary = runner.run()
     print(f"Session complete. Artifact: {out}")

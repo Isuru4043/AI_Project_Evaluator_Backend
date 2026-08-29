@@ -86,12 +86,10 @@ class SessionStartView(APIView):
                     {"error": "This session is already complete."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            try:
-                payload = VivaPipeline().start_session(
-                    session=session,
-                    submission=submission,
-                )
-            except VivaPipelineInputError as exc:
+
+            if session.status == 'in_progress' and session.viva_questions.exists():
+                latest_q = session.viva_questions.order_by('question_order').last()
+                ext = latest_q.extension if hasattr(latest_q, 'extension') else None
                 return Response(
                     {"error": str(exc)},
                     status=status.HTTP_400_BAD_REQUEST,
@@ -193,6 +191,22 @@ class AnswerSubmitView(APIView):
             elif session.student:
                 # Individual session, use the session's student
                 student_profile = session.student
+            else:
+                # Group session and the client named nobody. Ask the speaker
+                # attribution engine who was talking during this answer's
+                # window (Agora per-UID audio, live CV lip motion, examiner
+                # override). It answers 'group' unless it is confident, so an
+                # ambiguous window still scores to the group rather than being
+                # guessed onto a student.
+                from attribution.services.engine import resolve_speaker_id
+
+                resolved = resolve_speaker_id(session, question, speaker_id)
+                if resolved != 'group':
+                    student_profile = StudentProfile.objects.filter(
+                        id=resolved,
+                    ).first()
+                    if student_profile is not None:
+                        speaker_id = resolved
 
             if not isinstance(request.auth, PhysicalKioskAccess):
                 caller_student = getattr(request.user, 'student_profile', None)
