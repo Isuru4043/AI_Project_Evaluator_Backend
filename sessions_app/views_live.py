@@ -54,6 +54,25 @@ def _student_profile_in_session(user, session):
     return None
 
 
+def _answered_by(answer) -> str:
+    """Who this answer is credited to, for display.
+
+    Two things this has to survive. The custom User model removes
+    first_name/last_name/username (they are None on the class) and carries
+    full_name instead. And an answer may legitimately have no student: in a
+    group viva, speaker attribution leaves an ambiguous answer unattributed
+    rather than guessing, so it belongs to the group until an examiner says
+    otherwise.
+    """
+    student = getattr(answer, 'student', None)
+    if student is None:
+        return 'The group'
+    full = (student.user.full_name or '').strip()
+    if full and full.lower() != 'none':
+        return full
+    return student.user.email
+
+
 def _serialize_question(q, answer=None):
     return {
         'question_id': str(q.id),
@@ -63,11 +82,7 @@ def _serialize_question(q, answer=None):
         'answer': None if answer is None else {
             'answer_text': answer.transcribed_answer,
             'answered_at': answer.answered_at,
-            'answered_by': (
-                f"{answer.student.user.first_name} "
-                f"{answer.student.user.last_name}".strip()
-                or answer.student.user.username
-            ),
+            'answered_by': _answered_by(answer),
         },
     }
 

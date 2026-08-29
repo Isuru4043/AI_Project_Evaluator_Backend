@@ -77,11 +77,31 @@ def generate_post_viva_report(session) -> Dict:
         # Wait, _aggregate_per_criterion uses questions! If we don't filter questions by student, 
         # all students get the same mean score in the report.
         # Let's filter the questions to only those answered by the student.
+        # Questions this speaker actually contributed to. Uses speaking share
+        # where attribution recorded it, so a student who helped answer a
+        # question still has it counted toward their weak areas even when
+        # someone else led it. Falls back to whole-answer ownership for
+        # sessions with no attribution data.
+        speaker_shares = None
+        if speaker_id != 'group':
+            try:
+                from attribution.services.engine import contribution_shares
+                from core.models import StudentProfile as _SP
+
+                _student = _SP.objects.filter(id=speaker_id).first()
+                if _student is not None:
+                    speaker_shares = contribution_shares(session, _student)
+            except Exception:
+                speaker_shares = None
+
         speaker_questions = []
         for q in questions:
             # check if any answer belongs to this speaker (or if speaker='group')
             if speaker_id == 'group':
                 speaker_questions.append(q)
+            elif speaker_shares is not None:
+                if any(speaker_shares.get(str(a.id), 0.0) > 0 for a in q.answers.all()):
+                    speaker_questions.append(q)
             else:
                 has_answer = any(str(a.student_id) == speaker_id for a in q.answers.all())
                 if has_answer:

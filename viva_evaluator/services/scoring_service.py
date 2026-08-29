@@ -45,7 +45,21 @@ class ScoringService:
         """
         total_possible = 0.0
         total_earned = 0.0
-        
+
+        # How much of each answer this student actually spoke. A group answer
+        # is often shared, and crediting all of it to whoever talked most
+        # overstates one student and erases the other — so individual criteria
+        # are weighted by speaking share rather than counted whole.
+        # None means no attribution data exists for this session, in which case
+        # the original whole-answer rule applies unchanged.
+        shares = None
+        try:
+            from attribution.services.engine import contribution_shares
+
+            shares = contribution_shares(session, student_profile)
+        except Exception:
+            shares = None
+
         answers = []
         for q in session.viva_questions.prefetch_related('answers', 'extension__criteria').all():
             for a in q.answers.all():
@@ -53,11 +67,16 @@ class ScoringService:
                     q_ext = q.extension
                     if q_ext and q_ext.criteria:
                         if q_ext.criteria.is_individual:
-                            if a.student == student_profile:
-                                answers.append((a, q_ext.criteria))
+                            if shares is not None:
+                                weight = shares.get(str(a.id), 0.0)
+                                if weight > 0:
+                                    answers.append((a, q_ext.criteria, weight))
+                            elif a.student == student_profile:
+                                answers.append((a, q_ext.criteria, 1.0))
                         else:
-                            # Group criteria: applies to all students in the session
-                            answers.append((a, q_ext.criteria))
+                            # Group criteria measure the group, so every member
+                            # carries the whole answer regardless of who spoke.
+                            answers.append((a, q_ext.criteria, 1.0))
                 except Exception:
                     pass
 
@@ -72,19 +91,22 @@ class ScoringService:
             
         # Group answers by criteria
         criteria_scores = {}
-        for a, crit in answers:
+        for a, crit, weight in answers:
             score = ScoringService.get_effective_score_for_answer(a)
             if score is None:
                 continue # Skip unscored clarifications
-                
+
             if crit.id not in criteria_scores:
                 criteria_scores[crit.id] = {'earned': 0.0, 'samples': 0, 'weight': crit.weight_in_category or 1.0, 'max': crit.max_score}
-                
+
             # Assume score is out of 10. We normalize to max_score.
             normalized_score = (score / 10.0) * float(crit.max_score)
-            criteria_scores[crit.id]['earned'] += normalized_score
-            criteria_scores[crit.id]['samples'] += 1
-            
+            # Both sides carry the weight, so the criterion mean stays a mean:
+            # an answer half-spoken counts half as much toward this student's
+            # average, without dragging the average itself down.
+            criteria_scores[crit.id]['earned'] += normalized_score * weight
+            criteria_scores[crit.id]['samples'] += weight
+
         if not criteria_scores:
             return {
                 'total_possible': 0.0,

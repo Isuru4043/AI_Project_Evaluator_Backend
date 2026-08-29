@@ -13,9 +13,17 @@ SCHEMA_VERSION = '1.0'
 
 
 def _display_name(student_profile) -> str:
+    """Name shown against this student in the CV summary artifact.
+
+    The custom User model removes first_name/last_name/username entirely
+    (they are set to None on the class) and carries full_name instead — so
+    reading the Django defaults yields the literal string "None None".
+    """
     user = student_profile.user
-    full = f"{user.first_name} {user.last_name}".strip()
-    return full or user.username or user.email
+    full = (user.full_name or '').strip()
+    if full and full.lower() != 'none':
+        return full
+    return user.email
 
 
 def build_manifest(session: EvaluationSession) -> dict:

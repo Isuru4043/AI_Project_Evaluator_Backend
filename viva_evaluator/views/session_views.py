@@ -1,3 +1,5 @@
+import logging
+
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -5,6 +7,8 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import IsAuthenticated
 from django.utils import timezone
 from urllib.request import urlopen
+
+logger = logging.getLogger(__name__)
 
 from core.models import ProjectSubmission
 from viva_evaluator.models import SubmissionIndexStatus
@@ -311,6 +315,22 @@ class AnswerSubmitView(APIView):
             elif session.student:
                 # Individual session, use the session's student
                 student_profile = session.student
+            else:
+                # Group session and the client named nobody. Ask the speaker
+                # attribution engine who was talking during this answer's
+                # window (Agora per-UID audio, live CV lip motion, examiner
+                # override). It answers 'group' unless it is confident, so an
+                # ambiguous window still scores to the group rather than being
+                # guessed onto a student.
+                from attribution.services.engine import resolve_speaker_id
+
+                resolved = resolve_speaker_id(session, question, speaker_id)
+                if resolved != 'group':
+                    student_profile = StudentProfile.objects.filter(
+                        id=resolved,
+                    ).first()
+                    if student_profile is not None:
+                        speaker_id = resolved
 
             if not submission:
                 return Response(
@@ -499,6 +519,19 @@ class AnswerSubmitView(APIView):
                 next_difficulty_signal=_difficulty_signal_from_score(soft_score),
                 detailed_ai_analysis=detailed_analysis,
             )
+
+            # Record WHY this answer was filed against this student, with the
+            # evidence behind it, so the examiner can review or override it
+            # before scores are signed off. Best-effort: a bookkeeping failure
+            # must never fail a submitted answer.
+            try:
+                from attribution.services.engine import attribute_answer
+
+                attribute_answer(answer, session, question)
+            except Exception:
+                logger.exception(
+                    "Could not record attribution for answer %s", answer.id,
+                )
 
             # ---- Session complete -------------------------------------------
             if result['session_complete']:

@@ -175,12 +175,18 @@ class AgoraRosterView(APIView):
             )
 
         roster = {}
+        # uid -> student_id, for speaker attribution. An Agora UID identifies
+        # the publishing account, so mapping it back to a roster student is
+        # what lets "who was transmitting" become "who answered".
+        # Examiners are deliberately absent: they are not scoreable speakers.
+        students = {}
 
         # 1. Main student
         if session.student:
             uid = _uid_from_user_id(session.student.user_id)
             name = self._get_display_name(session.student.user)
             roster[uid] = name
+            students[uid] = str(session.student_id)
 
         # 2. Group members (if group project)
         if session.group:
@@ -188,6 +194,7 @@ class AgoraRosterView(APIView):
                 uid = _uid_from_user_id(member.student.user_id)
                 name = self._get_display_name(member.student.user)
                 roster[uid] = name
+                students[uid] = str(member.student_id)
 
         # 3. Examiners assigned to this project
         for pe in ProjectExaminer.objects.filter(project=session.project).select_related('examiner__user'):
@@ -197,6 +204,7 @@ class AgoraRosterView(APIView):
 
         return Response({
             'success': True,
-            'roster': roster
+            'roster': roster,
+            'students': students,
         })
 

@@ -55,6 +55,7 @@ INSTALLED_APPS = [
     'cloudinary_storage',
     'agora_service',
     'cv_analysis',
+    'attribution',
     'physical_evaluation',
     'django_q',
 ]
@@ -113,6 +114,38 @@ DATABASES = {
         },
     }
 }
+
+# Opt-in local database, for working when the shared Neon instance is
+# unreachable (quota exhausted, offline, or simply to avoid writing test rows
+# into a database other people are using).
+#   USE_SQLITE=true python manage.py migrate
+# Never set in a deployed environment; the default above stays authoritative.
+if os.getenv('USE_SQLITE', '').lower() == 'true':
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'dev.sqlite3',
+        }
+    }
+
+    # The core migration history has two parallel branches that both add
+    # VivaQuestion.project (core.0006 and core.0007), so replaying it from
+    # scratch fails with "duplicate column name: project_id". The deployed
+    # database has them already applied and never re-runs them, so this only
+    # bites a brand-new database.
+    #
+    # Rather than rewrite that history - which risks desyncing the deployed
+    # database - the local one is built straight from the current models with
+    #     USE_SQLITE=true python manage.py migrate --run-syncdb
+    # This is scoped to the SQLite path and changes nothing for a real deploy.
+    class _SkipMigrations:
+        def __contains__(self, item):
+            return True
+
+        def __getitem__(self, item):
+            return None
+
+    MIGRATION_MODULES = _SkipMigrations()
 
 # Password validation
 # https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators
@@ -424,6 +457,41 @@ CV_ANALYSIS_BACKEND = os.getenv('CV_ANALYSIS_BACKEND', 'modal').lower()
 MODAL_CV_SUBMIT_URL = os.getenv('MODAL_CV_SUBMIT_URL', '')
 MODAL_CV_RESULT_URL = os.getenv('MODAL_CV_RESULT_URL', '')
 MODAL_CV_TOKEN = os.getenv('MODAL_CV_TOKEN', '')
+
+# =============================================================================
+# SPEAKER ATTRIBUTION — who answered, in a group viva
+# =============================================================================
+# On by default and safe: with no evidence providers reporting, every answer
+# resolves to 'group', which is exactly the behaviour before this app existed.
+ATTRIBUTION_ENABLED = os.getenv('ATTRIBUTION_ENABLED', 'true').lower() == 'true'
+
+# How far each evidence source counts in the fusion vote. Tune against a
+# labelled pilot session — the defaults are defensible priors, not
+# measurements. Anything omitted falls back to
+# attribution.services.resolver.DEFAULT_WEIGHTS.
+ATTRIBUTION_SOURCE_WEIGHTS = {
+    'manual': 1.00,        # examiner/kiosk choice — short-circuits the vote
+    'agora_stt': 0.90,     # per-UID stream, timestamped, carries the words
+    'agora_volume': 0.85,  # per-UID stream, noisier
+    'posthoc_cv': 0.80,    # full CV engine: ArcFace + iris gaze
+    'live_cv': 0.70,       # same logic under real-time constraints
+    'submitter': 0.50,     # weak prior: who pressed submit
+}
+
+# Where physical seat binding (face -> student) runs:
+#   'modal' — the Modal CV app (needs MODAL_CV_BIND_URL)
+#   'local' — the CV engine in this process (dev; needs its heavy deps)
+ATTRIBUTION_BINDING_BACKEND = os.getenv(
+    'ATTRIBUTION_BINDING_BACKEND', 'modal',
+).lower()
+MODAL_CV_BIND_URL = os.getenv('MODAL_CV_BIND_URL', '')
+
+# Shared secret for a physical exam station running the CV engine as its own
+# process (exam-station-cv --backend-url). It has no browser session, so it
+# authenticates with this instead. Empty = no station may connect, which is
+# the right default for a cloud deploy with no physical stations.
+# It only permits ADDING evidence — never reading data or changing a score.
+EXAM_STATION_TOKEN = os.getenv('EXAM_STATION_TOKEN', '')
 
 # Python executable of the exam-station-cv virtualenv (heavy CV deps live
 # there, not in this venv). Only used by the 'subprocess' backend.
