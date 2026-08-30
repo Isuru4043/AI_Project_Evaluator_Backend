@@ -1,37 +1,36 @@
-import pytest
+from unittest import TestCase
 from unittest.mock import MagicMock
 from decimal import Decimal
 from viva_evaluator.services.scoring_service import ScoringService
 
-def test_calculate_grade():
-    assert ScoringService.calculate_grade(85) == 'A'
-    assert ScoringService.calculate_grade(75) == 'A'
-    assert ScoringService.calculate_grade(74.9) == 'B'
-    assert ScoringService.calculate_grade(65) == 'B'
-    assert ScoringService.calculate_grade(50) == 'C'
-    assert ScoringService.calculate_grade(35) == 'S'
-    assert ScoringService.calculate_grade(34) == 'F'
-    assert ScoringService.calculate_grade(0) == 'F'
-    assert ScoringService.calculate_grade(100) == 'A'
-    
-def test_get_effective_score_for_answer():
-    # Setup mock answers
-    ans_only_ai = MagicMock()
-    ans_only_ai.examiner_override_score = None
-    ans_only_ai.ai_answer_score = Decimal('8.5')
-    
-    ans_override = MagicMock()
-    ans_override.examiner_override_score = Decimal('9.0')
-    ans_override.ai_answer_score = Decimal('6.0')
-    
-    ans_empty = MagicMock()
-    ans_empty.examiner_override_score = None
-    ans_empty.ai_answer_score = None
-    
-    # Test
-    assert ScoringService.get_effective_score_for_answer(ans_only_ai) == 8.5
-    assert ScoringService.get_effective_score_for_answer(ans_override) == 9.0
-    assert ScoringService.get_effective_score_for_answer(ans_empty) is None
+class ScoringServiceTests(TestCase):
+    def test_calculate_grade(self):
+        self.assertEqual(ScoringService.calculate_grade(85), 'A')
+        self.assertEqual(ScoringService.calculate_grade(75), 'A')
+        self.assertEqual(ScoringService.calculate_grade(74.9), 'B')
+        self.assertEqual(ScoringService.calculate_grade(65), 'B')
+        self.assertEqual(ScoringService.calculate_grade(50), 'C')
+        self.assertEqual(ScoringService.calculate_grade(35), 'S')
+        self.assertEqual(ScoringService.calculate_grade(34), 'F')
+        self.assertEqual(ScoringService.calculate_grade(0), 'F')
+        self.assertEqual(ScoringService.calculate_grade(100), 'A')
+
+    def test_get_effective_score_for_answer(self):
+        ans_only_ai = MagicMock()
+        ans_only_ai.examiner_override_score = None
+        ans_only_ai.ai_answer_score = Decimal('8.5')
+
+        ans_override = MagicMock()
+        ans_override.examiner_override_score = Decimal('9.0')
+        ans_override.ai_answer_score = Decimal('6.0')
+
+        ans_empty = MagicMock()
+        ans_empty.examiner_override_score = None
+        ans_empty.ai_answer_score = None
+
+        self.assertEqual(ScoringService.get_effective_score_for_answer(ans_only_ai), 8.5)
+        self.assertEqual(ScoringService.get_effective_score_for_answer(ans_override), 9.0)
+        self.assertIsNone(ScoringService.get_effective_score_for_answer(ans_empty))
 
 class MockCriteria:
     def __init__(self, id_val, name, max_score, is_individual):
@@ -39,6 +38,7 @@ class MockCriteria:
         self.criteria_name = name
         self.max_score = Decimal(str(max_score))
         self.is_individual = is_individual
+        self.weight_in_category = 1.0
 
 class MockQuestion:
     def __init__(self, extension_criteria, answers):
@@ -59,6 +59,9 @@ class MockSession:
         
     @property
     def viva_questions(self):
+        return self
+
+    def prefetch_related(self, *args):
         return self
 
     def all(self):
@@ -103,8 +106,7 @@ def test_aggregate_student_score():
     session = MockSession([q1, q2])
     
     # Test aggregation for 'student_uuid'
-    student = MagicMock()
-    student.id = 'student_uuid'
+    student = ans2.student
     
     result = ScoringService.aggregate_student_score(session, student)
     
@@ -149,3 +151,14 @@ def test_aggregate_empty_session():
     assert result['percentage'] == 0.0
     assert result['grade'] == 'N/A'
     assert result['per_criteria'] == {}
+
+
+class ScoringAggregationTests(TestCase):
+    def test_student_score(self):
+        test_aggregate_student_score()
+
+    def test_group_mode(self):
+        test_aggregate_student_score_group_mode()
+
+    def test_empty_session(self):
+        test_aggregate_empty_session()

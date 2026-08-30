@@ -6,7 +6,7 @@ End-Viva media upload, and Student Session Status.
 from datetime import date
 
 from django.core.exceptions import ValidationError
-from django.db import transaction
+from django.db import close_old_connections, transaction
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -555,6 +555,7 @@ class EndVivaView(APIView):
                         cloud.get('started_at') or session.demo_completed_at
                     )
 
+            close_old_connections()
             now = timezone.now()
             with transaction.atomic():
                 # Create session recording

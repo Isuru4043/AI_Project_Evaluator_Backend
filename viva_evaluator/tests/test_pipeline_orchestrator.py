@@ -1,7 +1,7 @@
 import os
 from types import SimpleNamespace
 from unittest import TestCase
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "AI_Evaluator_Backend.settings")
 
@@ -17,7 +17,8 @@ class VivaPipelineOrchestratorTests(TestCase):
             "speech_confidence": {},
             "session_complete": True,
         }
-        persisted = SimpleNamespace(duplicate=False, question=None)
+        answer = SimpleNamespace(id="answer-1")
+        persisted = SimpleNamespace(duplicate=False, question=None, answer=answer)
         session = SimpleNamespace(examiner_paused=False)
 
         with (
@@ -43,6 +44,11 @@ class VivaPipelineOrchestratorTests(TestCase):
                 "viva_evaluator.services.pipeline.orchestrator.present_turn",
                 return_value={"answer_saved": True},
             ),
+            patch(
+                "viva_evaluator.services.pipeline.orchestrator."
+                "_persist_answer_attribution",
+                side_effect=lambda **kwargs: events.append("attribute"),
+            ) as attribution_mock,
         ):
             response = VivaPipeline().submit_answer(
                 session=session,
@@ -54,7 +60,13 @@ class VivaPipelineOrchestratorTests(TestCase):
                 student_profile=None,
             )
 
-        self.assertEqual(events, ["compute", "persist"])
+        self.assertEqual(events, ["compute", "persist", "attribute"])
+        attribution_mock.assert_called_once_with(
+            answer=answer,
+            session=session,
+            question=ANY,
+            submitter_student_profile=None,
+        )
         self.assertEqual(response, {"answer_saved": True})
         self.assertEqual(
             computation["llm_telemetry"]["trace_kind"],

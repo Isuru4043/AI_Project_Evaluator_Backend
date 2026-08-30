@@ -40,7 +40,7 @@ AZURE_CONTAINER_FACES = "faces"
 # needs, and the behavioral analysis is the only consumer. Overridable so a
 # deployment can point it at a dedicated storage lifecycle policy.
 AZURE_CONTAINER_RECORDINGS = os.getenv(
-    "AZURE_CONTAINER_RECORDINGS", "viva-recordings",
+    "AZURE_CONTAINER_RECORDINGS", "recordings",
 )
 
 
@@ -51,7 +51,20 @@ def _get_blob_service_client():
             "Azure Blob Storage credentials are not configured. "
             "Set AZURE_ACCOUNT_NAME and AZURE_ACCOUNT_KEY in your .env file."
         )
-    return BlobServiceClient.from_connection_string(AZURE_CONNECTION_STRING)
+    return BlobServiceClient.from_connection_string(
+        AZURE_CONNECTION_STRING,
+        # A 500 MB recording should survive intermittent networks: split it
+        # into small independently retryable blocks instead of one long PUT.
+        max_single_put_size=4 * 1024 * 1024,
+        max_block_size=4 * 1024 * 1024,
+        connection_timeout=30,
+        read_timeout=300,
+        retry_total=5,
+        retry_connect=5,
+        retry_read=5,
+        retry_status=5,
+        retry_backoff_factor=1,
+    )
 
 
 def _ensure_container(container_name):
@@ -129,7 +142,23 @@ def upload_video_to_blob(file, project_id, session_id):
         blob_client = client.get_blob_client(
             container=AZURE_CONTAINER_VIDEOS, blob=blob_path,
         )
-        blob_client.upload_blob(file.read(), overwrite=True)
+        # Keep recordings as a stream instead of materialising the complete
+        # upload in Django memory. A single upload worker is deliberately used
+        # here: parallel block uploads are more likely to hit socket write
+        # timeouts on constrained campus/home connections.
+        if hasattr(file, 'seek'):
+            file.seek(0)
+        blob_client.upload_blob(
+            file,
+            length=getattr(file, 'size', None),
+            overwrite=True,
+            max_concurrency=1,
+            connection_timeout=30,
+            read_timeout=300,
+            content_settings=ContentSettings(
+                content_type=getattr(file, 'content_type', None) or 'video/mp4',
+            ),
+        )
         url = blob_client.url
         print(f"[AZURE] Video uploaded successfully: {url}")
         return url

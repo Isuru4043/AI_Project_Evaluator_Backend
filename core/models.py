@@ -735,11 +735,6 @@ class VivaQuestion(models.Model):
         default=QuestionSource.AI,
     )
     question_order = models.IntegerField()
-    question_source = models.CharField(
-        max_length=20,
-        choices=QuestionSource.choices,
-        default=QuestionSource.AI,
-    )
     generated_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

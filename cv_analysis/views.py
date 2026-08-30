@@ -15,6 +15,7 @@ import logging
 from urllib.parse import unquote, urlparse
 
 from django.conf import settings
+from django.db import close_old_connections
 from django.urls import reverse
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -124,6 +125,10 @@ class CVRecordingUploadView(APIView):
         else:
             recording_ref = save_recording_locally(video_file, session.id)
 
+        # A large cloud upload can outlive a pooled Neon connection. Reopen
+        # before persisting the recording rather than reporting a misleading
+        # post-upload database error to the examiner.
+        close_old_connections()
         SessionRecording.objects.create(
             session=session,
             video_file_url=recording_ref,

@@ -17,12 +17,16 @@ the analyzed recording (video_offset_ms = 0).
 
 Group identity: pass ``--enrollment-dir`` holding one reference photo per
 student (``<student_id>.jpg``) and faces are matched by ArcFace against
-that gallery — the identity path for Agora cloud recordings, where all
-participants are composited into one frame and tile positions shift as
-people join or leave. Without it (or when no photo yields a usable face)
-group mode falls back to SEATING ORDER — students sit left→right in roster
-order, valid only for a fixed single-camera view. Either way, faces that
-don't resolve are left unknown rather than guessed (HITL invariant).
+that gallery. This is the only identity source that survives students
+choosing their own seats, and it is the path used for both Agora cloud
+recordings (participants composited into one frame, tiles shifting as
+people join) and fixed single-camera exam stations.
+
+Without a gallery, faces resolve as UNKNOWN. Seating order (left→right =
+roster order) is available behind ``--allow-seating-fallback`` but is off
+by default: it is correct only if students keep their seats in roster
+order, and when that does not hold it misattributes every turn confidently
+and silently. An unidentified face beats a wrong name (HITL invariant).
 """
 
 from __future__ import annotations
@@ -155,6 +159,26 @@ class PositionalIdentity:
         self._sticky.pop(track_id, None)
 
 
+class NullIdentity:
+    """Resolves every track to unknown, without ever embedding.
+
+    Used for group sessions with no usable enrollment gallery. The obvious
+    alternative — an IdentityResolver over an empty gallery — would call the
+    embedder on every new track and match nothing, paying ArcFace's cost for a
+    guaranteed None (and crashing outright with _UnusedEmbedder). This makes
+    "we cannot identify anyone" explicit and free.
+
+    Faces still get tracked, so presence, gaze and extra-person flags all keep
+    working; only the names are missing.
+    """
+
+    def resolve(self, track_id, t_ms, crop_provider) -> Optional[str]:
+        return None
+
+    def drop_track(self, track_id) -> None:
+        pass
+
+
 class SeatingMesh:
     """MeshPipeline wrapper that feeds PositionalIdentity each frame."""
 
@@ -270,6 +294,7 @@ def analyze(
     output_dir: Path,
     target_fps: float = 12.0,
     enrollment_dir: Optional[Path] = None,
+    allow_seating_fallback: bool = False,
 ):
     from .faces.mesh import MeshPipeline
 
@@ -294,8 +319,27 @@ def analyze(
             else None
         )
         if identity is None:
-            identity = PositionalIdentity([r.student_id for r in manifest.roster])
-            mesh = SeatingMesh(mesh, identity)
+            if not allow_seating_fallback:
+                # Seating order assumes students sit left-to-right in roster
+                # order and never move. Where seating is free, that assumption
+                # produces confident, systematic misattribution — every turn
+                # credited to the wrong person, with no signal that anything
+                # is wrong. An unidentified face is a far better outcome than
+                # a wrong name, so refuse rather than guess (HITL invariant).
+                print(
+                    "identity: no enrollment gallery and seating fallback is "
+                    "off - faces will resolve as unknown",
+                    flush=True,
+                )
+                identity = NullIdentity()
+            else:
+                print(
+                    "identity: falling back to SEATING ORDER - valid only if "
+                    "students keep their seats in roster order",
+                    flush=True,
+                )
+                identity = PositionalIdentity([r.student_id for r in manifest.roster])
+                mesh = SeatingMesh(mesh, identity)
     else:
         from .faces.identity import EnrollmentGallery, IdentityResolver
 
@@ -327,13 +371,21 @@ def main() -> None:
     parser.add_argument(
         '--enrollment-dir', type=Path, default=None,
         help='Directory of <student_id>.jpg reference photos. Group mode only; '
-             'without it identity falls back to seating order.',
+             'without it faces resolve as unknown.',
+    )
+    parser.add_argument(
+        '--allow-seating-fallback', action='store_true',
+        help='If no enrollment gallery is available, map faces to the roster '
+             'left-to-right by seat. ONLY valid when students are seated in '
+             'roster order and do not move; otherwise it misattributes every '
+             'turn. Off by default.',
     )
     args = parser.parse_args()
 
     summary = analyze(
         args.video, args.manifest, args.output_dir, args.target_fps,
         enrollment_dir=args.enrollment_dir,
+        allow_seating_fallback=args.allow_seating_fallback,
     )
     print(f"analysis complete: session {summary.session_id}", flush=True)
     for s in summary.per_student:

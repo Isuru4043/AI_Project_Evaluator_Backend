@@ -14,6 +14,7 @@ from django.conf import settings
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from viva_evaluator.permissions import VivaSessionPermission
 
 from core.models import (
     EvaluationSession,
@@ -153,7 +154,7 @@ class AgoraRosterView(APIView):
     Returns a map of {agora_numeric_uid: user_full_name} for all potential
     participants in the session call (students, group members, examiners).
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, VivaSessionPermission]
 
     def _get_display_name(self, user) -> str:
         # Custom User model has no first_name, last_name, or username. It uses full_name and email.
@@ -175,7 +176,6 @@ class AgoraRosterView(APIView):
             )
 
         roster = {}
-
         # 1. Main student
         if session.student:
             uid = _uid_from_user_id(session.student.user_id)
@@ -197,6 +197,6 @@ class AgoraRosterView(APIView):
 
         return Response({
             'success': True,
-            'roster': roster
+            'roster': roster,
         })
 

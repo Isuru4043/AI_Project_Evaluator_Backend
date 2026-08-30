@@ -1,5 +1,6 @@
 """Shared application service for initial and subsequent viva questions."""
 
+import logging
 from typing import Dict, Optional
 
 from viva_evaluator.services.agents.questioner import QuestionerInput
@@ -33,6 +34,9 @@ from viva_evaluator.services.pipeline.turn_pipeline import (
     process_answer_and_pick_next,
 )
 from viva_evaluator.services.tts import bind_question_tts_audit
+
+
+logger = logging.getLogger(__name__)
 
 
 class VivaPipelineInputError(ValueError):
@@ -130,8 +134,15 @@ class VivaPipeline:
         speech_metrics: Optional[Dict],
         speaker_id: str,
         student_profile,
+        submitter_student_profile=None,
+        answered_at=None,
+        deduplication_key=None,
     ) -> Dict:
-        existing = find_existing_answer(question, student_profile)
+        existing = find_existing_answer(
+            question,
+            student_profile,
+            deduplication_key=deduplication_key,
+        )
         if existing is not None:
             next_question = find_next_unanswered_question(session, question)
             return present_duplicate(session, next_question)
@@ -167,7 +178,8 @@ class VivaPipeline:
             answer_text=answer_text,
             computation=computation,
             detailed_analysis=detailed_analysis,
-            deduplication_key=(
+            answered_at=answered_at,
+            deduplication_key=deduplication_key or (
                 f"student:{student_profile.id}"
                 if student_profile is not None
                 else "group"
@@ -175,9 +187,44 @@ class VivaPipeline:
         )
         if persisted.duplicate:
             return present_duplicate(session, persisted.question)
+        if getattr(persisted, "answer", None) is not None:
+            _persist_answer_attribution(
+                answer=persisted.answer,
+                session=session,
+                question=question,
+                submitter_student_profile=submitter_student_profile,
+            )
         if persisted.question is not None:
             bind_question_tts_audit(persisted.question)
         return present_turn(computation, persisted)
+
+
+def _persist_answer_attribution(
+    *, answer, session, question, submitter_student_profile=None,
+) -> None:
+    """Persist speaker credit without allowing attribution to break a viva."""
+    try:
+        from attribution.services.engine import attribute_answer
+        from attribution.services.ingest import ingest_submitter
+
+        # Resolve first so the stored decision matches the evidence that drove
+        # the adaptive turn. The submitter is retained afterwards as a weak
+        # prior for later reconciliation, not allowed to rewrite this turn.
+        attribute_answer(answer, session, question)
+        if submitter_student_profile is not None:
+            ingest_submitter(
+                session,
+                submitter_student_profile.id,
+                question,
+                answered_at=answer.answered_at,
+            )
+    except Exception:
+        # Attribution is decision support. Answer persistence and the next
+        # question must remain available if an evidence provider is degraded.
+        logger.exception(
+            "Could not persist attribution for answer %s",
+            getattr(answer, "id", None),
+        )
 
 
 def _questioner_input_from_plan(*, session, planned) -> QuestionerInput:

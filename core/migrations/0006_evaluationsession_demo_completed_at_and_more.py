@@ -16,15 +16,24 @@ class Migration(migrations.Migration):
             name='demo_completed_at',
             field=models.DateTimeField(blank=True, null=True),
         ),
-        migrations.AddField(
-            model_name='vivaquestion',
-            name='project',
-            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.CASCADE, related_name='examiner_questions', to='core.project'),
-        ),
-        migrations.AddField(
-            model_name='vivaquestion',
-            name='question_source',
-            field=models.CharField(choices=[('ai', 'AI'), ('examiner', 'Examiner')], default='ai', max_length=20),
+        # These fields were also added on the parallel migration branch in
+        # 0007_vivaquestion_project_vivaquestion_question_source. Keep this
+        # branch's migration state, but let 0007 perform the database changes
+        # so a brand-new database does not receive duplicate ADD COLUMN calls.
+        migrations.SeparateDatabaseAndState(
+            database_operations=[],
+            state_operations=[
+                migrations.AddField(
+                    model_name='vivaquestion',
+                    name='project',
+                    field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.CASCADE, related_name='examiner_questions', to='core.project'),
+                ),
+                migrations.AddField(
+                    model_name='vivaquestion',
+                    name='question_source',
+                    field=models.CharField(choices=[('ai', 'AI'), ('examiner', 'Examiner')], default='ai', max_length=20),
+                ),
+            ],
         ),
         migrations.AlterField(
             model_name='groupmember',

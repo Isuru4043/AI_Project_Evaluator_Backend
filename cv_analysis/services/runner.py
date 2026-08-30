@@ -31,6 +31,7 @@ from urllib.parse import unquote, urlparse
 
 import requests
 from django.conf import settings
+from django.db import close_old_connections
 
 from core.models import EvaluationSession, GroupMember, SessionRecording
 from cv_analysis.models import CVSessionReport
@@ -179,6 +180,7 @@ def _run_via_modal(report, session, recording_ref, manifest) -> None:
     if not call_id:
         raise RuntimeError(f"Modal submit returned no call_id: {response.text[:300]}")
 
+    close_old_connections()
     report.modal_call_id = call_id
     report.save(update_fields=['modal_call_id', 'recording_url', 'updated_at'])
     logger.info("CV analysis for session %s submitted to Modal (%s).",
@@ -232,6 +234,7 @@ def poll_modal_result(report) -> bool:
     status = body.get('status')
 
     if status == 'done':
+        close_old_connections()
         report.artifact = body.get('summary')
         report.status = CVSessionReport.Status.COMPLETED
         report.modal_call_id = ''
@@ -239,9 +242,11 @@ def poll_modal_result(report) -> bool:
             'artifact', 'status', 'modal_call_id', 'updated_at',
         ])
         logger.info("CV analysis completed for session %s", report.session_id)
+        feed_attribution(report)
         return True
 
     if status == 'failed':
+        close_old_connections()
         report.status = CVSessionReport.Status.FAILED
         report.error_message = str(body.get('error', 'Modal job failed'))[:2000]
         report.modal_call_id = ''
@@ -337,6 +342,40 @@ def _run_via_subprocess(report, session, recording_ref, manifest, session_id) ->
         'artifact', 'status', 'recording_url', 'updated_at',
     ])
     logger.info("CV analysis completed for session %s", session_id)
+    feed_attribution(report)
+
+
+def feed_attribution(report) -> None:
+    """Hand the finished CV artifact to speaker attribution.
+
+    The artifact's speaking timeline is the highest-quality evidence available
+    for who answered what — it is the only source that identifies people by
+    face rather than by account. Reconciliation re-resolves every answer with
+    it, but never re-files one an examiner already confirmed.
+
+    Best-effort: CV analysis has already succeeded by this point, and a
+    failure to reconcile must not mark the report failed.
+    """
+    try:
+        from attribution.services.engine import reconcile_session
+        from attribution.services.ingest import ingest_posthoc_artifact
+
+        session = report.session
+        ingested = ingest_posthoc_artifact(session, report.artifact)
+        if not ingested:
+            logger.info(
+                "No post-hoc speaker evidence for session %s.", report.session_id,
+            )
+            return
+        stats = reconcile_session(session)
+        logger.info(
+            "Attribution reconciled for session %s from %d CV turns: %s",
+            report.session_id, ingested, stats,
+        )
+    except Exception:
+        logger.exception(
+            "Post-hoc attribution failed for session %s", report.session_id,
+        )
 
 
 def _download_enrollment_photos(session, tmp_path: Path):
