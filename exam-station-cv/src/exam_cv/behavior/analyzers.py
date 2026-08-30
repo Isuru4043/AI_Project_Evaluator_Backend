@@ -38,10 +38,10 @@ class GazeAnalyzer:
     Two thresholds, because looking away is not by itself suspicious — a
     student thinking through an answer glances off constantly:
 
-    * ``glance_threshold_ms`` (3s) marks an off-spell as a *glance* — an
+    * ``glance_threshold_ms`` (1.5s) marks an off-spell as a *glance* — an
       advisory BehavioralEvent, counted in the summary so the examiner sees
       "8 look-aways" without being shown eight of anything.
-    * ``flag_threshold_ms`` (6s) is the point an off-spell becomes long enough
+    * ``flag_threshold_ms`` (2.5s) is the point an off-spell becomes long enough
       to be worth watching, and earns one timecoded IntegrityFlag.
 
     Both are edge-triggered per off-spell, so a 40-second stare produces one
@@ -50,8 +50,8 @@ class GazeAnalyzer:
 
     def __init__(
         self,
-        glance_threshold_ms: int = 3000,
-        flag_threshold_ms: int = 6000,
+        glance_threshold_ms: int = 1500,
+        flag_threshold_ms: int = 2500,
         video_offset_ms: int = 0,
     ):
         self.glance_threshold_ms = glance_threshold_ms
@@ -98,7 +98,7 @@ class GazeAnalyzer:
                         kind=IntegrityKind.GAZE_OFF_SCREEN,
                         note=(
                             f"Looked away from the screen for "
-                            f"{off_for // 1000}s+ — review recording"
+                            f"{self.flag_threshold_ms / 1000:g}s+ — review recording"
                         ),
                         video_offset_ms=self.video_offset_ms,
                         student_id=sid,

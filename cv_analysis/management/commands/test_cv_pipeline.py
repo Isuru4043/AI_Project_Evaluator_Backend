@@ -33,6 +33,7 @@ from pathlib import Path
 from django.conf import settings
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management.base import BaseCommand, CommandError
+from django.db import close_old_connections
 from django.utils import timezone
 
 MARKER = '[cv-pipeline-test]'
@@ -260,6 +261,9 @@ class Command(BaseCommand):
         from core.models import SessionRecording
 
         self._stage(3, 'Recording row')
+        # The upload can take minutes; ensure a stale Neon connection from
+        # fixture creation is not reused for the first write afterwards.
+        close_old_connections()
         SessionRecording.objects.create(
             session=session,
             video_file_url=ref,

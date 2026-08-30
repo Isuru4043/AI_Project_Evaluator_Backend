@@ -4,6 +4,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.http import HttpResponse
+from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
@@ -87,9 +88,12 @@ class SessionStartView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            if session.status == 'in_progress' and session.viva_questions.exists():
-                latest_q = session.viva_questions.order_by('question_order').last()
-                ext = latest_q.extension if hasattr(latest_q, 'extension') else None
+            try:
+                payload = VivaPipeline().start_session(
+                    session=session,
+                    submission=submission,
+                )
+            except VivaPipelineInputError as exc:
                 return Response(
                     {"error": str(exc)},
                     status=status.HTTP_400_BAD_REQUEST,
@@ -142,6 +146,7 @@ class AnswerSubmitView(APIView):
 
     def post(self, request, session_id):
         claim = None
+        submitted_at = timezone.now()
         question_id = request.data.get('question_id')
         answer_text = request.data.get('answer_text', '').strip()
         speech_metrics = request.data.get('speech_metrics')   # Week 6: optional
@@ -151,6 +156,14 @@ class AnswerSubmitView(APIView):
             return Response(
                 {"error": "question_id and answer_text are required."},
                 status=status.HTTP_400_BAD_REQUEST,
+            )
+        if (
+            speaker_id != 'group'
+            and not isinstance(request.auth, PhysicalKioskAccess)
+        ):
+            return Response(
+                {"error": "Only the physical kiosk may select a speaker explicitly."},
+                status=status.HTTP_403_FORBIDDEN,
             )
 
         try:
@@ -188,6 +201,16 @@ class AnswerSubmitView(APIView):
                         {"error": "speaker_id is not a participant of this session."},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
+                from attribution.services.engine import resolve_speaker_id
+
+                # An explicit kiosk selection is a manual decision, so persist
+                # it as evidence before later reconciliation runs.
+                resolve_speaker_id(
+                    session,
+                    question,
+                    speaker_id,
+                    answered_at=submitted_at,
+                )
             elif session.student:
                 # Individual session, use the session's student
                 student_profile = session.student
@@ -200,7 +223,12 @@ class AnswerSubmitView(APIView):
                 # guessed onto a student.
                 from attribution.services.engine import resolve_speaker_id
 
-                resolved = resolve_speaker_id(session, question, speaker_id)
+                resolved = resolve_speaker_id(
+                    session,
+                    question,
+                    speaker_id,
+                    answered_at=submitted_at,
+                )
                 if resolved != 'group':
                     student_profile = StudentProfile.objects.filter(
                         id=resolved,
@@ -208,6 +236,7 @@ class AnswerSubmitView(APIView):
                     if student_profile is not None:
                         speaker_id = resolved
 
+            caller_student = None
             if not isinstance(request.auth, PhysicalKioskAccess):
                 caller_student = getattr(request.user, 'student_profile', None)
                 if speaker_id != 'group' and (
@@ -229,9 +258,14 @@ class AnswerSubmitView(APIView):
                 request_fingerprint, resolve_idempotency_key, speaker_key,
             )
             logical_speaker = (
-                f"student:{student_profile.id}"
-                if student_profile is not None
-                else speaker_key(str(speaker_id))
+                f"student:{caller_student.id}"
+                if caller_student is not None
+                else (
+                    f"student:{student_profile.id}"
+                    if request.data.get('speaker_id', 'group') != 'group'
+                    and student_profile is not None
+                    else speaker_key('group')
+                )
             )
             try:
                 idempotency_key = resolve_idempotency_key(
@@ -277,6 +311,9 @@ class AnswerSubmitView(APIView):
                 speech_metrics=speech_metrics,
                 speaker_id=speaker_id,
                 student_profile=student_profile,
+                submitter_student_profile=caller_student,
+                answered_at=submitted_at,
+                deduplication_key=logical_speaker,
             )
             complete_claim(claim, payload, status.HTTP_200_OK)
             return Response(payload, status=status.HTTP_200_OK)
@@ -661,9 +698,90 @@ class SessionDetailedReportView(APIView):
             # Fetch all questions and their answers in chronological order
             questions_qs = (
                 session.viva_questions.all()
-                .prefetch_related('answers__student__user')
+                .select_related('extension__criteria')
+                .prefetch_related(
+                    'answers__student__user',
+                    'answers__extension',
+                    'answers__attribution',
+                    'answers__contributions__student__user',
+                    'answers__contributions__unknown_speaker__resolved_student__user',
+                )
                 .order_by('question_order')
             )
+
+            def serialize_answer(answer):
+                try:
+                    ans_ext = answer.extension
+                except Exception:
+                    ans_ext = None
+
+                contributions = []
+                for contribution in answer.contributions.all():
+                    effective_student = contribution.student
+                    unknown_speaker = contribution.unknown_speaker
+                    if (
+                        effective_student is None
+                        and unknown_speaker is not None
+                        and unknown_speaker.resolved_student_id
+                    ):
+                        effective_student = unknown_speaker.resolved_student
+
+                    if effective_student and getattr(effective_student, 'user', None):
+                        contributor_name = effective_student.user.full_name
+                    elif unknown_speaker is not None:
+                        contributor_name = unknown_speaker.label
+                    else:
+                        contributor_name = 'Unidentified speaker'
+
+                    contributions.append({
+                        "student_id": (
+                            str(effective_student.id) if effective_student else None
+                        ),
+                        "student_name": contributor_name,
+                        "unknown_speaker_id": (
+                            str(unknown_speaker.id) if unknown_speaker else None
+                        ),
+                        "share": float(contribution.share),
+                        "is_dominant": contribution.is_dominant,
+                    })
+
+                try:
+                    attribution = answer.attribution
+                except Exception:
+                    attribution = None
+
+                student = getattr(answer, 'student', None)
+                student_user = getattr(student, 'user', None) if student else None
+                return {
+                    "answer_id": str(answer.id),
+                    "student_id": str(student.id) if student else None,
+                    "transcribed_answer": answer.transcribed_answer,
+                    "answered_at": str(answer.answered_at) if answer.answered_at else None,
+                    "answered_by": student_user.full_name if student_user else None,
+                    "llm_score": (
+                        float(ans_ext.llm_score)
+                        if ans_ext and ans_ext.llm_score is not None
+                        else None
+                    ),
+                    "examiner_override_score": (
+                        float(answer.examiner_override_score)
+                        if answer.examiner_override_score is not None
+                        else None
+                    ),
+                    "examiner_override_note": answer.examiner_override_note,
+                    "llm_reasoning": ans_ext.llm_reasoning if ans_ext else None,
+                    "detailed_ai_analysis": (
+                        ans_ext.detailed_ai_analysis if ans_ext else None
+                    ),
+                    "contributions": contributions,
+                    "attribution": ({
+                        "outcome": attribution.outcome,
+                        "status": attribution.status,
+                        "share": float(attribution.share),
+                        "margin": float(attribution.margin),
+                        "needs_review": attribution.needs_review,
+                    } if attribution else None),
+                }
 
             timeline = []
             for q in questions_qs:
@@ -671,15 +789,20 @@ class SessionDetailedReportView(APIView):
                     q_ext = q.extension
                 except Exception:
                     q_ext = None
-                
-                # Usually one answer per question in the AI loop
-                answer = q.answers.order_by('-answered_at').first()
-                ans_ext = None
-                if answer:
-                    try:
-                        ans_ext = answer.extension
-                    except Exception:
-                        ans_ext = None
+
+                # A group question can have one response per student or a
+                # collaborative response containing multiple contributors.
+                answers = sorted(
+                    q.answers.all(),
+                    key=lambda item: item.answered_at,
+                )
+                serialized_answers = [serialize_answer(answer) for answer in answers]
+
+                criteria = q_ext.criteria if q_ext else None
+                if criteria is None:
+                    criterion_type = 'unclassified'
+                else:
+                    criterion_type = 'individual' if criteria.is_individual else 'group'
 
                 timeline.append({
                     "question_id": str(q.id),
@@ -688,7 +811,11 @@ class SessionDetailedReportView(APIView):
                     "question_order": q.question_order,
                     "blooms_level": q.blooms_level,
                     "difficulty": q_ext.difficulty_level if q_ext else None,
-                    "criterion": q_ext.criteria.criteria_name if q_ext and q_ext.criteria else getattr(q, 'viva_topic_name', None),
+                    "criterion": criteria.criteria_name if criteria else getattr(q, 'viva_topic_name', None),
+                    "criterion_type": criterion_type,
+                    "is_individual_criterion": (
+                        criteria.is_individual if criteria is not None else None
+                    ),
                     "asked_at": str(getattr(q, 'asked_at', None) or q.generated_at),
                     "validation_status": (
                         q_ext.validation_status if q_ext else 'not_applicable'
@@ -702,17 +829,10 @@ class SessionDetailedReportView(APIView):
                     "generation_audit": (
                         q_ext.generation_audit if q_ext else {}
                     ),
-                    "answer": {
-                        "answer_id": str(answer.id),
-                        "transcribed_answer": answer.transcribed_answer,
-                        "answered_at": str(answer.answered_at) if answer.answered_at else None,
-                        "answered_by": answer.student.user.full_name if getattr(answer, 'student', None) and getattr(answer.student, 'user', None) else None,
-                        "llm_score": float(ans_ext.llm_score) if ans_ext and ans_ext.llm_score is not None else None,
-                        "examiner_override_score": float(answer.examiner_override_score) if answer.examiner_override_score is not None else None,
-                        "examiner_override_note": answer.examiner_override_note,
-                        "llm_reasoning": ans_ext.llm_reasoning if ans_ext else None,
-                        "detailed_ai_analysis": ans_ext.detailed_ai_analysis if ans_ext else None,
-                    } if answer else None
+                    # Keep `answer` for older clients while exposing the full
+                    # group response history through `answers`.
+                    "answer": serialized_answers[-1] if serialized_answers else None,
+                    "answers": serialized_answers,
                 })
 
             return Response({

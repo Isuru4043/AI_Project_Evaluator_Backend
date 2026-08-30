@@ -48,10 +48,6 @@ class Migration(migrations.Migration):
             model_name='speakerevidence',
             name='uniq_speaker_evidence_span',
         ),
-        migrations.AddConstraint(
-            model_name='speakerevidence',
-            constraint=models.UniqueConstraint(fields=('session', 'source', 'student', 'unknown_speaker', 't_start', 't_end'), name='uniq_speaker_evidence_span'),
-        ),
         migrations.AddField(
             model_name='unknownspeaker',
             name='resolved_by',
@@ -96,6 +92,10 @@ class Migration(migrations.Migration):
             model_name='speakerevidence',
             name='unknown_speaker',
             field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.CASCADE, related_name='evidence', to='attribution.unknownspeaker'),
+        ),
+        migrations.AddConstraint(
+            model_name='speakerevidence',
+            constraint=models.UniqueConstraint(fields=('session', 'source', 'student', 'unknown_speaker', 't_start', 't_end'), name='uniq_speaker_evidence_span'),
         ),
         migrations.AddConstraint(
             model_name='unknownspeaker',

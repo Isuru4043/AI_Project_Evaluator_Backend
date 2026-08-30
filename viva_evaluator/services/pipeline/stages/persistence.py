@@ -30,9 +30,13 @@ class PersistenceResult:
     duplicate: bool = False
 
 
-def find_existing_answer(question, student_profile):
+def find_existing_answer(question, student_profile, deduplication_key=None):
     """Return an existing answer for the same question/speaker, if present."""
     queryset = question.answers.all()
+    if deduplication_key:
+        return queryset.filter(
+            deduplication_key=deduplication_key,
+        ).order_by("answered_at").first()
     if student_profile is None:
         queryset = queryset.filter(student__isnull=True)
     else:
@@ -102,6 +106,7 @@ def persist_turn(
     answer_text: str,
     computation: Dict,
     detailed_analysis: Optional[Dict] = None,
+    answered_at=None,
     deduplication_key: Optional[str] = None,
 ) -> PersistenceResult:
     """Commit one computed turn in one short transaction.
@@ -123,7 +128,11 @@ def persist_turn(
             session=locked_session,
         )
 
-        duplicate = find_existing_answer(locked_question, student_profile)
+        duplicate = find_existing_answer(
+            locked_question,
+            student_profile,
+            deduplication_key=deduplication_key,
+        )
         if duplicate is not None:
             next_question = find_next_unanswered_question(
                 locked_session,
@@ -147,6 +156,12 @@ def persist_turn(
                 None if is_clarification else round(float(soft_score) * 10.0, 2)
             ),
         )
+        if answered_at is not None:
+            # Question generation happens before this short persistence stage.
+            # Preserve the actual submission instant so attribution does not
+            # include speech produced while the next question is generated.
+            VivaAnswer.objects.filter(pk=answer.pk).update(answered_at=answered_at)
+            answer.answered_at = answered_at
 
         if not is_clarification:
             analysis = computation.get("analysis") or {}

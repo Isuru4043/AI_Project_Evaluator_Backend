@@ -105,13 +105,20 @@ WSGI_APPLICATION = 'AI_Evaluator_Backend.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'neondb',
-        'USER': 'neondb_owner',
-        'PASSWORD': os.environ.get('DATABASE_PASSWORD', ''),
-        'HOST': 'ep-sweet-shape-ao5kxg2i.c-2.ap-southeast-1.aws.neon.tech',
-        'PORT': '5432',
+        'NAME': os.environ.get('NEON_DATABASE_NAME', 'neondb'),
+        'USER': os.environ.get('NEON_DATABASE_USER', 'neondb_owner'),
+        'PASSWORD': os.environ.get(
+            'NEON_DATABASE_PASSWORD',
+            os.environ.get('DATABASE_PASSWORD', ''),
+        ),
+        'HOST': os.environ.get(
+            'NEON_DATABASE_HOST',
+            'ep-fragrant-dawn-azhkavms.c-3.ap-southeast-1.aws.neon.tech',
+        ),
+        'PORT': os.environ.get('NEON_DATABASE_PORT', '5432'),
         'OPTIONS': {
             'sslmode': 'require',
+            'channel_binding': os.environ.get('NEON_CHANNEL_BINDING', 'require'),
         },
     }
 }

@@ -32,6 +32,7 @@ from core.models import (
     VivaAnswer,
 )
 from physical_evaluation.authentication import PhysicalKioskAuthentication
+from physical_evaluation.models import PhysicalKioskAccess
 from attribution.models import AnswerAttribution, UnknownSpeaker
 from attribution.services import binding as binding_service
 from attribution.services import engine, ingest
@@ -81,14 +82,33 @@ def _is_participant(user, session) -> bool:
     return _is_examiner_for(user, session)
 
 
+def _is_trusted_device(request) -> bool:
+    return bool(
+        getattr(request.user, 'is_station', False)
+        or isinstance(request.auth, PhysicalKioskAccess)
+    )
+
+
+def _filter_browser_volume_events(request, events):
+    """A browser may report only its authenticated account's Agora UID."""
+    from agora_service.token_builder import _uid_from_user_id
+
+    expected_uid = str(_uid_from_user_id(request.user.id))
+    return [
+        event for event in events
+        if isinstance(event, dict)
+        and str(event.get('uid', '')) == expected_uid
+    ]
+
+
 class EvidenceIngestView(APIView):
     """POST /api/sessions/<session_id>/attribution/evidence/
 
     Body: {"source": "agora_volume" | "agora_stt" | "live_cv", "events": [...]}
 
     Providers batch their observations rather than posting per event — a
-    volume indicator fires several times a second and one request per tick
-    would swamp the tier for no gain.
+    volume indicator reports periodically and one request per sample would
+    swamp the tier for no gain.
     """
 
     authentication_classes = [
@@ -104,6 +124,11 @@ class EvidenceIngestView(APIView):
             return _err('Session not found.', code=404)
         if not _is_participant(request.user, session):
             return _err('You are not part of this session.', code=403)
+        if session.status != EvaluationSession.Status.IN_PROGRESS:
+            return _err(
+                'Speaker evidence is accepted only while the viva is in progress.',
+                code=409,
+            )
 
         source = (request.data.get('source') or '').strip()
         events = request.data.get('events') or []
@@ -113,6 +138,16 @@ class EvidenceIngestView(APIView):
             return _ok({'stored': 0})
         if len(events) > 2000:
             return _err('Too many events in one batch (max 2000).')
+
+        trusted_device = _is_trusted_device(request)
+        if trusted_device and source != 'live_cv':
+            return _err('A physical station may submit only live_cv evidence.', code=403)
+        if not trusted_device:
+            if source != 'agora_volume':
+                return _err('Browser participants may submit only agora_volume evidence.', code=403)
+            events = _filter_browser_volume_events(request, events)
+            if not events:
+                return _ok({'stored': 0, 'source': source})
 
         try:
             if source == 'agora_volume':
@@ -165,6 +200,16 @@ class SeatBindingView(APIView):
             return _err('Session not found.', code=404)
         if not _is_participant(request.user, session):
             return _err('You are not part of this session.', code=403)
+        if session.status != EvaluationSession.Status.IN_PROGRESS:
+            return _err(
+                'Seat binding is available only while the viva is in progress.',
+                code=409,
+            )
+        if not (_is_trusted_device(request) or _is_examiner_for(request.user, session)):
+            return _err(
+                'Only the kiosk, exam station, or assigned examiner may bind seats.',
+                code=403,
+            )
 
         seating = request.data.get('seating_order')
         if seating:
@@ -218,6 +263,16 @@ class StationArtifactView(APIView):
             return _err('Session not found.', code=404)
         if not _is_participant(request.user, session):
             return _err('You are not part of this session.', code=403)
+        if not _is_trusted_device(request):
+            return _err(
+                'Only the physical kiosk or exam station may upload an artifact.',
+                code=403,
+            )
+        if session.status not in {
+            EvaluationSession.Status.IN_PROGRESS,
+            EvaluationSession.Status.COMPLETED,
+        }:
+            return _err('The session has not started.', code=409)
 
         summary = request.data.get('summary')
         if not isinstance(summary, dict):

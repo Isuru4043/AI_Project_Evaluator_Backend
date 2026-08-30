@@ -135,7 +135,9 @@ def decide_for_answer(session, question, answered_at=None) -> Decision:
         return Decision(None, 0.0, 0.0, 'error')
 
 
-def resolve_speaker_id(session, question, requested: str = 'group') -> str:
+def resolve_speaker_id(
+    session, question, requested: str = 'group', answered_at=None,
+) -> str:
     """The speaker_id the scoring pipeline should use for this answer.
 
     Called at submit time. An explicit, valid client choice always wins — that
@@ -152,7 +154,7 @@ def resolve_speaker_id(session, question, requested: str = 'group') -> str:
     # manual evidence so the audit trail shows why the vote was bypassed.
     if requested and requested != 'group':
         if str(requested) in valid:
-            _record_manual(session, question, requested)
+            _record_manual(session, question, requested, answered_at=answered_at)
             return str(requested)
         logger.warning(
             "Session %s: speaker_id %s is not on the roster; ignoring.",
@@ -164,7 +166,7 @@ def resolve_speaker_id(session, question, requested: str = 'group') -> str:
     if not session.group_id and session.student_id:
         return str(session.student_id)
 
-    decision = decide_for_answer(session, question)
+    decision = decide_for_answer(session, question, answered_at=answered_at)
     if decision.student_id and decision.student_id in valid:
         return decision.student_id
     # An unenrolled speaker leads this answer. Their marks are still recorded
@@ -174,10 +176,10 @@ def resolve_speaker_id(session, question, requested: str = 'group') -> str:
     return 'group'
 
 
-def _record_manual(session, question, student_id) -> None:
+def _record_manual(session, question, student_id, answered_at=None) -> None:
     """Persist an examiner/kiosk selection as top-weight evidence."""
     try:
-        start, end = answer_window(question)
+        start, end = answer_window(question, answered_at=answered_at)
         SpeakerEvidence.objects.get_or_create(
             session=session,
             source=EvidenceSource.MANUAL,
@@ -236,7 +238,7 @@ def record_attribution(
         # VivaAnswer.student sees the resolved speaker without changes. An
         # unknown speaker leaves it null: the answer belongs to nobody on the
         # roster yet, and claiming otherwise would be the guess we refuse.
-        if student_id and str(answer.student_id or '') != str(student_id):
+        if str(answer.student_id or '') != str(student_id or ''):
             answer.student_id = student_id
             answer.save(update_fields=['student'])
 
@@ -307,9 +309,16 @@ def reconcile_session(session) -> dict:
         decision = decide_for_answer(session, answer.question, answer.answered_at)
         existing = getattr(answer, 'attribution', None)
 
-        if existing and existing.status == AttributionStatus.CONFIRMED:
+        if existing and existing.status in {
+            AttributionStatus.CONFIRMED,
+            AttributionStatus.DISPUTED,
+        }:
             same = str(existing.student_id or '') == str(decision.student_id or '')
-            if not same and decision.student_id:
+            if (
+                existing.status == AttributionStatus.CONFIRMED
+                and not same
+                and decision.student_id
+            ):
                 existing.status = AttributionStatus.DISPUTED
                 existing.source_breakdown = decision.breakdown
                 existing.save(update_fields=[
@@ -482,14 +491,38 @@ def confirm_attribution(attribution, examiner, student_id=None) -> AnswerAttribu
         if str(student_id) not in valid:
             raise ValueError("That student is not part of this session.")
         attribution.student_id = student_id
+        attribution.unknown_speaker = None
+        attribution.share = 1.0
+        attribution.margin = 1.0
+        attribution.outcome = 'manual'
+        attribution.co_speakers = []
+        breakdown = dict(attribution.source_breakdown or {})
+        breakdown['manual'] = {str(student_id): 1.0}
+        attribution.source_breakdown = breakdown
         answer = attribution.answer
         answer.student_id = student_id
         answer.save(update_fields=['student'])
+        AnswerContribution.objects.filter(attribution=attribution).delete()
+        AnswerContribution.objects.create(
+            attribution=attribution,
+            answer=answer,
+            student_id=student_id,
+            share=1.0,
+            is_dominant=True,
+        )
+        _record_manual(
+            attribution.session,
+            answer.question,
+            student_id,
+            answered_at=answer.answered_at,
+        )
 
     attribution.status = AttributionStatus.CONFIRMED
     attribution.confirmed_by = examiner
     attribution.confirmed_at = timezone.now()
     attribution.save(update_fields=[
-        'student', 'status', 'confirmed_by', 'confirmed_at', 'updated_at',
+        'student', 'unknown_speaker', 'share', 'margin', 'outcome',
+        'co_speakers', 'source_breakdown', 'status', 'confirmed_by',
+        'confirmed_at', 'updated_at',
     ])
     return attribution

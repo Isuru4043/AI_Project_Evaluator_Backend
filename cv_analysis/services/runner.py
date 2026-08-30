@@ -31,6 +31,7 @@ from urllib.parse import unquote, urlparse
 
 import requests
 from django.conf import settings
+from django.db import close_old_connections
 
 from core.models import EvaluationSession, GroupMember, SessionRecording
 from cv_analysis.models import CVSessionReport
@@ -179,6 +180,7 @@ def _run_via_modal(report, session, recording_ref, manifest) -> None:
     if not call_id:
         raise RuntimeError(f"Modal submit returned no call_id: {response.text[:300]}")
 
+    close_old_connections()
     report.modal_call_id = call_id
     report.save(update_fields=['modal_call_id', 'recording_url', 'updated_at'])
     logger.info("CV analysis for session %s submitted to Modal (%s).",
@@ -232,6 +234,7 @@ def poll_modal_result(report) -> bool:
     status = body.get('status')
 
     if status == 'done':
+        close_old_connections()
         report.artifact = body.get('summary')
         report.status = CVSessionReport.Status.COMPLETED
         report.modal_call_id = ''
@@ -243,6 +246,7 @@ def poll_modal_result(report) -> bool:
         return True
 
     if status == 'failed':
+        close_old_connections()
         report.status = CVSessionReport.Status.FAILED
         report.error_message = str(body.get('error', 'Modal job failed'))[:2000]
         report.modal_call_id = ''

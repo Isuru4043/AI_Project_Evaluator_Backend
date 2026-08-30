@@ -272,7 +272,7 @@ class SessionRunner:
                 self.audio.close()
             if self.live_sink is not None:
                 try:
-                    self.live_sink.flush()
+                    self.live_sink.close()
                 except Exception:
                     pass  # already best-effort; the artifact is authoritative
 

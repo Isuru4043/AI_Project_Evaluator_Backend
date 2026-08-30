@@ -128,6 +128,12 @@ class LiveEvidenceSink:
         self.batch_size = batch_size
         self.timeout = timeout
         self._pending: list[dict] = []
+        from concurrent.futures import ThreadPoolExecutor
+
+        self._executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="speaker-evidence",
+        )
 
     def push(self, event) -> None:
         """Queue one AttributionEvent. Non-attribution events are ignored."""
@@ -168,19 +174,28 @@ class LiveEvidenceSink:
     def flush(self) -> None:
         if not self._pending:
             return
+        batch, self._pending = self._pending, []
+        self._executor.submit(self._send_batch, batch)
+
+    def close(self) -> None:
+        """Queue the tail and wait for pending network writes at shutdown."""
+        self.flush()
+        self._executor.shutdown(wait=True)
+
+    def _send_batch(self, batch: list[dict]) -> None:
         import requests  # lazy
 
-        batch, self._pending = self._pending, []
         headers = {"Content-Type": "application/json"}
         if self.token:
             headers["X-Station-Token"] = self.token
 
         try:
-            requests.post(
+            response = requests.post(
                 f"{self.endpoint}/evidence/",
                 json={"source": "live_cv", "events": batch},
                 headers=headers,
                 timeout=self.timeout,
             )
+            response.raise_for_status()
         except Exception as e:
             print(f"live evidence batch dropped ({e})", flush=True)

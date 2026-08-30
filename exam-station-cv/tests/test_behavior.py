@@ -67,6 +67,18 @@ class TestGazeAnalyzer:
         assert flags[0].t_ms == 60_000          # anchored at look-away start
         assert flags[0].video_timecode == "00:01:00"
 
+    def test_default_flag_threshold_is_two_and_a_half_seconds(self):
+        g = GazeAnalyzer()
+        out = []
+        for t in range(0, 3000, TICK):
+            out += g.push(FaceTickObservation(t, {"s1": False}))
+
+        flags = [e for e in out if isinstance(e, IntegrityFlag)]
+        assert g.flag_threshold_ms == 2500
+        assert len(flags) == 1
+        assert flags[0].t_ms == 0
+        assert "2.5s+" in flags[0].note
+
     def test_thinking_glance_stays_below_the_flag_threshold(self):
         """A 4s glance is a student thinking, not evidence — it counts as a
         glance but must not raise an integrity flag."""

@@ -24,9 +24,26 @@ import modal
 app = modal.App("exam-cv-analyze")
 
 ENGINE_SRC = "exam-station-cv/src/exam_cv"
-LANDMARKER = "exam-station-cv/models/face_landmarker.task"
-
 MODEL_DIR = "/root/models"
+FACE_LANDMARKER_URL = (
+    "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
+    "face_landmarker/float16/1/face_landmarker.task"
+)
+
+
+def _bake_face_landmarker():
+    """Fetch the MediaPipe bundle while building the Modal image.
+
+    Local exam stations lazily cache this file under ``models/``. Requiring
+    that untracked cache in the deploy source made a clean checkout unable to
+    deploy, so the cloud image fetches and embeds the official bundle itself.
+    """
+    import urllib.request
+    from pathlib import Path
+
+    destination = Path(MODEL_DIR) / "face_landmarker.task"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    urllib.request.urlretrieve(FACE_LANDMARKER_URL, destination)
 
 
 def _bake_insightface_models():
@@ -36,6 +53,11 @@ def _bake_insightface_models():
     is on the critical path; downloading it at request time would add ~170MB
     to every cold start.
     """
+    import os
+
+    # Do not emit InsightFace's Unicode tqdm progress bar while Modal streams
+    # build logs to a Windows console using a legacy code page.
+    os.environ["TQDM_DISABLE"] = "1"
     from insightface.utils import ensure_available
 
     ensure_available("models", "buffalo_l")
@@ -45,7 +67,7 @@ def _bake_insightface_models():
 engine_image = (
     modal.Image.debian_slim(python_version="3.11")
     # libgl1/libglib2.0-0: opencv runtime; ffmpeg: the engine's audio extraction.
-    .apt_install("ffmpeg", "libgl1", "libglib2.0-0")
+    .apt_install("ffmpeg", "libegl1", "libgles2", "libgl1", "libglib2.0-0")
     .pip_install(
         "numpy>=1.26",
         "pydantic>=2.5",
@@ -58,7 +80,7 @@ engine_image = (
         "requests",
     )
     .add_local_dir(ENGINE_SRC, remote_path="/root/exam_cv", copy=True)
-    .add_local_file(LANDMARKER, remote_path=f"{MODEL_DIR}/face_landmarker.task", copy=True)
+    .run_function(_bake_face_landmarker)
     # Point the engine's asset loader at the baked-in landmarker so it never
     # downloads one at runtime (see faces/model_assets.py).
     .env({"EXAM_CV_MODEL_DIR": MODEL_DIR})

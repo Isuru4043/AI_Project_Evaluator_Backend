@@ -161,14 +161,28 @@ class SpeakerEvidence(models.Model):
             models.Index(fields=['session', 'source']),
         ]
         constraints = [
-            # Re-POSTing the same batch (retry, flaky network) must not stuff
-            # the ballot box for one student.
+            models.UniqueConstraint(
+                fields=['session', 'source', 'student', 't_start', 't_end'],
+                condition=models.Q(
+                    student__isnull=False,
+                    unknown_speaker__isnull=True,
+                ),
+                name='uniq_known_speaker_evidence_span',
+            ),
             models.UniqueConstraint(
                 fields=[
-                    'session', 'source', 'student', 'unknown_speaker',
-                    't_start', 't_end',
+                    'session', 'source', 'unknown_speaker', 't_start', 't_end',
                 ],
-                name='uniq_speaker_evidence_span',
+                condition=models.Q(unknown_speaker__isnull=False),
+                name='uniq_unknown_speaker_evidence_span',
+            ),
+            models.UniqueConstraint(
+                fields=['session', 'source', 't_start', 't_end'],
+                condition=models.Q(
+                    student__isnull=True,
+                    unknown_speaker__isnull=True,
+                ),
+                name='uniq_unattributed_evidence_span',
             ),
         ]
 

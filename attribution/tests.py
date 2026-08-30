@@ -164,6 +164,18 @@ class ContributionShareTests(SimpleTestCase):
         d = resolve(ws, we, [at(0, 29, ALICE), at(29, 30, BOB)])
         self.assertIn(ALICE, d.shares)
         self.assertNotIn(BOB, d.shares)
+        self.assertAlmostEqual(sum(d.shares.values()), 1.0, places=4)
+        self.assertAlmostEqual(d.shares[ALICE], 1.0, places=4)
+
+    def test_retained_contributors_are_renormalized_after_exclusion(self):
+        ws, we = window()
+        d = resolve(ws, we, [
+            at(0, 21, ALICE),
+            at(21, 27, BOB),
+            at(27, 30, CARA),
+        ])
+        self.assertEqual(set(d.shares), {ALICE, BOB})
+        self.assertAlmostEqual(sum(d.shares.values()), 1.0, places=4)
 
     def test_manual_override_takes_the_whole_answer(self):
         ws, we = window()

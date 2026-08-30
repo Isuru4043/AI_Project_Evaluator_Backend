@@ -152,11 +152,23 @@ def resolve(
     # Shares are reported for every candidate with a real stake, even when the
     # window is too close to name a winner: an answer two students genuinely
     # shared still has to divide its marks between them.
-    shares = {
-        sid: round(val / total, 4)
-        for sid, val in ranked
+    eligible = [
+        (sid, val) for sid, val in ranked
         if val / total >= co_speaker_share
+    ]
+    eligible_total = sum(val for _, val in eligible)
+    shares = {
+        sid: round(val / eligible_total, 4)
+        for sid, val in eligible
     }
+    # Rounding and removal of trivial interjections must never leave marks
+    # unassigned. Put any four-decimal drift onto the leading contributor.
+    if shares:
+        leader = eligible[0][0]
+        shares[leader] = round(
+            shares[leader] + (1.0 - sum(shares.values())),
+            4,
+        )
 
     if top_share < min_share or margin < min_margin:
         return Decision(

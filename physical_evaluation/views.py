@@ -3,7 +3,7 @@ import secrets
 from datetime import timedelta
 
 from django.conf import settings
-from django.db import transaction
+from django.db import close_old_connections, transaction
 from django.utils import timezone
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
@@ -772,6 +772,7 @@ class KioskSessionCompleteView(APIView):
                 audio_file, str(run.session.project_id), str(run.session_id),
             )
 
+        close_old_connections()
         now = timezone.now()
         duration_seconds = max(0, int((now - run.recording_started_at).total_seconds()))
         with transaction.atomic():
