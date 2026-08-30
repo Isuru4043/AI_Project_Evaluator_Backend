@@ -368,6 +368,11 @@ def feed_attribution(report) -> None:
             )
             return
         stats = reconcile_session(session)
+        if stats.get('changed'):
+            from viva_evaluator.services.session_reports import (
+                refresh_draft_summary_reports,
+            )
+            stats['reports_refreshed'] = refresh_draft_summary_reports(session)
         logger.info(
             "Attribution reconciled for session %s from %d CV turns: %s",
             report.session_id, ingested, stats,

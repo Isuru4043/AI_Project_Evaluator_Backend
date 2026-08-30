@@ -1,6 +1,3 @@
-import math
-from django.db.models import Prefetch
-
 class ScoringService:
     @staticmethod
     def get_effective_score_for_answer(answer):
@@ -30,7 +27,12 @@ class ScoringService:
         return 'F'
 
     @staticmethod
-    def aggregate_student_score(session, student_profile):
+    def aggregate_student_score(
+        session,
+        student_profile,
+        *,
+        use_examiner_overrides=True,
+    ):
         """
         Calculates the overall score and grade for a specific student in a session.
         Respects `is_individual` on RubricCriteria.
@@ -46,20 +48,6 @@ class ScoringService:
         total_possible = 0.0
         total_earned = 0.0
 
-        # How much of each answer this student actually spoke. A group answer
-        # is often shared, and crediting all of it to whoever talked most
-        # overstates one student and erases the other — so individual criteria
-        # are weighted by speaking share rather than counted whole.
-        # None means no attribution data exists for this session, in which case
-        # the original whole-answer rule applies unchanged.
-        shares = None
-        try:
-            from attribution.services.engine import contribution_shares
-
-            shares = contribution_shares(session, student_profile)
-        except Exception:
-            shares = None
-
         answers = []
         for q in session.viva_questions.prefetch_related('answers', 'extension__criteria').all():
             for a in q.answers.all():
@@ -67,11 +55,15 @@ class ScoringService:
                     q_ext = q.extension
                     if q_ext and q_ext.criteria:
                         if q_ext.criteria.is_individual:
-                            if shares is not None:
-                                weight = shares.get(str(a.id), 0.0)
-                                if weight > 0:
-                                    answers.append((a, q_ext.criteria, weight))
-                            elif a.student == student_profile:
+                            # An individual criterion is awarded only to the
+                            # resolved primary answerer. Contribution shares
+                            # remain useful review evidence, but are not marks:
+                            # normalising a partial share by that same share
+                            # gave every contributor the whole answer score.
+                            if (
+                                student_profile is not None
+                                and a.student_id == student_profile.id
+                            ):
                                 answers.append((a, q_ext.criteria, 1.0))
                         else:
                             # Group criteria measure the group, so every member
@@ -92,7 +84,15 @@ class ScoringService:
         # Group answers by criteria
         criteria_scores = {}
         for a, crit, weight in answers:
-            score = ScoringService.get_effective_score_for_answer(a)
+            score = (
+                ScoringService.get_effective_score_for_answer(a)
+                if use_examiner_overrides
+                else (
+                    float(a.ai_answer_score)
+                    if a.ai_answer_score is not None
+                    else None
+                )
+            )
             if score is None:
                 continue # Skip unscored clarifications
 

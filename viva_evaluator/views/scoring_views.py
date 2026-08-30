@@ -1,3 +1,5 @@
+import logging
+
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -19,6 +21,8 @@ from viva_evaluator.views._helpers import (
     _difficulty_signal_from_score,
     _get_or_create_index_status,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class FinalScoreSubmitView(APIView):
@@ -257,6 +261,16 @@ class PatchAnswerScoreView(APIView):
         answer.examiner_override_score = override_score
         answer.examiner_override_note  = override_note
         answer.save(update_fields=['examiner_override_score', 'examiner_override_note'])
+        from viva_evaluator.services.session_reports import (
+            refresh_draft_summary_reports,
+        )
+        try:
+            refresh_draft_summary_reports(session)
+        except Exception:
+            logger.exception(
+                "Draft report refresh failed after score override for answer %s",
+                answer.id,
+            )
 
         return Response(
             {
@@ -284,7 +298,13 @@ class ApproveSessionScoresView(APIView):
 
     def post(self, request, session_id):
         from core.models import EvaluationSession, SessionSummaryReport
+        from django.db import transaction
         from django.utils import timezone
+        from viva_evaluator.services.scoring_service import ScoringService
+        from viva_evaluator.services.session_reports import (
+            ensure_participant_reports,
+            unresolved_individual_answers,
+        )
 
         # Verify session
         try:
@@ -304,37 +324,60 @@ class ApproveSessionScoresView(APIView):
 
         examiner = request.user.examiner_profile
 
-        reports = session.summary_reports.all()
-        if not reports.exists():
-            return Response(
-                {"error": "No summary reports found to approve."},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+        with transaction.atomic():
+            # Lock the session so two approval clicks cannot publish a partial
+            # mixture of old and newly reconciled participant scores.
+            session = EvaluationSession.objects.select_for_update().get(id=session_id)
+            unresolved = unresolved_individual_answers(session)
+            if unresolved:
+                return Response(
+                    {
+                        "error": (
+                            "Resolve the answerer for every individual question "
+                            "before approving scores."
+                        ),
+                        "code": "unresolved_individual_attribution",
+                        "unresolved_count": len(unresolved),
+                        "answers": [
+                            {
+                                "answer_id": str(answer.id),
+                                "question_id": str(answer.question_id),
+                                "question_order": answer.question.question_order,
+                            }
+                            for answer in unresolved
+                        ],
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            ensure_participant_reports(session)
+            reports = session.summary_reports.select_for_update().select_related('student')
+            now = timezone.now()
 
-        now = timezone.now()
-        
-        for report in reports:
-            if report.scores_status == SessionSummaryReport.ScoresStatus.APPROVED:
-                continue
+            for report in reports:
+                if report.scores_status == SessionSummaryReport.ScoresStatus.APPROVED:
+                    continue
 
-            from viva_evaluator.services.scoring_service import ScoringService
-            scoring_result = ScoringService.aggregate_student_score(session, report.student)
-            
-            final_percentage = scoring_result['percentage']
-            grade = scoring_result['grade']
-
-            report.total_final_score = final_percentage
-            report.grade = grade
-            report.scores_status     = SessionSummaryReport.ScoresStatus.APPROVED
-            report.scores_approved_at = now
-            report.is_published      = True
-            report.published_at      = now
-            report.finalized_by      = examiner
-            report.save(update_fields=[
-                'total_final_score', 'grade',
-                'scores_status', 'scores_approved_at',
-                'is_published', 'published_at', 'finalized_by',
-            ])
+                scoring_result = ScoringService.aggregate_student_score(
+                    session, report.student,
+                )
+                ai_result = ScoringService.aggregate_student_score(
+                    session,
+                    report.student,
+                    use_examiner_overrides=False,
+                )
+                report.total_ai_score = ai_result['percentage']
+                report.total_final_score = scoring_result['percentage']
+                report.grade = scoring_result['grade']
+                report.scores_status = SessionSummaryReport.ScoresStatus.APPROVED
+                report.scores_approved_at = now
+                report.is_published = True
+                report.published_at = now
+                report.finalized_by = examiner
+                report.save(update_fields=[
+                    'total_ai_score', 'total_final_score', 'grade',
+                    'scores_status', 'scores_approved_at',
+                    'is_published', 'published_at', 'finalized_by',
+                ])
 
         return Response(
             {

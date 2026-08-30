@@ -424,7 +424,7 @@ def contribution_shares(session, student) -> Optional[dict]:
     existed, and sessions where every provider was silent, both land here.
 
     An unknown speaker's shares only appear once they have been identified;
-    until then those marks are held, belonging to nobody.
+    until then their participation remains unclaimed.
     """
     if not is_enabled():
         return None

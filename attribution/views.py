@@ -391,6 +391,11 @@ class StationArtifactView(APIView):
         # already confirmed.
         ingested = ingest.ingest_posthoc_artifact(session, summary)
         stats = engine.reconcile_session(session) if ingested else {}
+        if stats.get('changed'):
+            from viva_evaluator.services.session_reports import (
+                refresh_draft_summary_reports,
+            )
+            stats['reports_refreshed'] = refresh_draft_summary_reports(session)
 
         return _ok({
             'evidence_ingested': ingested,
@@ -530,6 +535,16 @@ class UnknownSpeakerView(APIView):
         except Exception:
             logger.exception('Resolving unknown speaker failed for %s', session_id)
             return _err('Could not resolve that speaker.', code=500)
+        try:
+            from viva_evaluator.services.session_reports import (
+                refresh_draft_summary_reports,
+            )
+            refresh_draft_summary_reports(session)
+        except Exception:
+            logger.exception(
+                'Report refresh failed after resolving unknown speaker for %s',
+                session_id,
+            )
 
         return _ok({
             'unknown_speaker_id': str(unknown.id),
@@ -573,6 +588,15 @@ class AttributionConfirmView(APIView):
         except Exception:
             logger.exception('Confirm failed for answer %s', answer_id)
             return _err('Could not confirm the attribution.', code=500)
+        try:
+            from viva_evaluator.services.session_reports import (
+                refresh_draft_summary_reports,
+            )
+            refresh_draft_summary_reports(session)
+        except Exception:
+            logger.exception(
+                'Report refresh failed after confirming answer %s', answer_id,
+            )
 
         return _ok({
             'answer_id': str(attribution.answer_id),
@@ -606,6 +630,11 @@ class AttributionReconcileView(APIView):
             ingested = ingest.ingest_posthoc_artifact(session, report.artifact)
 
         stats = engine.reconcile_session(session)
+        if stats.get('changed'):
+            from viva_evaluator.services.session_reports import (
+                refresh_draft_summary_reports,
+            )
+            stats['reports_refreshed'] = refresh_draft_summary_reports(session)
         stats['posthoc_evidence_ingested'] = ingested
         return _ok(stats, 'Reconciliation complete.')
 
