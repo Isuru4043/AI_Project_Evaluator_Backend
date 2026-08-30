@@ -11,6 +11,7 @@ from attribution.views import (
     AttributionReviewView,
     EvidenceIngestView,
     SeatBindingView,
+    SpeakerDetectionTestView,
     StationArtifactView,
     UnknownSpeakerView,
 )
@@ -18,6 +19,11 @@ from attribution.views import (
 app_name = 'attribution'
 
 urlpatterns = [
+    path(
+        'attribution/speaker-detection-test/bind/',
+        SpeakerDetectionTestView.as_view(),
+        name='speaker-detection-test-bind',
+    ),
     path(
         'sessions/<uuid:session_id>/attribution/evidence/',
         EvidenceIngestView.as_view(),

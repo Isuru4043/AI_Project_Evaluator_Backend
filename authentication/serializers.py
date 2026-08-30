@@ -233,7 +233,7 @@ class StudentProfileSerializer(serializers.ModelSerializer):
         ]
 
     def get_has_face_photo(self, obj):
-        return bool(obj.face_photo_url)
+        return bool(obj.enrollment_face_photos())
 
 
 class UserProfileResponseSerializer(serializers.ModelSerializer):

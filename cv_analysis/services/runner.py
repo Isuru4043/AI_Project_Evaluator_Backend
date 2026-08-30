@@ -261,7 +261,7 @@ def poll_modal_result(report) -> bool:
 
 
 def _enrollment_photo_urls(session) -> dict:
-    """student_id -> SAS URL of that student's enrollment face photo.
+    """student_id -> SAS URLs for guided enrollment face samples.
 
     Group sessions only: a composite recording frames every member at once, so
     faces must be matched against enrolled photos to know who is speaking.
@@ -278,15 +278,15 @@ def _enrollment_photo_urls(session) -> dict:
     )
     photos = {}
     for member in members:
-        ref = getattr(member.student, 'face_photo_url', '')
-        if not ref:
+        refs = member.student.enrollment_face_photos()
+        if not refs:
             logger.info(
                 "Session %s: student %s has no enrollment photo — their turns "
                 "will show as unknown.", session.id, member.student_id,
             )
             continue
         try:
-            photos[str(member.student_id)] = _sas_for(ref)
+            photos[str(member.student_id)] = [_sas_for(ref) for ref in refs]
         except Exception:
             logger.exception("Could not sign enrollment photo for student %s",
                              member.student_id)
@@ -392,19 +392,22 @@ def _download_enrollment_photos(session, tmp_path: Path):
     enrollment_dir.mkdir(exist_ok=True)
     found = False
     for member in members:
-        ref = getattr(member.student, 'face_photo_url', '')
-        if not ref:
+        refs = member.student.enrollment_face_photos()
+        if not refs:
             continue
-        dest = enrollment_dir / f"{member.student_id}.jpg"
-        try:
-            if is_local_recording(ref):
-                dest.write_bytes(Path(ref).read_bytes())
-            else:
-                _download_blob(ref, dest)
-            found = True
-        except Exception:
-            logger.exception("Could not fetch enrollment photo for student %s",
-                             member.student_id)
+        for index, ref in enumerate(refs):
+            dest = enrollment_dir / f"{member.student_id}__{index}.jpg"
+            try:
+                if is_local_recording(ref):
+                    dest.write_bytes(Path(ref).read_bytes())
+                else:
+                    _download_blob(ref, dest)
+                found = True
+            except Exception:
+                logger.exception(
+                    "Could not fetch enrollment sample %s for student %s",
+                    index, member.student_id,
+                )
     return enrollment_dir if found else None
 
 

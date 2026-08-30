@@ -1,9 +1,11 @@
-"""Seat binding — which face in the physical room is which student.
+"""Face binding — which person in the physical room is which student.
 
 A physical group viva has one camera and everyone in frame at once, so before
 lip activity can name a speaker, each face position must be tied to a roster
-member. That is done here: one still frame, MediaPipe for detection, ArcFace
-against each student's enrollment photo.
+member. A short burst is sampled here, using MediaPipe for detection and
+ArcFace against each student's enrollment photo. Repeated observations make
+binding tolerant of different seating distances, momentary head turns and
+blinks without weakening the identity-match threshold.
 
 The split matters for cost. Recognition is expensive but changes only when
 someone moves seats; lip activity is cheap but changes many times a second.
@@ -28,9 +30,9 @@ from attribution.models import BindingMethod, SpeakerBinding
 logger = logging.getLogger(__name__)
 
 
-def enrollment_photo_refs(session) -> dict[str, str]:
-    """student_id -> blob URL of their enrollment photo (only those who have one)."""
-    photos: dict[str, str] = {}
+def enrollment_photo_refs(session) -> dict[str, list[str]]:
+    """student_id -> all guided enrollment sample blob URLs."""
+    photos: dict[str, list[str]] = {}
     if session.group_id:
         members = (
             GroupMember.objects
@@ -38,13 +40,13 @@ def enrollment_photo_refs(session) -> dict[str, str]:
             .select_related('student')
         )
         for member in members:
-            ref = getattr(member.student, 'face_photo_url', '') or ''
-            if ref:
-                photos[str(member.student_id)] = ref
+            refs = member.student.enrollment_face_photos()
+            if refs:
+                photos[str(member.student_id)] = refs
     elif session.student_id:
-        ref = getattr(session.student, 'face_photo_url', '') or ''
-        if ref:
-            photos[str(session.student_id)] = ref
+        refs = session.student.enrollment_face_photos()
+        if refs:
+            photos[str(session.student_id)] = refs
     return photos
 
 
@@ -55,8 +57,97 @@ def missing_enrollments(session) -> list[str]:
     return sorted(roster_ids(session) - set(enrollment_photo_refs(session)))
 
 
-def bind_from_frame(session, frame_bytes: bytes) -> dict:
-    """Detect faces in one frame and bind each to a student.
+def _aggregate_frame_matches(frame_matches: list[list[dict]]) -> list[dict]:
+    """Combine per-frame matches into one conservative identity result.
+
+    A student needs only one valid ArcFace match to remain available, but
+    repeated votes raise the reported confidence. The identity threshold is
+    intentionally unchanged: temporal sampling improves recall without
+    turning a weak nearest-neighbour guess into a student identity.
+    """
+    if not frame_matches:
+        return []
+
+    buckets: dict[str, dict] = {}
+    max_detected = 0
+    best_unknowns: list[dict] = []
+    for frame_index, matches in enumerate(frame_matches):
+        max_detected = max(max_detected, len(matches))
+        unknowns = [match for match in matches if not match.get('student_id')]
+
+        # One identity gets at most one vote per frame. If two crops both
+        # claim the same student, keep the stronger match and leave the other
+        # face unassigned rather than duplicating a person.
+        strongest: dict[str, dict] = {}
+        for match in matches:
+            sid = str(match.get('student_id') or '')
+            if not sid:
+                continue
+            current = strongest.get(sid)
+            if current is None or float(match.get('confidence', 0) or 0) > float(
+                current.get('confidence', 0) or 0
+            ):
+                if current is not None:
+                    unknowns.append({**current, 'student_id': None})
+                strongest[sid] = match
+            else:
+                unknowns.append({**match, 'student_id': None})
+
+        if len(unknowns) > len(best_unknowns):
+            best_unknowns = unknowns
+
+        for sid, match in strongest.items():
+            bucket = buckets.setdefault(sid, {
+                'votes': 0,
+                'confidence_total': 0.0,
+                'latest': match,
+                'latest_frame': -1,
+            })
+            bucket['votes'] += 1
+            bucket['confidence_total'] += max(
+                0.0, min(1.0, float(match.get('confidence', 0) or 0))
+            )
+            if frame_index >= bucket['latest_frame']:
+                bucket['latest'] = match
+                bucket['latest_frame'] = frame_index
+
+    total_frames = len(frame_matches)
+    aggregated: list[dict] = []
+    for sid, bucket in sorted(
+        buckets.items(), key=lambda item: item[1]['votes'], reverse=True,
+    ):
+        votes = int(bucket['votes'])
+        identity_confidence = bucket['confidence_total'] / votes
+        latest = bucket['latest']
+        aggregated.append({
+            'student_id': sid,
+            'track_ref': str(latest.get('track_ref', '') or ''),
+            'bbox': latest.get('bbox'),
+            # Keep this as the actual ArcFace identity score. Temporal support
+            # is reported separately as votes/frames_processed so the two
+            # signals are not mixed into a misleading percentage.
+            'confidence': round(identity_confidence, 4),
+            'identity_confidence': round(identity_confidence, 4),
+            'votes': votes,
+            'frames_processed': total_frames,
+        })
+
+    unknown_count = max(0, max_detected - len(aggregated))
+    for index, match in enumerate(best_unknowns[:unknown_count]):
+        aggregated.append({
+            'student_id': None,
+            'track_ref': str(match.get('track_ref', f'unknown-{index}') or ''),
+            'bbox': match.get('bbox'),
+            'confidence': 0.0,
+            'identity_confidence': float(match.get('confidence', 0) or 0),
+            'votes': 0,
+            'frames_processed': total_frames,
+        })
+    return aggregated
+
+
+def bind_from_frames(session, frame_bytes_list: list[bytes]) -> dict:
+    """Detect faces across a short camera burst and bind them to students.
 
     Returns {'bindings': [...], 'unmatched': int, 'missing_enrollment': [...]}.
     Faces matching no enrolled student are bound with student=None rather than
@@ -72,11 +163,19 @@ def bind_from_frame(session, frame_bytes: bytes) -> dict:
             'error': 'No enrollment photos for this session.',
         }
 
+    frames = [frame for frame in frame_bytes_list if frame]
+    if not frames:
+        raise ValueError('At least one camera frame is required.')
+
     backend = getattr(settings, 'ATTRIBUTION_BINDING_BACKEND', 'modal').lower()
     if backend == 'local':
-        matches = _bind_local(frame_bytes, photos)
+        matches = _bind_local_frames(frames, photos)
     else:
-        matches = _bind_modal(frame_bytes, photos)
+        matches = _bind_modal_frames(frames, photos)
+    frames_processed = max(
+        (int(match.get('frames_processed', 0) or 0) for match in matches),
+        default=len(frames),
+    ) or len(frames)
 
     # Supersede the previous pass rather than deleting it, so evidence already
     # recorded keeps the mapping that was true when it was captured.
@@ -104,13 +203,43 @@ def bind_from_frame(session, frame_bytes: bytes) -> dict:
             'student_id': sid,
             'bbox': binding.bbox,
             'confidence': binding.confidence,
+            'identity_confidence': match.get('identity_confidence'),
+            'votes': match.get('votes', 1),
+            'frames_processed': match.get('frames_processed', frames_processed),
         })
 
     return {
         'bindings': created,
         'unmatched': unmatched,
         'missing_enrollment': missing_enrollments(session),
+        'frames_processed': frames_processed,
     }
+
+
+def bind_from_frame(session, frame_bytes: bytes) -> dict:
+    """Backward-compatible one-frame wrapper."""
+    return bind_from_frames(session, [frame_bytes])
+
+
+def match_test_frames(
+    frame_bytes_list: list[bytes],
+    photos: dict[str, list[str]],
+) -> list[dict]:
+    """Match a diagnostic burst without creating session bindings."""
+    frames = [frame for frame in frame_bytes_list if frame]
+    if not frames:
+        return []
+    backend = getattr(settings, 'ATTRIBUTION_BINDING_BACKEND', 'modal').lower()
+    return (
+        _bind_local_frames(frames, photos)
+        if backend == 'local'
+        else _bind_modal_frames(frames, photos)
+    )
+
+
+def match_test_frame(frame_bytes: bytes, photos: dict[str, list[str]]) -> list[dict]:
+    """Backward-compatible one-frame diagnostic wrapper."""
+    return match_test_frames([frame_bytes], photos)
 
 
 def bind_by_seating(session, order: list[str]) -> dict:
@@ -168,8 +297,11 @@ def current_bindings(session) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def _bind_modal(frame_bytes: bytes, photos: dict[str, str]) -> list[dict]:
-    """Ask the Modal CV app to match faces in this frame against the gallery."""
+def _bind_modal_frames(
+    frame_bytes_list: list[bytes],
+    photos: dict[str, list[str]],
+) -> list[dict]:
+    """Ask Modal to match a camera burst against one enrollment gallery."""
     import requests
 
     url = getattr(settings, 'MODAL_CV_BIND_URL', '')
@@ -184,9 +316,16 @@ def _bind_modal(frame_bytes: bytes, photos: dict[str, str]) -> list[dict]:
 
     payload = {
         'token': token,
-        'frame_b64': base64.b64encode(frame_bytes).decode('ascii'),
+        # Keep frame_b64 for compatibility with an older deployed endpoint;
+        # the updated Modal app uses frames_b64 and loads ArcFace only once.
+        'frame_b64': base64.b64encode(frame_bytes_list[0]).decode('ascii'),
+        'frames_b64': [
+            base64.b64encode(frame).decode('ascii')
+            for frame in frame_bytes_list
+        ],
         'enrollment_photos': {
-            sid: _sas_for(ref) for sid, ref in photos.items()
+            sid: [_sas_for(ref) for ref in refs]
+            for sid, refs in photos.items()
         },
     }
     response = requests.post(url, json=payload, timeout=120)
@@ -194,11 +333,32 @@ def _bind_modal(frame_bytes: bytes, photos: dict[str, str]) -> list[dict]:
         raise RuntimeError(
             f"Face binding failed ({response.status_code}): {response.text[:300]}"
         )
-    return response.json().get('matches', [])
+    body = response.json()
+    if isinstance(body.get('frame_matches'), list):
+        return _aggregate_frame_matches(body['frame_matches'])
+    # Compatibility until the updated Modal deployment is active. Make the
+    # one-frame fallback explicit instead of pretending all burst frames ran.
+    return [
+        {
+            **match,
+            'identity_confidence': match.get('confidence'),
+            'votes': 1 if match.get('student_id') else 0,
+            'frames_processed': 1,
+        }
+        for match in body.get('matches', [])
+    ]
 
 
-def _bind_local(frame_bytes: bytes, photos: dict[str, str]) -> list[dict]:
-    """Run the CV engine in-process. Dev only — needs the engine's deps."""
+def _bind_modal(frame_bytes: bytes, photos: dict[str, list[str]]) -> list[dict]:
+    """Backward-compatible one-frame Modal wrapper."""
+    return _bind_modal_frames([frame_bytes], photos)
+
+
+def _bind_local_frames(
+    frame_bytes_list: list[bytes],
+    photos: dict[str, list[str]],
+) -> list[dict]:
+    """Run one gallery against a camera burst in-process (development)."""
     import tempfile
     from pathlib import Path
 
@@ -214,24 +374,34 @@ def _bind_local(frame_bytes: bytes, photos: dict[str, str]) -> list[dict]:
     from cv_analysis.services.runner import _download_blob
     from cv_analysis.services.storage import is_local_recording
 
-    frame = cv2.imdecode(np.frombuffer(frame_bytes, np.uint8), cv2.IMREAD_COLOR)
-    if frame is None:
-        raise RuntimeError("Could not decode the binding frame.")
+    frames = [
+        frame
+        for frame in (
+            cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+            for raw in frame_bytes_list
+        )
+        if frame is not None
+    ]
+    if not frames:
+        raise RuntimeError("Could not decode any binding frame.")
 
     decoded: dict[str, object] = {}
     with tempfile.TemporaryDirectory(prefix='attr_bind_') as tmp:
-        for sid, ref in photos.items():
-            dest = Path(tmp) / f"{sid}.jpg"
-            try:
-                if is_local_recording(ref):
-                    dest.write_bytes(Path(ref).read_bytes())
-                else:
-                    _download_blob(ref, dest)
-                image = cv2.imread(str(dest))
-                if image is not None and image.size:
-                    decoded[sid] = image
-            except Exception:
-                logger.exception("Could not load enrollment photo for %s", sid)
+        for sid, refs in photos.items():
+            for index, ref in enumerate(refs):
+                dest = Path(tmp) / f"{sid}__{index}.jpg"
+                try:
+                    if is_local_recording(ref):
+                        dest.write_bytes(Path(ref).read_bytes())
+                    else:
+                        _download_blob(ref, dest)
+                    image = cv2.imread(str(dest))
+                    if image is not None and image.size:
+                        decoded.setdefault(sid, []).append(image)
+                except Exception:
+                    logger.exception(
+                        "Could not load enrollment sample %s for %s", index, sid,
+                    )
 
         if not decoded:
             return []
@@ -245,22 +415,34 @@ def _bind_local(frame_bytes: bytes, photos: dict[str, str]) -> list[dict]:
         finally:
             enroll_mesh.close()
 
-        mesh = MeshPipeline(max_faces=max(5, len(photos) + 1))
+        mesh = MeshPipeline(
+            max_faces=max(5, len(photos) + 1),
+            min_face_detection_confidence=0.3,
+            min_face_presence_confidence=0.3,
+        )
         try:
-            observations = mesh.process_frame(frame)
-            matches = []
-            for obs in observations:
-                crop = mesh.crop(frame, obs)
-                if crop.size == 0:
-                    continue
-                embedding = embedder.embed(crop)
-                sid = gallery.match(embedding)
-                matches.append({
-                    'student_id': sid,
-                    'track_ref': str(obs.track_id),
-                    'bbox': list(obs.bbox),
-                    'confidence': 1.0 if sid else 0.0,
-                })
-            return matches
+            frame_matches = []
+            for frame in frames:
+                matches = []
+                for obs in mesh.process_frame(frame):
+                    crop = mesh.crop(frame, obs)
+                    if crop.size == 0:
+                        continue
+                    sid, similarity = gallery.match_with_score(
+                        embedder.embed(crop)
+                    )
+                    matches.append({
+                        'student_id': sid,
+                        'track_ref': str(obs.track_id),
+                        'bbox': list(obs.bbox),
+                        'confidence': max(0.0, float(similarity)),
+                    })
+                frame_matches.append(matches)
+            return _aggregate_frame_matches(frame_matches)
         finally:
             mesh.close()
+
+
+def _bind_local(frame_bytes: bytes, photos: dict[str, list[str]]) -> list[dict]:
+    """Backward-compatible one-frame local wrapper."""
+    return _bind_local_frames([frame_bytes], photos)

@@ -210,7 +210,7 @@ _PHOTO_SUFFIXES = {'.jpg', '.jpeg', '.png'}
 def load_enrollment_photos(
     enrollment_dir: Path, roster_ids: set[str]
 ) -> dict[str, "object"]:
-    """Read ``<student_id>.jpg`` reference photos for roster members.
+    """Read legacy and ``<student_id>__<sample>.jpg`` enrollment images.
 
     Filenames that aren't roster student_ids, and files that don't decode,
     are ignored — an absent photo simply means that student is never matched
@@ -224,11 +224,12 @@ def load_enrollment_photos(
     for path in sorted(enrollment_dir.iterdir()):
         if path.suffix.lower() not in _PHOTO_SUFFIXES:
             continue
-        if path.stem not in roster_ids:
+        student_id = path.stem.split('__', 1)[0]
+        if student_id not in roster_ids:
             continue
         image = cv2.imread(str(path))
         if image is not None and image.size:
-            photos[path.stem] = image
+            photos.setdefault(student_id, []).append(image)
     return photos
 
 

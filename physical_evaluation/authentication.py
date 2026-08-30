@@ -15,6 +15,13 @@ class PhysicalKioskPrincipal:
     role: str = 'physical_kiosk'
     is_authenticated: bool = True
     is_anonymous: bool = False
+    # Attribution endpoints distinguish a trusted room device from a normal
+    # account through this capability flag. Without it, a valid kiosk token
+    # was authenticated and then rejected by session-participant checks.
+    is_kiosk: bool = True
+    is_station: bool = False
+    id: None = None
+    pk: None = None
 
 
 class PhysicalKioskAuthentication(BaseAuthentication):
