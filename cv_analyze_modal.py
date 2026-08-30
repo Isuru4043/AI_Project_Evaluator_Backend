@@ -126,8 +126,8 @@ def analyze_recording(
 ) -> dict:
     """Analyze one recording; returns the SessionSummary artifact as JSON.
 
-    ``enrollment_photos`` maps student_id -> SAS URL of that student's
-    reference face photo. Supplied for group sessions only; without it the
+    ``enrollment_photos`` maps student_id -> SAS URLs for that student's
+    guided reference samples. Supplied for group sessions only; without it the
     engine falls back to seating order.
     """
     import json
@@ -154,13 +154,20 @@ def analyze_recording(
     if enrollment_photos:
         enrollment_dir = work / "enroll"
         enrollment_dir.mkdir(exist_ok=True)
-        for student_id, photo_url in enrollment_photos.items():
-            try:
-                _download(photo_url, enrollment_dir / f"{student_id}.jpg")
-            except Exception as e:
-                # A missing photo costs that student face-identification (they
-                # resolve to unknown); it must not fail the whole analysis.
-                print(f"enrollment photo failed for {student_id}: {e}", flush=True)
+        for student_id, value in enrollment_photos.items():
+            urls = value if isinstance(value, list) else [value]
+            for index, photo_url in enumerate(urls):
+                try:
+                    _download(
+                        photo_url,
+                        enrollment_dir / f"{student_id}__{index}.jpg",
+                    )
+                except Exception as e:
+                    # One missing sample must not discard the other views.
+                    print(
+                        f"enrollment sample {index} failed for {student_id}: {e}",
+                        flush=True,
+                    )
 
     summary = analyze(
         video_path,
@@ -172,22 +179,16 @@ def analyze_recording(
 
 
 @app.function(image=engine_image, cpu=2.0, memory=4096, timeout=300)
-def bind_faces(frame_b64: str, enrollment_photos: dict) -> list:
-    """Match every face in one still frame against the enrolment gallery.
+def bind_faces(
+    frame_b64: str,
+    enrollment_photos: dict,
+    frames_b64: list | None = None,
+) -> dict:
+    """Match faces across a short camera burst against the enrolment gallery.
 
-    This is the physical exam-station path: one camera, the whole group in
-    frame, so before lip activity can name a speaker each face has to be tied
-    to a roster student. Recognition is expensive but only changes when
-    someone moves seats, so it runs here — rarely, on one frame — while the
-    kiosk does the continuous per-frame work.
-
-    Synchronous rather than submit/poll: this is a handful of embeddings on a
-    single image (a second or two), not a 20-minute video, and the kiosk is
-    waiting on it before questioning starts.
-
-    Returns [{student_id, track_ref, bbox, confidence}]. A face matching no
-    enrolled student comes back with student_id=None — that is the
-    extra-person case the integrity flags exist for, never a nearest guess.
+    The gallery and models are loaded once for the whole burst. Repeated
+    observations tolerate blinking, head turns and different seating
+    distances without weakening the ArcFace identity threshold.
     """
     import base64
     import sys
@@ -203,31 +204,43 @@ def bind_faces(frame_b64: str, enrollment_photos: dict) -> list:
     )
     from exam_cv.faces.mesh import MeshPipeline  # noqa: E402
 
-    frame = cv2.imdecode(
-        np.frombuffer(base64.b64decode(frame_b64), np.uint8), cv2.IMREAD_COLOR
-    )
-    if frame is None:
-        raise ValueError("could not decode the binding frame")
+    encoded_frames = (frames_b64 or [frame_b64])[:10]
+    frames = [
+        decoded
+        for decoded in (
+            cv2.imdecode(
+                np.frombuffer(base64.b64decode(encoded), np.uint8),
+                cv2.IMREAD_COLOR,
+            )
+            for encoded in encoded_frames
+        )
+        if decoded is not None
+    ]
+    if not frames:
+        raise ValueError("could not decode any binding frame")
 
     work = Path("/tmp/bind")
     work.mkdir(parents=True, exist_ok=True)
 
     photos = {}
-    for student_id, photo_url in enrollment_photos.items():
-        dest = work / f"{student_id}.jpg"
-        try:
-            _download(photo_url, dest)
-            image = cv2.imread(str(dest))
-            if image is not None and image.size:
-                photos[student_id] = image
-        except Exception as e:
-            # An unreadable photo costs that student recognition; everyone
-            # else must still be bound.
-            print(f"enrollment photo failed for {student_id}: {e}", flush=True)
+    for student_id, value in enrollment_photos.items():
+        urls = value if isinstance(value, list) else [value]
+        for index, photo_url in enumerate(urls):
+            dest = work / f"{student_id}__{index}.jpg"
+            try:
+                _download(photo_url, dest)
+                image = cv2.imread(str(dest))
+                if image is not None and image.size:
+                    photos.setdefault(student_id, []).append(image)
+            except Exception as e:
+                print(
+                    f"enrollment sample {index} failed for {student_id}: {e}",
+                    flush=True,
+                )
 
     if not photos:
         print("no usable enrollment photos - nothing to match against", flush=True)
-        return []
+        return {"frame_matches": [], "frames_processed": len(frames)}
 
     embedder = ArcFaceEmbedder()
 
@@ -246,32 +259,52 @@ def bind_faces(frame_b64: str, enrollment_photos: dict) -> list:
             flush=True,
         )
 
-    mesh = MeshPipeline(max_faces=max(5, len(photos) + 1))
+    mesh = MeshPipeline(
+        max_faces=max(5, len(photos) + 1),
+        min_face_detection_confidence=0.3,
+        min_face_presence_confidence=0.3,
+    )
     try:
-        matches = []
-        for obs in mesh.process_frame(frame):
-            crop = mesh.crop(frame, obs)
-            if crop.size == 0:
-                continue
-            student_id = gallery.match(embedder.embed(crop))
-            matches.append({
-                "student_id": student_id,
-                "track_ref": str(obs.track_id),
-                "bbox": [float(v) for v in obs.bbox],
-                "confidence": 1.0 if student_id else 0.0,
-            })
+        frame_matches = []
+        for frame in frames:
+            matches = []
+            for obs in mesh.process_frame(frame):
+                crop = mesh.crop(frame, obs)
+                if crop.size == 0:
+                    continue
+                student_id, similarity = gallery.match_with_score(
+                    embedder.embed(crop)
+                )
+                matches.append({
+                    "student_id": student_id,
+                    "track_ref": str(obs.track_id),
+                    "bbox": [float(v) for v in obs.bbox],
+                    "confidence": max(0.0, float(similarity)),
+                })
+            frame_matches.append(matches)
     finally:
         mesh.close()
 
-    recognised = sum(1 for m in matches if m["student_id"])
-    print(f"bound {recognised}/{len(matches)} faces to students", flush=True)
-    return matches
+    recognised = {
+        match["student_id"]
+        for matches in frame_matches
+        for match in matches
+        if match["student_id"]
+    }
+    print(
+        f"burst bound {len(recognised)} students across {len(frames)} frames",
+        flush=True,
+    )
+    return {
+        "frame_matches": frame_matches,
+        "frames_processed": len(frames),
+    }
 
 
 @app.function(image=api_image, secrets=[token_secret], timeout=300)
 @modal.fastapi_endpoint(method="POST")
 def bind(payload: dict):
-    """Bind the faces in one frame to roster students. Synchronous."""
+    """Bind faces from a short camera burst to roster students."""
     _check_token(payload.get("token", ""))
 
     from fastapi import HTTPException
@@ -286,10 +319,14 @@ def bind(payload: dict):
         )
 
     try:
-        matches = bind_faces.remote(frame_b64, photos)
+        result = bind_faces.remote(
+            frame_b64,
+            photos,
+            payload.get("frames_b64") or [frame_b64],
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"binding failed: {str(e)[:300]}")
-    return {"matches": matches}
+    return result
 
 
 @app.function(image=api_image, secrets=[token_secret], timeout=60)

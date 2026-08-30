@@ -60,6 +60,18 @@ def enqueue_report_indexing(submission_id, report_bytes: bytes,
     _EXECUTOR.submit(_run_report_indexing, submission_id, report_bytes, code_submission_id)
 
 
+def run_report_indexing(submission_id, report_bytes: bytes,
+                        code_submission_id=None) -> None:
+    """Run report indexing synchronously and return only when it finishes.
+
+    Management commands and other offline provisioning workflows need a firm
+    readiness boundary: they must not create a scheduled viva and then exit
+    while the submission is still being indexed in an in-process thread.
+    HTTP uploads should continue using :func:`enqueue_report_indexing`.
+    """
+    _run_report_indexing(submission_id, report_bytes, code_submission_id)
+
+
 def _run_report_indexing(submission_id, report_bytes: bytes,
                          code_submission_id=None) -> None:
     """

@@ -135,7 +135,13 @@ class MeshPipeline:
     (rule 1: one detector).
     """
 
-    def __init__(self, max_faces: int = 5, model_path=None):
+    def __init__(
+        self,
+        max_faces: int = 5,
+        model_path=None,
+        min_face_detection_confidence: float = 0.5,
+        min_face_presence_confidence: float = 0.5,
+    ):
         import mediapipe as mp  # lazy
         from mediapipe.tasks import python as mp_python
         from mediapipe.tasks.python import vision as mp_vision
@@ -148,7 +154,8 @@ class MeshPipeline:
             base_options=mp_python.BaseOptions(model_asset_path=path),
             num_faces=max_faces,
             running_mode=mp_vision.RunningMode.IMAGE,  # stateless; we track ourselves
-            min_face_detection_confidence=0.5,
+            min_face_detection_confidence=min_face_detection_confidence,
+            min_face_presence_confidence=min_face_presence_confidence,
             min_tracking_confidence=0.5,
         )
         self._landmarker = mp_vision.FaceLandmarker.create_from_options(options)

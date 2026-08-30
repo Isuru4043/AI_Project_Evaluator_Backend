@@ -102,3 +102,17 @@ class TestBuildGalleryFromPhotos:
 
         assert gallery.enrolled_ids() == set()
         assert skipped == []
+
+    def test_enrolls_multiple_clear_samples_for_one_student(self):
+        samples = [photo(1.0), photo(2.0), photo(3.0)]
+        mesh = FakeMesh({1.0: 1, 2.0: 1, 3.0: 1})
+        embedder = FakeEmbedder()
+
+        gallery, skipped = build_gallery_from_photos(
+            {'s1': samples}, mesh, embedder,
+        )
+
+        assert skipped == []
+        assert gallery.enrolled_ids() == {'s1'}
+        assert embedder.calls == 3
+        assert gallery.match(embedder.embed(np.full((4, 4), 3.0))) == 's1'

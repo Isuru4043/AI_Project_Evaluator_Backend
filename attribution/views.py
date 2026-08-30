@@ -29,6 +29,7 @@ from core.models import (
     ExaminerProfile,
     GroupMember,
     ProjectExaminer,
+    StudentProfile,
     VivaAnswer,
 )
 from physical_evaluation.authentication import PhysicalKioskAuthentication
@@ -36,10 +37,17 @@ from physical_evaluation.models import PhysicalKioskAccess
 from attribution.models import AnswerAttribution, UnknownSpeaker
 from attribution.services import binding as binding_service
 from attribution.services import engine, ingest
+from projects.permissions import IsExaminer
 
 logger = logging.getLogger(__name__)
 
 MAX_FRAME_BYTES = 8 * 1024 * 1024
+MAX_BINDING_FRAMES = 10
+MAX_BINDING_TOTAL_BYTES = 32 * 1024 * 1024
+SPEAKER_TEST_EMAILS = {
+    'student@university.edu',
+    'isuru.akalanka8058@gmail.com',
+}
 
 
 def _err(message, code=400):
@@ -51,6 +59,20 @@ def _ok(data, message='', code=200):
     if message:
         body['message'] = message
     return Response(body, status=code)
+
+
+def _read_binding_frames(request):
+    """Read a bounded camera burst while accepting the old `frame` field."""
+    uploads = request.FILES.getlist('frames') or request.FILES.getlist('frame')
+    if not uploads:
+        return None, 'Send one or more camera frames.'
+    if len(uploads) > MAX_BINDING_FRAMES:
+        return None, f'Too many frames (max {MAX_BINDING_FRAMES}).'
+    if any(upload.size > MAX_FRAME_BYTES for upload in uploads):
+        return None, 'A frame is too large (max 8MB each).'
+    if sum(upload.size for upload in uploads) > MAX_BINDING_TOTAL_BYTES:
+        return None, 'Camera burst is too large (max 32MB total).'
+    return [upload.read() for upload in uploads], None
 
 
 def _get_session(session_id):
@@ -220,14 +242,12 @@ class SeatBindingView(APIView):
                 'Bound by seating order.',
             )
 
-        frame = request.FILES.get('frame')
-        if not frame:
-            return _err('Send a frame image, or a seating_order list.')
-        if frame.size > MAX_FRAME_BYTES:
-            return _err('Frame too large (max 8MB).')
+        frames, frame_error = _read_binding_frames(request)
+        if frame_error:
+            return _err(f'{frame_error} Alternatively, send a seating_order list.')
 
         try:
-            result = binding_service.bind_from_frame(session, frame.read())
+            result = binding_service.bind_from_frames(session, frames)
         except Exception as e:
             logger.exception('Seat binding failed for session %s', session_id)
             return _err(f'Face binding failed: {e}', code=502)
@@ -235,6 +255,82 @@ class SeatBindingView(APIView):
         if result.get('error'):
             return _err(result['error'])
         return _ok(result, 'Faces bound to students.')
+
+
+class SpeakerDetectionTestView(APIView):
+    """Examiner-only face binding test; never writes session evidence."""
+
+    authentication_classes = [CookieJWTAuthentication]
+    permission_classes = [IsAuthenticated, IsExaminer]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        frames, frame_error = _read_binding_frames(request)
+        if frame_error:
+            return _err(frame_error)
+
+        students = list(
+            StudentProfile.objects
+            .filter(user__email__in=SPEAKER_TEST_EMAILS)
+            .select_related('user')
+        )
+        found = {student.user.email.lower() for student in students}
+        missing_accounts = sorted(SPEAKER_TEST_EMAILS - found)
+        photos = {
+            str(student.id): student.enrollment_face_photos()
+            for student in students
+            if student.enrollment_face_photos()
+        }
+        missing_photos = sorted(
+            student.user.email
+            for student in students
+            if not student.enrollment_face_photos()
+        )
+        if not photos:
+            return _err('Neither test student has an enrollment face photo.')
+
+        try:
+            matches = binding_service.match_test_frames(frames, photos)
+        except Exception as exc:
+            logger.exception('Speaker detection diagnostic binding failed')
+            return _err(f'Face binding failed: {exc}', code=502)
+
+        by_id = {str(student.id): student for student in students}
+        bindings = []
+        for match in matches:
+            student = by_id.get(str(match.get('student_id') or ''))
+            bindings.append({
+                'student_id': str(student.id) if student else None,
+                'student_name': student.user.full_name if student else 'Unknown face',
+                'email': student.user.email if student else None,
+                'bbox': match.get('bbox'),
+                'confidence': float(match.get('confidence', 0) or 0),
+                'identity_confidence': match.get('identity_confidence'),
+                'votes': int(match.get('votes', 1) or 0),
+                'frames_processed': int(
+                    match.get('frames_processed', len(frames)) or len(frames)
+                ),
+            })
+        frames_processed = max(
+            (item['frames_processed'] for item in bindings),
+            default=len(frames),
+        )
+        return _ok({
+            'bindings': bindings,
+            'accounts': [
+                {
+                    'student_id': str(student.id),
+                    'student_name': student.user.full_name,
+                    'email': student.user.email,
+                    'has_photo': bool(student.enrollment_face_photos()),
+                    'sample_count': len(student.enrollment_face_photos()),
+                }
+                for student in students
+            ],
+            'missing_accounts': missing_accounts,
+            'missing_photos': missing_photos,
+            'frames_processed': frames_processed,
+        })
 
 
 class StationArtifactView(APIView):

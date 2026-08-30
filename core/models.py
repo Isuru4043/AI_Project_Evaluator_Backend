@@ -131,6 +131,18 @@ class StudentProfile(models.Model):
     # identify which member is speaking in a GROUP viva recording, so answers
     # route to the right student. Never shown to other students.
     face_photo_url = models.TextField(null=True, blank=True)
+    # A guided enrollment stores several complementary views. The legacy
+    # face_photo_url remains the primary preview/backward-compatible sample;
+    # recognition consumers use this list and fall back to that field.
+    face_photo_urls = models.JSONField(default=list, blank=True)
+
+    def enrollment_face_photos(self):
+        """Return unique enrollment sample URLs, including legacy records."""
+        urls = self.face_photo_urls if isinstance(self.face_photo_urls, list) else []
+        result = [str(url) for url in urls if isinstance(url, str) and url]
+        if self.face_photo_url and self.face_photo_url not in result:
+            result.insert(0, self.face_photo_url)
+        return result
 
     class Meta:
         verbose_name = 'Student Profile'

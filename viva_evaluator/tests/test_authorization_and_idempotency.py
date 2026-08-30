@@ -99,7 +99,5 @@ class AnswerIdempotencyTests(unittest.TestCase):
     def test_speaker_key_distinguishes_group_and_student(self):
         self.assertEqual(speaker_key("group"), "group")
         self.assertEqual(speaker_key("abc"), "student:abc")
-
-
 if __name__ == "__main__":
     unittest.main()

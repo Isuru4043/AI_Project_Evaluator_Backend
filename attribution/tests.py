@@ -34,6 +34,46 @@ def window(start_s=0, end_s=30):
     return T0 + timedelta(seconds=start_s), T0 + timedelta(seconds=end_s)
 
 
+class BindingBurstTests(SimpleTestCase):
+    def test_students_detected_in_different_frames_are_both_kept(self):
+        from attribution.services.binding import _aggregate_frame_matches
+
+        matches = _aggregate_frame_matches([
+            [{'student_id': ALICE, 'bbox': [0, 0, .2, .2], 'confidence': .7}],
+            [{'student_id': BOB, 'bbox': [.5, 0, .7, .2], 'confidence': .8}],
+            [
+                {'student_id': ALICE, 'bbox': [0, 0, .2, .2], 'confidence': .75},
+                {'student_id': BOB, 'bbox': [.5, 0, .7, .2], 'confidence': .78},
+            ],
+        ])
+
+        by_student = {item['student_id']: item for item in matches}
+        self.assertEqual(set(by_student), {ALICE, BOB})
+        self.assertEqual(by_student[ALICE]['votes'], 2)
+        self.assertEqual(by_student[BOB]['frames_processed'], 3)
+
+    def test_duplicate_identity_in_one_frame_becomes_unknown(self):
+        from attribution.services.binding import _aggregate_frame_matches
+
+        matches = _aggregate_frame_matches([[
+            {'student_id': ALICE, 'bbox': [0, 0, .2, .2], 'confidence': .7},
+            {'student_id': ALICE, 'bbox': [.5, 0, .7, .2], 'confidence': .6},
+        ]])
+
+        self.assertEqual(sum(item['student_id'] == ALICE for item in matches), 1)
+        self.assertEqual(sum(item['student_id'] is None for item in matches), 1)
+
+
+class PhysicalKioskAttributionAuthTests(SimpleTestCase):
+    def test_authenticated_kiosk_is_a_session_participant(self):
+        from attribution.views import _is_participant
+        from physical_evaluation.authentication import PhysicalKioskPrincipal
+
+        principal = PhysicalKioskPrincipal(access_id='access-1')
+        self.assertTrue(principal.is_kiosk)
+        self.assertTrue(_is_participant(principal, object()))
+
+
 class OverlapTests(SimpleTestCase):
     def test_full_containment(self):
         ws, we = window(0, 30)

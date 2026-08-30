@@ -87,6 +87,44 @@ def acquire_claim(*, session, question, speaker, idempotency_key, request_hash):
                 claim = VivaAnswerProcessingClaim.objects.select_for_update().get(
                     pk=claim.pk
                 )
+
+            # A worker can disappear after acquiring the claim but before it
+            # persists an answer (process restart, dropped DB connection, hard
+            # timeout). Once that lease has expired, binding the question
+            # forever to the first transcript hash makes recovery impossible:
+            # speech recognition will rarely reproduce byte-identical text.
+            #
+            # Replacing the request identity is safe only when the abandoned
+            # attempt saved no answer. Completed claims and failed/expired
+            # claims that already persisted an answer remain immutable.
+            recoverable = (
+                claim.status == VivaAnswerProcessingClaim.Status.FAILED
+                or (
+                    claim.status == VivaAnswerProcessingClaim.Status.PROCESSING
+                    and claim.lease_expires_at <= now
+                )
+            )
+            answer_was_persisted = claim.question.answers.filter(
+                deduplication_key=claim.speaker_key,
+            ).exists()
+            if not created and recoverable and not answer_was_persisted:
+                claim.status = VivaAnswerProcessingClaim.Status.PROCESSING
+                claim.idempotency_key = idempotency_key
+                claim.request_hash = request_hash
+                claim.owner_token = owner_token
+                claim.lease_expires_at = now + timedelta(seconds=LEASE_SECONDS)
+                claim.response_payload = None
+                claim.response_status = 200
+                claim.error_code = ""
+                claim.save(
+                    update_fields=[
+                        "status", "idempotency_key", "request_hash",
+                        "owner_token", "lease_expires_at", "response_payload",
+                        "response_status", "error_code", "updated_at",
+                    ]
+                )
+                return ClaimResult(claim, "process")
+
             if claim.idempotency_key != idempotency_key:
                 raise IdempotencyConflict(
                     "This question already has a submission with another idempotency key."

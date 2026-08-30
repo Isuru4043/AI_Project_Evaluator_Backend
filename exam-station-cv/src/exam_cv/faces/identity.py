@@ -54,27 +54,41 @@ class EnrollmentGallery:
     def enroll(self, student_id: str, embedding: np.ndarray) -> None:
         self._gallery.setdefault(student_id, []).append(embedding)
 
-    def match(self, embedding: np.ndarray, threshold: float = 0.35) -> Optional[str]:
-        """Best cosine match above threshold, else None (unknown face)."""
-        best_id, best_sim = None, threshold
+    def match_with_score(
+        self,
+        embedding: np.ndarray,
+        threshold: float = 0.35,
+    ) -> tuple[Optional[str], float]:
+        """Return the best accepted identity and its cosine similarity.
+
+        Detection confidence and identity confidence are different signals.
+        Callers that surface a confidence value must report the ArcFace
+        similarity rather than a hard-coded success value.
+        """
+        best_id, best_sim = None, -1.0
         for sid, embs in self._gallery.items():
             sim = max(cosine(embedding, e) for e in embs)
             if sim > best_sim:
                 best_id, best_sim = sid, sim
-        return best_id
+        return (best_id if best_sim > threshold else None), best_sim
+
+    def match(self, embedding: np.ndarray, threshold: float = 0.35) -> Optional[str]:
+        """Best cosine match above threshold, else None (unknown face)."""
+        return self.match_with_score(embedding, threshold)[0]
 
     def enrolled_ids(self) -> set[str]:
         return set(self._gallery.keys())
 
 
 def build_gallery_from_photos(
-    photos: dict[str, np.ndarray],
+    photos: dict[str, np.ndarray | list[np.ndarray]],
     mesh,
     embedder: FaceEmbedder,
 ) -> tuple["EnrollmentGallery", list[str]]:
     """Enroll students from their reference face photos.
 
-    ``photos`` maps student_id → a decoded BGR image. ``mesh`` must be a
+    ``photos`` maps student_id to one decoded image or a list of guided
+    enrollment samples. ``mesh`` must be a
     throwaway MeshPipeline (its tracker state is mutated here and would
     otherwise pollute the video pass); it is the sole detector, so ArcFace
     still never runs its own detection (rule 1).
@@ -85,16 +99,20 @@ def build_gallery_from_photos(
     """
     gallery = EnrollmentGallery()
     skipped: list[str] = []
-    for student_id, image in photos.items():
-        observations = mesh.process_frame(image)
-        if len(observations) != 1:
+    for student_id, value in photos.items():
+        samples = value if isinstance(value, (list, tuple)) else [value]
+        enrolled = 0
+        for image in samples:
+            observations = mesh.process_frame(image)
+            if len(observations) != 1:
+                continue
+            crop = mesh.crop(image, observations[0])
+            if crop.size == 0:
+                continue
+            gallery.enroll(student_id, embedder.embed(crop))
+            enrolled += 1
+        if not enrolled:
             skipped.append(student_id)
-            continue
-        crop = mesh.crop(image, observations[0])
-        if crop.size == 0:
-            skipped.append(student_id)
-            continue
-        gallery.enroll(student_id, embedder.embed(crop))
     return gallery, skipped
 
 
