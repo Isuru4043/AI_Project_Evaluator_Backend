@@ -35,6 +35,9 @@ urlpatterns = [
     # Speaker attribution — /api/sessions/<id>/attribution/...
     path('api/', include('attribution.urls')),
 
+    # Physiological signals (physical stations) - /api/sessions/<id>/physio/...
+    path('api/', include('physiology.urls')),
+
     # Physical evaluation kiosk — /api/physical/...
     path('api/physical/', include('physical_evaluation.urls')),
 ]

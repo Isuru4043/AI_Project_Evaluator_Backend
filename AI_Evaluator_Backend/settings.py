@@ -57,6 +57,7 @@ INSTALLED_APPS = [
     'agora_service',
     'cv_analysis',
     'attribution',
+    'physiology',
     'physical_evaluation',
     'django_q',
 ]
