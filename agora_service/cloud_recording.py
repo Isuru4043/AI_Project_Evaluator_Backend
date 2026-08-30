@@ -29,8 +29,9 @@ _BASE_URL = 'https://api.agora.io/v1/apps'
 # UID the recording client joins as — must not collide with real participants.
 RECORDING_UID = 88888
 
-# Agora storageConfig vendor code for Microsoft Azure.
-_VENDOR_AZURE = 2
+# Agora storageConfig vendor code for Microsoft Azure. Vendor 2 is Alibaba
+# Cloud OSS; using it with Azure credentials makes recording start/upload fail.
+_VENDOR_AZURE = 5
 
 
 def is_enabled() -> bool:
@@ -185,7 +186,9 @@ def stop_recording(session) -> Optional[dict]:
             headers=_auth_header(), timeout=30,
         )
         result = None
+        stopped = False
         if resp.status_code in (200, 201):
+            stopped = True
             server_response = resp.json().get('serverResponse', {})
             file_list = server_response.get('fileList', [])
             mp4 = next(
@@ -203,11 +206,15 @@ def stop_recording(session) -> Optional[dict]:
             logger.error('cloud_recording: stop failed %d %s',
                          resp.status_code, resp.text[:400])
 
-        session.agora_recording_resource_id = ''
-        session.agora_recording_sid = ''
-        session.save(update_fields=[
-            'agora_recording_resource_id', 'agora_recording_sid',
-        ])
+        # Preserve the handles after an HTTP failure so an idempotent
+        # finalization retry can stop the same recording. Once Agora confirms
+        # the stop, clear them even if its response did not contain a file.
+        if stopped:
+            session.agora_recording_resource_id = ''
+            session.agora_recording_sid = ''
+            session.save(update_fields=[
+                'agora_recording_resource_id', 'agora_recording_sid',
+            ])
         return result
 
     except Exception:

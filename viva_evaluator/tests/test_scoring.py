@@ -76,6 +76,7 @@ def test_aggregate_student_score():
     # Answer 1: Group question, scored 8.0 by AI
     ans1 = MagicMock()
     ans1.student = None  # Group answer
+    ans1.student_id = None
     ans1.ai_answer_score = Decimal('8.0')
     ans1.examiner_override_score = None
     
@@ -83,12 +84,14 @@ def test_aggregate_student_score():
     ans2 = MagicMock()
     ans2.student = MagicMock()
     ans2.student.id = 'student_uuid'
+    ans2.student_id = 'student_uuid'
     ans2.ai_answer_score = Decimal('5.0')
     ans2.examiner_override_score = Decimal('7.0')
     
     # Answer 3: Clarification re-ask, unscored (should be ignored)
     ans3 = MagicMock()
     ans3.student = None
+    ans3.student_id = None
     ans3.ai_answer_score = None
     ans3.examiner_override_score = None
     
@@ -96,6 +99,7 @@ def test_aggregate_student_score():
     ans4 = MagicMock()
     ans4.student = MagicMock()
     ans4.student.id = 'other_uuid'
+    ans4.student_id = 'other_uuid'
     ans4.ai_answer_score = Decimal('10.0')
     ans4.examiner_override_score = None
     
@@ -127,6 +131,7 @@ def test_aggregate_student_score_group_mode():
     
     ans1 = MagicMock()
     ans1.student = None
+    ans1.student_id = None
     ans1.ai_answer_score = Decimal('5.0')
     ans1.examiner_override_score = None
     
@@ -162,3 +167,42 @@ class ScoringAggregationTests(TestCase):
 
     def test_empty_session(self):
         test_aggregate_empty_session()
+
+    def test_individual_answer_is_not_shared_with_a_contributor(self):
+        criterion = MockCriteria('individual', 'Individual Knowledge', 10.0, True)
+        owner = MagicMock(id='owner')
+        contributor = MagicMock(id='contributor')
+        answer = MagicMock(
+            student=owner,
+            student_id='owner',
+            ai_answer_score=Decimal('8.0'),
+            examiner_override_score=None,
+        )
+        session = MockSession([MockQuestion(criterion, [answer])])
+
+        owner_result = ScoringService.aggregate_student_score(session, owner)
+        contributor_result = ScoringService.aggregate_student_score(
+            session, contributor,
+        )
+
+        self.assertEqual(owner_result['percentage'], 80.0)
+        self.assertEqual(contributor_result['grade'], 'N/A')
+
+    def test_ai_total_can_be_calculated_without_examiner_override(self):
+        criterion = MockCriteria('individual', 'Individual Knowledge', 10.0, True)
+        student = MagicMock(id='student')
+        answer = MagicMock(
+            student=student,
+            student_id='student',
+            ai_answer_score=Decimal('5.0'),
+            examiner_override_score=Decimal('9.0'),
+        )
+        session = MockSession([MockQuestion(criterion, [answer])])
+
+        result = ScoringService.aggregate_student_score(
+            session,
+            student,
+            use_examiner_overrides=False,
+        )
+
+        self.assertEqual(result['percentage'], 50.0)

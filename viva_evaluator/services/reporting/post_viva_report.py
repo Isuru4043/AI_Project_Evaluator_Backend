@@ -55,6 +55,12 @@ def generate_post_viva_report(session) -> Dict:
     if not raw_state:
         raw_state = {'group': {}}
 
+    # BKT state keys reflect who happened to answer, not the enrolled roster.
+    # Reports must still exist for quiet or not-yet-identified group members.
+    from viva_evaluator.services.session_reports import session_students
+    for student in session_students(session):
+        raw_state.setdefault(str(student.id), {})
+
     rubric_meta = _load_rubric_meta(session.project)
     
     # --- CLEAN UP SPEECH-TO-TEXT TRANSCRIPTS ---

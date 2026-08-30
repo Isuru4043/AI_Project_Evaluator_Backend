@@ -5,8 +5,7 @@ End-Viva media upload, and Student Session Status.
 
 from datetime import date
 
-from django.core.exceptions import ValidationError
-from django.db import close_old_connections, transaction
+from django.db import transaction
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -14,7 +13,7 @@ from rest_framework.views import APIView
 
 from core.models import (
     EvaluationSession, ExaminerProfile, GroupMember, Project,
-    ProjectExaminer, SessionRecording, StudentProfile, VivaQuestion,
+    ProjectExaminer, StudentProfile, VivaQuestion,
     SessionPresence,
 )
 from projects.permissions import IsExaminer, IsStudent
@@ -24,6 +23,11 @@ from sessions_app.serializers import (
     VivaQuestionSerializer, VivaQuestionUpdateSerializer,
 )
 from viva_evaluator.permissions import VivaSessionPermission
+from sessions_app.services.recording_finalizer import (
+    RecordingFinalizationError,
+    finalize_online_recording,
+    recording_owner,
+)
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -71,28 +75,6 @@ def _start_recording_and_stt(session):
         threading.Thread(target=start_stt, args=(session,), daemon=True).start()
 
 
-def _recording_owner(session):
-    """The row that holds this channel's cloud-recording handles.
-
-    A group viva is N session rows sharing ONE Agora channel, so the recording
-    resource_id/sid must live on a single deterministic row — otherwise a start
-    triggered from one member's row and the stop issued against another's would
-    never pair up, and the recording would run until Agora's idle timeout with
-    nobody collecting the file URL. _activate_session sets
-    agora_channel_name = str(<id>) of the row that opened the channel, so that
-    row owns the recording for every sibling.
-    """
-    if not session.group_id or not session.agora_channel_name:
-        return session
-    try:
-        owner = EvaluationSession.objects.filter(
-            id=session.agora_channel_name,
-        ).first()
-    except (ValueError, ValidationError):
-        return session  # channel name isn't a session id (legacy row)
-    return owner or session
-
-
 def _start_viva_recording(session):
     """Start Agora Cloud Recording of the channel (non-blocking, optional).
 
@@ -112,7 +94,7 @@ def _start_viva_recording(session):
     if not rec_enabled():
         return
 
-    owner = _recording_owner(session)
+    owner = recording_owner(session)
     if owner.agora_recording_sid:
         return  # already recording this channel
 
@@ -487,7 +469,7 @@ class EndVivaView(APIView):
             if not ep or not _is_assigned(ep, session.project):
                 return _err('You are not assigned to this project.', code=403)
 
-            if session.status != 'in_progress':
+            if session.status not in ('in_progress', 'completed'):
                 return _err('No viva is currently in progress for this session.')
 
             video_file = request.FILES.get('video_file')
@@ -520,67 +502,19 @@ class EndVivaView(APIView):
                     audio_file, str(session.project_id), str(session.id),
                 )
 
-            # Calculate duration
-            duration_seconds = None
-            if session.actual_start:
-                duration_seconds = int((timezone.now() - session.actual_start).total_seconds())
-
-            # Stop Agora STT bot if running (non-blocking)
-            from agora_service.stt_manager import stop_stt, is_enabled as stt_enabled
-            if stt_enabled() and session.agora_stt_task_id:
-                import threading
-                threading.Thread(
-                    target=stop_stt, args=(session,), daemon=True,
-                ).start()
-
-            # Stop Agora Cloud Recording (synchronous — we need the resulting
-            # Azure blob URL now). This is the authoritative full-channel
-            # recording; prefer it over any client upload when present.
-            from agora_service.cloud_recording import (
-                stop_recording, is_enabled as rec_enabled,
-            )
-            recording_started_at = None
-            # Group vivas: the handles live on the channel-owning sibling row,
-            # which may not be the row this request ended.
-            recording_owner = _recording_owner(session)
-            if rec_enabled() and recording_owner.agora_recording_sid:
-                cloud = stop_recording(recording_owner)
-                if cloud and cloud.get('url'):
-                    video_blob_url = cloud['url']
-                    # True video t0 — what question timecodes are measured
-                    # against. If Agora didn't report sliceStartTime, fall back
-                    # to the viva transition: recording starts within a few
-                    # seconds of it, so chapters stay usable but approximate.
-                    recording_started_at = (
-                        cloud.get('started_at') or session.demo_completed_at
-                    )
-
-            close_old_connections()
-            now = timezone.now()
-            with transaction.atomic():
-                # Create session recording
-                recording = SessionRecording.objects.create(
-                    session=session,
-                    video_file_url=video_blob_url,
-                    audio_file_url=audio_blob_url,
-                    duration_seconds=duration_seconds,
-                    recording_started_at=recording_started_at,
+            try:
+                finalized = finalize_online_recording(
+                    session.id,
+                    fallback_video_url=video_blob_url,
+                    fallback_audio_url=audio_blob_url,
                 )
+            except RecordingFinalizationError as exc:
+                return _err(str(exc), code=502)
 
-                # Update session status
-                if session.group:
-                    EvaluationSession.objects.filter(
-                        project=session.project, group=session.group,
-                    ).update(status='completed')
-                else:
-                    session.status = 'completed'
-                    session.save()
-
-            # Queue post-hoc CV/behavioral analysis of the recording
-            # (no-op when CV_ANALYSIS_ENABLED is off).
-            if video_blob_url:
-                from cv_analysis.services.runner import enqueue_cv_analysis
-                enqueue_cv_analysis(session.id)
+            recording = finalized.recording
+            video_blob_url = recording.video_file_url
+            audio_blob_url = recording.audio_file_url
+            duration_seconds = recording.duration_seconds
 
             # Generate SAS URLs for response
             video_sas = None
@@ -606,9 +540,16 @@ class EndVivaView(APIView):
 
             if audio_blob_url:
                 try:
-                    from AI_Evaluator_Backend.azure_storage import generate_sas_url, AZURE_CONTAINER_AUDIOS
-                    blob_path = f"{session.project_id}/{session.id}/{audio_file.name}"
-                    audio_sas = generate_sas_url(AZURE_CONTAINER_AUDIOS, blob_path)
+                    from urllib.parse import unquote, urlparse
+
+                    from AI_Evaluator_Backend.azure_storage import generate_sas_url
+
+                    container, _, blob_path = (
+                        unquote(urlparse(audio_blob_url).path)
+                        .lstrip('/')
+                        .partition('/')
+                    )
+                    audio_sas = generate_sas_url(container, blob_path)
                 except Exception:
                     audio_sas = audio_blob_url
 

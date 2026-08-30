@@ -3,8 +3,19 @@ from datetime import timedelta
 from django.test import TestCase
 from django.utils import timezone
 
-from core.models import EvaluationSession, Project, VivaAnswer, VivaQuestion
-from viva_evaluator.models import VivaAnswerProcessingClaim
+from core.models import (
+    EvaluationSession,
+    GroupMember,
+    Project,
+    RubricCategory,
+    RubricCriteria,
+    StudentGroup,
+    StudentProfile,
+    User,
+    VivaAnswer,
+    VivaQuestion,
+)
+from viva_evaluator.models import VivaAnswerProcessingClaim, VivaQuestionExtension
 from viva_evaluator.services.answer_idempotency import (
     IdempotencyConflict,
     acquire_claim,
@@ -114,3 +125,130 @@ class AnswerClaimRecoveryTests(TestCase):
 
         with self.assertRaises(IdempotencyConflict):
             self.reacquire_with_corrected_answer()
+
+
+class GroupScoringReportTests(TestCase):
+    def setUp(self):
+        self.project = Project.objects.create(
+            project_name="Group scoring",
+            is_group_project=True,
+            evaluation_mode=Project.EvaluationMode.PHYSICAL,
+        )
+        self.group = StudentGroup.objects.create(
+            project=self.project,
+            group_name="Group A",
+        )
+        self.alice = self._student("alice@example.com", "REG-ALICE")
+        self.bob = self._student("bob@example.com", "REG-BOB")
+        GroupMember.objects.create(group=self.group, student=self.alice)
+        GroupMember.objects.create(group=self.group, student=self.bob)
+        self.session = EvaluationSession.objects.create(
+            project=self.project,
+            group=self.group,
+            scheduled_start=timezone.now(),
+            scheduled_end=timezone.now() + timedelta(hours=1),
+            status=EvaluationSession.Status.COMPLETED,
+        )
+        category = RubricCategory.objects.create(
+            project=self.project,
+            category_name="Knowledge",
+            weight_percentage=100,
+        )
+        self.group_criterion = RubricCriteria.objects.create(
+            category=category,
+            criteria_name="Team architecture",
+            max_score=10,
+            is_individual=False,
+        )
+        self.individual_criterion = RubricCriteria.objects.create(
+            category=category,
+            criteria_name="Individual understanding",
+            max_score=10,
+            is_individual=True,
+        )
+
+    @staticmethod
+    def _student(email, registration_number):
+        user = User.objects.create_user(
+            email=email,
+            password="test-password",
+            full_name=email.split('@')[0].title(),
+            role=User.Role.STUDENT,
+        )
+        return StudentProfile.objects.create(
+            user=user,
+            registration_number=registration_number,
+        )
+
+    def _answer(self, order, criterion, score, student=None):
+        question = VivaQuestion.objects.create(
+            session=self.session,
+            project=self.project,
+            question_text=f"Question {order}",
+            question_order=order,
+        )
+        VivaQuestionExtension.objects.create(
+            question=question,
+            criteria=criterion,
+        )
+        return VivaAnswer.objects.create(
+            question=question,
+            student=student,
+            ai_answer_score=score,
+            transcribed_answer="Test answer",
+        )
+
+    def test_group_criteria_are_shared_but_individual_scores_are_separate(self):
+        from viva_evaluator.services.scoring_service import ScoringService
+
+        self._answer(1, self.group_criterion, 8, student=self.alice)
+        self._answer(2, self.individual_criterion, 9, student=self.alice)
+        self._answer(3, self.individual_criterion, 5, student=self.bob)
+
+        alice = ScoringService.aggregate_student_score(self.session, self.alice)
+        bob = ScoringService.aggregate_student_score(self.session, self.bob)
+
+        self.assertEqual(alice['percentage'], 85.0)
+        self.assertEqual(bob['percentage'], 65.0)
+        self.assertNotEqual(alice['grade'], bob['grade'])
+
+    def test_reports_cover_the_complete_roster(self):
+        from viva_evaluator.services.session_reports import (
+            ensure_participant_reports,
+        )
+
+        ensure_participant_reports(self.session)
+
+        report_students = set(
+            self.session.summary_reports.values_list('student_id', flat=True)
+        )
+        self.assertEqual(report_students, {self.alice.id, self.bob.id})
+
+    def test_draft_reports_store_each_students_own_total(self):
+        from viva_evaluator.services.session_reports import (
+            refresh_draft_summary_reports,
+        )
+
+        self._answer(1, self.group_criterion, 8, student=self.alice)
+        self._answer(2, self.individual_criterion, 9, student=self.alice)
+        self._answer(3, self.individual_criterion, 5, student=self.bob)
+
+        refresh_draft_summary_reports(self.session)
+
+        alice_report = self.session.summary_reports.get(student=self.alice)
+        bob_report = self.session.summary_reports.get(student=self.bob)
+        self.assertEqual(float(alice_report.total_final_score), 85.0)
+        self.assertEqual(float(bob_report.total_final_score), 65.0)
+        self.assertEqual(float(alice_report.total_ai_score), 85.0)
+        self.assertEqual(float(bob_report.total_ai_score), 65.0)
+
+    def test_unresolved_individual_answer_blocks_finalization_contract(self):
+        from viva_evaluator.services.session_reports import (
+            unresolved_individual_answers,
+        )
+
+        answer = self._answer(1, self.individual_criterion, 7, student=None)
+
+        unresolved = unresolved_individual_answers(self.session)
+
+        self.assertEqual([row.id for row in unresolved], [answer.id])

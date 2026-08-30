@@ -365,15 +365,14 @@ class AnswerAttribution(models.Model):
 class AnswerContribution(models.Model):
     """How much of one answer each speaker contributed.
 
-    A group answer is often not one person's: two students build on each
-    other, and crediting all of it to whoever talked most overstates one and
-    erases the other. So the marks for an answer are divided by speaking
-    share, and this table is where those shares live.
+    A group answer is often not one person's: two students may build on each
+    other. This table preserves those participation shares for examiner review
+    while the resolved dominant speaker owns marks for individual criteria.
+    Group-criterion marks remain shared by the whole group.
 
     `share` is the speaker's fraction of the weighted evidence in the answer
     window; shares across one answer sum to 1.0. `is_dominant` marks the
-    largest — that speaker still drives the adaptive questioner, because an
-    ability estimate needs a single subject even when the marks are split.
+    primary answerer used by individual scoring and the adaptive questioner.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -420,7 +419,7 @@ class AnswerContribution(models.Model):
     @property
     def effective_student_id(self):
         """The student these marks belong to, once an unknown speaker has been
-        identified. None while they are still unclaimed."""
+        identified. None while their participation is still unclaimed."""
         if self.student_id:
             return self.student_id
         if self.unknown_speaker_id and self.unknown_speaker.resolved_student_id:

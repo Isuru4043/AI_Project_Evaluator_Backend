@@ -58,12 +58,11 @@ Needs YOU to provide/enable in Agora Console, then set in `.env`:
 - `AGORA_CUSTOMER_KEY`, `AGORA_CUSTOMER_SECRET` (RESTful API creds)
 - Enable **Cloud Recording** on the Agora project (paid/metered add-on)
 - `AGORA_CLOUD_RECORDING_ENABLED=true`
-- `AGORA_RECORDING_AZURE_REGION=<Agora's numeric code for your Azure region>`
-  (currently `0` — must be corrected; this is Agora's own region enum, not the
-  Azure region name)
+- `AGORA_RECORDING_AZURE_REGION=0` (Agora requires the field but ignores the
+  region enum for Microsoft Azure)
 
 Then rehearse a short session and confirm: acquire→start→stop succeeds, an mp4
-lands in Azure `videos/cloudrec/<session_id>/`, a `SessionRecording` row is
+lands in the configured recordings container under `cloudrec/<session_id>/`, a `SessionRecording` row is
 created, `enqueue_cv_analysis` fires, and (with the worker from #1 running) the
 behavioral report renders. **This REST flow + the region code are the only parts
 not yet exercised — expect to debug them live.**
