@@ -374,7 +374,7 @@ class RubricCriteria(models.Model):
     )
     description = models.TextField(null=True, blank=True)
     questions_to_ask = models.IntegerField(default=3)   # ← ADD THIS LINE ONLY
-    is_individual = models.BooleanField(default=False)
+    is_individual = models.BooleanField(default=True)
 
     class Meta:
         verbose_name = 'Rubric Criteria'

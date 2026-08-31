@@ -38,7 +38,17 @@ Extract the full rubric structure from the above text. Identify:
 - Project/module name and description
 - Rubric categories (main sections) with their weights
 - Individual criteria within each category with their scores and descriptions
+- Whether each criterion assesses an individual student's demonstrated knowledge
+  or a shared group outcome
 - Suggest how many viva questions should be asked per criterion based on its complexity and weight (between 2 and 5)
+
+SCORING-SCOPE RULES:
+- Set `is_individual` to true when the viva answer demonstrates one student's
+  understanding, explanation, communication, implementation knowledge, design
+  reasoning, security analysis, or personal contribution.
+- Set it to false only when every member should receive the same mark for a
+  genuinely shared artifact or team outcome, regardless of who answers.
+- When uncertain, use true. Oral answers should not silently become group marks.
 
 If the document does not clearly specify weights or scores, make reasonable academic assumptions and note them.
 
@@ -60,6 +70,7 @@ Respond in this exact JSON format with no extra text or markdown:
                     "weight_in_category": 50.00,
                     "description": "What this criterion specifically looks for",
                     "questions_to_ask": 3,
+                    "is_individual": true,
                     "question_hints": [
                         {{
                             "hint_text": "A suggested question area or topic to probe",
@@ -185,6 +196,7 @@ def generate_viva_grouping(project, max_questions: int) -> dict:
             "category": c.category.category_name,
             "weight_in_category": float(c.weight_in_category or 0),
             "description": c.description,
+            "is_individual": c.is_individual,
         })
         
     # 3. Call Gemini
@@ -203,6 +215,7 @@ Rules:
 - Distribute the suggested questions proportionally based on the criteria's combined weight or complexity.
 - IMPORTANT: The sum of `suggested_questions` across ALL topics MUST equal exactly {max_questions}.
 - Every criterion MUST be included in exactly one topic.
+- Never combine individual and shared-group criteria in the same topic.
 
 Respond in this EXACT JSON format with no extra text or markdown:
 {{

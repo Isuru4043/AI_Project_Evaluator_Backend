@@ -2,11 +2,15 @@ from datetime import timedelta
 
 from django.test import TestCase
 from django.utils import timezone
+from rest_framework.test import APIClient
 
+from attribution.models import AnswerAttribution, AnswerContribution
 from core.models import (
+    ExaminerProfile,
     EvaluationSession,
     GroupMember,
     Project,
+    ProjectExaminer,
     RubricCategory,
     RubricCriteria,
     StudentGroup,
@@ -166,6 +170,20 @@ class GroupScoringReportTests(TestCase):
             max_score=10,
             is_individual=True,
         )
+        examiner_user = User.objects.create_user(
+            email="examiner@example.com",
+            password="test-password",
+            full_name="Test Examiner",
+            role=User.Role.EXAMINER,
+        )
+        self.examiner = ExaminerProfile.objects.create(user=examiner_user)
+        ProjectExaminer.objects.create(
+            project=self.project,
+            examiner=self.examiner,
+            role_in_project=ProjectExaminer.RoleInProject.LEAD,
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(examiner_user)
 
     @staticmethod
     def _student(email, registration_number):
@@ -252,3 +270,64 @@ class GroupScoringReportTests(TestCase):
         unresolved = unresolved_individual_answers(self.session)
 
         self.assertEqual([row.id for row in unresolved], [answer.id])
+
+    def test_joint_individual_answer_credits_each_recognized_contributor(self):
+        from viva_evaluator.services.scoring_service import ScoringService
+        from viva_evaluator.services.session_reports import (
+            unresolved_individual_answers,
+        )
+
+        answer = self._answer(1, self.individual_criterion, 8, student=None)
+        attribution = AnswerAttribution.objects.create(
+            answer=answer,
+            session=self.session,
+            outcome='uncertain',
+            share=0.6,
+        )
+        AnswerContribution.objects.create(
+            attribution=attribution,
+            answer=answer,
+            student=self.alice,
+            share=0.6,
+        )
+        AnswerContribution.objects.create(
+            attribution=attribution,
+            answer=answer,
+            student=self.bob,
+            share=0.4,
+        )
+
+        alice = ScoringService.aggregate_student_score(self.session, self.alice)
+        bob = ScoringService.aggregate_student_score(self.session, self.bob)
+
+        self.assertEqual(alice['percentage'], 80.0)
+        self.assertEqual(bob['percentage'], 80.0)
+        self.assertEqual(unresolved_individual_answers(self.session), [])
+
+    def test_assigned_examiner_can_approve_all_group_participant_reports(self):
+        self._answer(1, self.group_criterion, 8, student=self.alice)
+        self._answer(2, self.individual_criterion, 9, student=self.alice)
+        self._answer(3, self.individual_criterion, 5, student=self.bob)
+
+        response = self.client.post(
+            f'/api/viva/sessions/{self.session.id}/approve-scores/',
+            {},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        reports = list(
+            self.session.summary_reports.order_by('student_id')
+        )
+        self.assertEqual(len(reports), 2)
+        self.assertTrue(all(report.is_published for report in reports))
+        self.assertTrue(all(report.scores_status == 'approved' for report in reports))
+        self.assertTrue(all(report.finalized_by_id == self.examiner.id for report in reports))
+
+        # Retrying after a lost response is safe and returns the same success.
+        retry = self.client.post(
+            f'/api/viva/sessions/{self.session.id}/approve-scores/',
+            {},
+            format='json',
+        )
+        self.assertEqual(retry.status_code, 200, retry.data)

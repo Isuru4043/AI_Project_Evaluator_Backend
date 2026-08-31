@@ -16,7 +16,11 @@ from core.models import (
     ProjectExaminer,
     SessionRecording,
 )
-from physical_evaluation.authentication import PhysicalKioskAuthentication
+from physical_evaluation.authentication import (
+    PhysicalKioskAuthentication,
+    PhysicalRecordingAuthentication,
+    make_recording_upload_token,
+)
 from physical_evaluation.models import (
     PhysicalEvaluationRun,
     PhysicalKioskAccess,
@@ -63,10 +67,22 @@ def _kiosk_access(request):
     return request.auth if isinstance(request.auth, PhysicalKioskAccess) else None
 
 
+def _recording_upload_access(request):
+    return request.auth if isinstance(request.auth, PhysicalRecordingUpload) else None
+
+
 def _run_for_access(access, session_id):
     return PhysicalEvaluationRun.objects.select_related(
         'session__project', 'session__student__user', 'session__group',
     ).filter(kiosk_access=access, session_id=session_id).first()
+
+
+def _run_for_recording_request(request, session_id):
+    upload = _recording_upload_access(request)
+    if upload is not None:
+        return upload.run if str(upload.run.session_id) == str(session_id) else None
+    access = _kiosk_access(request)
+    return _run_for_access(access, session_id) if access is not None else None
 
 
 def _attempt_recording_finalize(upload_id):
@@ -237,12 +253,11 @@ class KioskOpenView(APIView):
             status__in=[
                 PhysicalEvaluationRun.Status.DEMO_IN_PROGRESS,
                 PhysicalEvaluationRun.Status.VIVA_IN_PROGRESS,
-                PhysicalEvaluationRun.Status.RECORDING_UPLOADING,
             ],
         ).first()
         if active_run:
             return _err(
-                'An evaluation or recording upload is still active in the current panel.',
+                'An evaluation is still active in the current panel.',
                 code=409,
             )
 
@@ -295,11 +310,10 @@ class KioskCloseView(APIView):
             status__in=[
                 PhysicalEvaluationRun.Status.DEMO_IN_PROGRESS,
                 PhysicalEvaluationRun.Status.VIVA_IN_PROGRESS,
-                PhysicalEvaluationRun.Status.RECORDING_UPLOADING,
             ],
         ).exists():
             return _err(
-                'Complete the active evaluation and pending recording uploads before closing the panel.',
+                'Complete the active evaluation before closing the panel.',
                 code=409,
             )
         access.close()
@@ -347,7 +361,7 @@ class KioskActiveRunView(APIView):
             ],
         ).select_related(
             'session__project__physical_config', 'session__student__user', 'session__group',
-        ).first()
+        ).order_by('-updated_at').first()
         if run is None:
             return _ok('No physical evaluation is active.', None)
         data = PhysicalRunSerializer(run).data
@@ -412,9 +426,9 @@ class KioskSessionStartView(APIView):
             locked_session.status = EvaluationSession.Status.IN_PROGRESS
             locked_session.actual_start = now
             locked_session.demo_completed_at = None if session.demo_enabled else now
-            # Physical sessions never start Agora/STT/cloud recording. The
-            # browser keeps the room camera live for future real-time CV use,
-            # but it does not record or upload video.
+            # Physical sessions never start Agora/STT recording. The kiosk
+            # records the room locally and uploads protected chunks through
+            # the dedicated physical-recording endpoints instead.
             locked_session.agora_channel_name = ''
             locked_session.agora_stt_task_id = ''
             locked_session.agora_recording_resource_id = ''
@@ -428,8 +442,8 @@ class KioskSessionStartView(APIView):
                 session=locked_session,
                 kiosk_access=access,
                 status=run_status,
-                # Keep using the existing timestamp field so this temporary
-                # camera-only mode does not require a destructive migration.
+                # The browser uses this timestamp to preserve total duration
+                # and resume chunk numbering safely after a kiosk refresh.
                 recording_started_at=now,
                 viva_started_at=now if not session.demo_enabled else None,
             )
@@ -472,7 +486,7 @@ class KioskDemoCompleteView(APIView):
 class KioskRecordingChunkUploadView(APIView):
     """Stage one small recording block without holding the full video in RAM."""
 
-    authentication_classes = [PhysicalKioskAuthentication]
+    authentication_classes = [PhysicalRecordingAuthentication, PhysicalKioskAuthentication]
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
 
@@ -480,8 +494,7 @@ class KioskRecordingChunkUploadView(APIView):
     MAX_CHUNKS = 20000
 
     def post(self, request, session_id, chunk_index):
-        access = _kiosk_access(request)
-        run = _run_for_access(access, session_id)
+        run = _run_for_recording_request(request, session_id)
         if run is None:
             return _err('Physical evaluation not found.', code=404)
         if run.status not in [
@@ -493,6 +506,13 @@ class KioskRecordingChunkUploadView(APIView):
             return _err('This recording no longer accepts chunks.', code=409)
         if chunk_index < 0 or chunk_index >= self.MAX_CHUNKS:
             return _err('Invalid recording chunk index.')
+        authorized_upload = _recording_upload_access(request)
+        if (
+            authorized_upload is not None
+            and authorized_upload.expected_chunks is not None
+            and chunk_index >= authorized_upload.expected_chunks
+        ):
+            return _err('Chunk index exceeds the authorized recording size.', code=403)
 
         chunk = request.FILES.get('chunk')
         if chunk is None:
@@ -574,12 +594,11 @@ class KioskRecordingChunkUploadView(APIView):
 class KioskRecordingFinalizeView(APIView):
     """Release the kiosk immediately and finalize when all chunks arrive."""
 
-    authentication_classes = [PhysicalKioskAuthentication]
+    authentication_classes = [PhysicalRecordingAuthentication, PhysicalKioskAuthentication]
     permission_classes = [IsAuthenticated]
 
     def post(self, request, session_id):
-        access = _kiosk_access(request)
-        run = _run_for_access(access, session_id)
+        run = _run_for_recording_request(request, session_id)
         if run is None:
             return _err('Physical evaluation not found.', code=404)
         if run.session.status != EvaluationSession.Status.COMPLETED:
@@ -599,6 +618,13 @@ class KioskRecordingFinalizeView(APIView):
             return _err('total_chunks and duration_seconds must be integers.')
         if expected_chunks < 1 or expected_chunks > KioskRecordingChunkUploadView.MAX_CHUNKS:
             return _err('total_chunks is outside the allowed range.')
+
+        authorized_upload = _recording_upload_access(request)
+        if authorized_upload is not None and (
+            authorized_upload.expected_chunks != expected_chunks
+            or authorized_upload.duration_seconds != duration_seconds
+        ):
+            return _err('Recording metadata does not match the authorized upload.', code=403)
 
         extension = str(request.data.get('extension', 'webm')).lower()
         if extension not in {'webm', 'mp4'}:
@@ -635,26 +661,37 @@ class KioskRecordingFinalizeView(APIView):
                 locked_run.completed_at = locked_run.completed_at or timezone.now()
                 locked_run.save(update_fields=['status', 'completed_at', 'updated_at'])
 
+        if request.data.get('defer_commit') is True:
+            upload.refresh_from_db()
+            data = PhysicalRecordingUploadSerializer(upload).data
+            data['upload_token'] = make_recording_upload_token(upload)
+            return _ok(
+                'Evaluation completed. Recording continues uploading in the background.',
+                data,
+                code=202,
+            )
+
         finalized, finalize_error = _attempt_recording_finalize(upload.id)
         upload.refresh_from_db()
         if finalize_error:
             return _err('Evaluation finished, but recording finalization must be retried.', code=503)
 
+        data = PhysicalRecordingUploadSerializer(upload).data
+        data['upload_token'] = make_recording_upload_token(upload)
         return _ok(
             'Evaluation completed. Recording is ready.' if finalized
             else 'Evaluation completed. Recording continues uploading in the background.',
-            PhysicalRecordingUploadSerializer(upload).data,
+            data,
             code=200 if finalized else 202,
         )
 
 
 class KioskRecordingStatusView(APIView):
-    authentication_classes = [PhysicalKioskAuthentication]
+    authentication_classes = [PhysicalRecordingAuthentication, PhysicalKioskAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get(self, request, session_id):
-        access = _kiosk_access(request)
-        run = _run_for_access(access, session_id)
+        run = _run_for_recording_request(request, session_id)
         if run is None:
             return _err('Physical evaluation not found.', code=404)
         upload = PhysicalRecordingUpload.objects.filter(run=run).first()

@@ -350,7 +350,12 @@ class ApproveSessionScoresView(APIView):
                     status=status.HTTP_409_CONFLICT,
                 )
             ensure_participant_reports(session)
-            reports = session.summary_reports.select_for_update().select_related('student')
+            # Lock only SessionSummaryReport rows. ``student`` is nullable, so
+            # select_related() makes PostgreSQL generate a LEFT OUTER JOIN;
+            # PostgreSQL rejects FOR UPDATE on the nullable side of that join.
+            # Loading each student lazily keeps the approval atomic without
+            # attempting to lock StudentProfile rows.
+            reports = session.summary_reports.select_for_update()
             now = timezone.now()
 
             for report in reports:

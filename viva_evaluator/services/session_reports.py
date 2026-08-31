@@ -87,6 +87,10 @@ def unresolved_individual_answers(session):
             'student__user',
             'attribution',
         )
+        .prefetch_related(
+            'contributions__student',
+            'contributions__unknown_speaker__resolved_student',
+        )
         .order_by('question__question_order', 'answered_at')
     )
 
@@ -97,10 +101,25 @@ def unresolved_individual_answers(session):
         except ObjectDoesNotExist:
             attribution = None
 
-        needs_review = answer.student_id is None
+        contributions = list(answer.contributions.all())
+        has_known_contributor = any(
+            contribution.effective_student_id is not None
+            for contribution in contributions
+        )
+        has_unknown_contributor = any(
+            contribution.effective_student_id is None
+            for contribution in contributions
+        )
+        needs_review = (
+            answer.student_id is None and not has_known_contributor
+        ) or has_unknown_contributor
         if attribution is not None:
-            needs_review = needs_review or attribution.needs_review or (
-                attribution.status == AttributionStatus.DISPUTED
+            # A collaborative answer with recognized participants does not
+            # need one artificial winner. Unknown/disputed identity still
+            # requires an examiner before scores can be published.
+            needs_review = needs_review or (
+                attribution.unknown_speaker_id is not None
+                or attribution.status == AttributionStatus.DISPUTED
             )
         if needs_review:
             unresolved.append(answer)

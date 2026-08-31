@@ -185,6 +185,46 @@ class CVSummaryView(APIView):
 
         report = CVSessionReport.objects.filter(session=session).first()
         if report is None:
+            # Physical vivas are academically complete before the browser has
+            # necessarily uploaded its last recording chunks. Expose that
+            # independent state so the examiner can still use Session Analysis
+            # while Behavioral Review shows an accurate waiting message.
+            try:
+                run = session.physical_run
+            except Exception:
+                run = None
+            if run is not None:
+                try:
+                    upload = run.recording_upload
+                except Exception:
+                    upload = None
+                upload_status = getattr(upload, 'status', None)
+                if upload_status in {'capturing', 'uploading', 'finalizing'} or run.status == 'recording_uploading':
+                    return Response({
+                        'success': True,
+                        'data': {
+                            'status': 'recording_uploading',
+                            'artifact': None,
+                            'recording_url': '',
+                            'playback_url': None,
+                            'question_timeline': build_question_timeline(session),
+                            'error_message': '',
+                            'updated_at': getattr(upload, 'updated_at', run.updated_at),
+                        },
+                    })
+                if upload_status == 'failed' or run.status == 'recording_failed':
+                    return Response({
+                        'success': True,
+                        'data': {
+                            'status': 'recording_failed',
+                            'artifact': None,
+                            'recording_url': '',
+                            'playback_url': None,
+                            'question_timeline': build_question_timeline(session),
+                            'error_message': getattr(upload, 'error_message', '') or 'Recording upload failed.',
+                            'updated_at': getattr(upload, 'updated_at', run.updated_at),
+                        },
+                    })
             return _err('No CV analysis exists for this session yet.', code=404)
 
         # Resume a Modal job whose polling thread died with its gunicorn

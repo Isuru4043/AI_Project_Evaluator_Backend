@@ -53,6 +53,11 @@ def clear_rubric_cache() -> None:
     _RUBRIC_CACHE.clear()
 
 
+def invalidate_project_rubric_cache(project_id) -> None:
+    """Remove one project's cached rubric after an examiner edits it."""
+    _RUBRIC_CACHE.pop(str(project_id), None)
+
+
 def load_viva_topics(session) -> List[Dict]:
     """Return grouped viva topics, falling back to one topic per criterion."""
     if session.grouping_cache and session.grouping_cache.grouped_criteria:

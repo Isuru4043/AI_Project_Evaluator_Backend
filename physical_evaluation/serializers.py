@@ -125,6 +125,6 @@ class PhysicalRecordingUploadSerializer(serializers.ModelSerializer):
         model = PhysicalRecordingUpload
         fields = [
             'id', 'session_id', 'status', 'mime_type', 'expected_chunks',
-            'uploaded_chunks', 'duration_seconds', 'error_message',
+            'uploaded_chunks', 'uploaded_chunk_indices', 'duration_seconds', 'error_message',
             'created_at', 'updated_at', 'finalized_at',
         ]

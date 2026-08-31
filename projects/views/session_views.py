@@ -17,6 +17,7 @@ from projects.permissions import IsExaminer, IsProjectLead, IsStudent
 from projects.serializers import (
     AutoScheduleSerializer, EvaluationSessionSerializer,
     ManualScheduleSerializer, SessionUpdateSerializer, RubricCategorySerializer,
+    physical_recording_status,
 )
 from projects.views.project_views import _err, _get_examiner_profile, _get_student_profile, _is_assigned, _ok, _500
 from viva_evaluator.services.rubric_extractor import generate_viva_grouping
@@ -248,7 +249,10 @@ class SessionListView(APIView):
 
             sessions = EvaluationSession.objects.filter(
                 project=project,
-            ).select_related('student__user', 'group').order_by('scheduled_start')
+            ).select_related(
+                'student__user', 'group',
+                'physical_run__recording_upload',
+            ).order_by('scheduled_start')
 
             status_filter = request.query_params.get('status')
             if status_filter:
@@ -268,6 +272,7 @@ class SessionListView(APIView):
                             'scheduled_end': s.scheduled_end,
                             'location_room': s.location_room,
                             'status': s.status,
+                            'recording_status': physical_recording_status(s),
                             'students': [],
                         }
                     groups[gid]['students'].append({

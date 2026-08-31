@@ -16,6 +16,16 @@ from projects.serializers import (
 from projects.views.project_views import _err, _get_examiner_profile, _is_assigned, _ok, _500
 
 
+def _invalidate_grouping_cache(project):
+    """A rubric or scoring-scope edit changes valid viva topic grouping."""
+    from viva_evaluator.services.pipeline.context import (
+        invalidate_project_rubric_cache,
+    )
+
+    project.rubric_grouping_caches.all().delete()
+    invalidate_project_rubric_cache(project.id)
+
+
 class RubricCategoryCreateView(APIView):
     """POST /api/projects/<project_id>/rubrics/categories/create/"""
     permission_classes = [IsAuthenticated, IsExaminer]
@@ -49,6 +59,7 @@ class RubricCategoryCreateView(APIView):
                 weight_percentage=ser.validated_data['weight_percentage'],
                 description=ser.validated_data.get('description'),
             )
+            _invalidate_grouping_cache(project)
             return _ok('Rubric category created.', RubricCategorySerializer(cat).data, 201)
         except Exception as e:
             return _500(e)
@@ -87,6 +98,7 @@ class RubricCategoryUpdateView(APIView):
                 if field in data:
                     setattr(cat, field, data[field])
             cat.save()
+            _invalidate_grouping_cache(cat.project)
 
             return _ok('Rubric category updated.', RubricCategorySerializer(cat).data)
         except Exception as e:
@@ -107,7 +119,9 @@ class RubricCategoryDeleteView(APIView):
             if not _is_assigned(ep, cat.project):
                 return _err('You are not assigned to this project.', code=403)
 
+            project = cat.project
             cat.delete()
+            _invalidate_grouping_cache(project)
             return _ok('Rubric category deleted.')
         except Exception as e:
             return _500(e)
@@ -137,7 +151,9 @@ class RubricCriteriaCreateView(APIView):
                 max_score=ser.validated_data['max_score'],
                 weight_in_category=ser.validated_data.get('weight_in_category'),
                 description=ser.validated_data.get('description'),
+                is_individual=ser.validated_data.get('is_individual', True),
             )
+            _invalidate_grouping_cache(cat.project)
             return _ok('Rubric criteria created.', RubricCriteriaSerializer(criteria).data, 201)
         except Exception as e:
             return _500(e)
@@ -163,10 +179,14 @@ class RubricCriteriaUpdateView(APIView):
             if not ser.is_valid():
                 return _err('Validation failed.', ser.errors)
 
-            for field in ('criteria_name', 'max_score', 'weight_in_category', 'description'):
+            for field in (
+                'criteria_name', 'max_score', 'weight_in_category',
+                'description', 'is_individual',
+            ):
                 if field in ser.validated_data:
                     setattr(criteria, field, ser.validated_data[field])
             criteria.save()
+            _invalidate_grouping_cache(criteria.category.project)
 
             return _ok('Rubric criteria updated.', RubricCriteriaSerializer(criteria).data)
         except Exception as e:
@@ -189,7 +209,9 @@ class RubricCriteriaDeleteView(APIView):
             if not _is_assigned(ep, criteria.category.project):
                 return _err('You are not assigned to this project.', code=403)
 
+            project = criteria.category.project
             criteria.delete()
+            _invalidate_grouping_cache(project)
             return _ok('Rubric criteria deleted.')
         except Exception as e:
             return _500(e)
@@ -300,6 +322,7 @@ class RubricExtractApplyView(APIView):
             # Wrap delete + create in a transaction so we don't end up with
             # a half-deleted rubric if something fails mid-way.
             with transaction.atomic():
+                _invalidate_grouping_cache(project)
                 # ── Delete existing categories (cascade deletes criteria + hints) ──
                 existing_count = project.rubric_categories.count()
                 if existing_count > 0:
@@ -326,6 +349,7 @@ class RubricExtractApplyView(APIView):
                             weight_in_category=cri_data.get('weight_in_category'),
                             description=cri_data.get('description') or '',
                             questions_to_ask=int(cri_data.get('questions_to_ask') or 3),
+                            is_individual=cri_data.get('is_individual', True),
                         )
                         for hint in (cri_data.get('question_hints') or []):
                             hint_text = (hint or {}).get('hint_text', '')
