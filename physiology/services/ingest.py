@@ -108,3 +108,40 @@ def _latest_battery(samples):
             except (TypeError, ValueError):
                 return None
     return None
+
+
+def signal_status(session, student) -> dict:
+    """Is the band actually producing usable signal right now?
+
+    The panel needs this to be autonomous. Counting down a calm period while
+    the clip is still being fitted burns the window and yields a baseline of
+    nothing, so capture waits until beats are genuinely arriving with sensor
+    contact rather than starting on a click.
+
+    `live` means: a sample landed in the last few seconds, it reported
+    contact, and it carried beats.
+    """
+    from django.utils import timezone
+    from datetime import timedelta
+
+    recent_from = timezone.now() - timedelta(seconds=LIVE_WINDOW_S)
+    recent = list(
+        PhysioSample.objects
+        .filter(session=session, student=student, t__gte=recent_from)
+        .order_by('-t')[:10]
+    )
+
+    beats = sum(len(s.ibi_ms or []) for s in recent)
+    latest = recent[0] if recent else None
+    return {
+        'live': bool(recent) and bool(latest and latest.contact) and beats > 0,
+        'contact': bool(latest.contact) if latest else False,
+        'recent_samples': len(recent),
+        'recent_beats': beats,
+        'last_bpm': latest.bpm if latest else None,
+    }
+
+
+# How far back "right now" reaches. The band notifies about once a second, so
+# a few seconds is enough to tell live signal from a stale trickle.
+LIVE_WINDOW_S = 8

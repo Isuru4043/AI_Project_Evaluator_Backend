@@ -201,6 +201,13 @@ class Command(BaseCommand):
         viva_s = self.opts['viva_s']
         start = timezone.now() - timedelta(seconds=calm_s + viva_s + 5)
 
+        # Anchor the session clock to the simulated data. The fixture session
+        # is reused across days, so without this the samples sit hours after
+        # actual_start and every timecode reads like 17:54:46 instead of an
+        # offset into the recording. A real session starts when its samples do.
+        session.actual_start = start
+        session.save(update_fields=['actual_start'])
+
         self._head('Baseline (calm)')
         window = BaselineWindow.objects.create(
             session=session, student=student, started_at=start,
