@@ -18,7 +18,10 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from attribution.authentication import ExamStationAuthentication
+from attribution.authentication import (
+    ExamStationAuthentication,
+    is_station_principal,
+)
 from authentication.authentication import CookieJWTAuthentication
 from core.models import (
     EvaluationSession,
@@ -62,7 +65,7 @@ def _is_examiner_for(user, session) -> bool:
 
 def _is_station(user, session) -> bool:
     """The kiosk, a station sidecar, or the assigned examiner."""
-    if getattr(user, 'is_kiosk', False):
+    if is_station_principal(user):
         return True
     return _is_examiner_for(user, session)
 
@@ -84,6 +87,29 @@ def _name(profile):
     if full and full.lower() != 'none':
         return full
     return profile.user.email
+
+
+def _baseline_state(session, device) -> str:
+    """Where the calm capture has got to, so the panel can drive itself.
+
+    none      nothing attempted yet
+    capturing a window is open and collecting
+    ready     a usable resting baseline exists
+    unusable  the last attempt closed with too little clean signal
+    """
+    if device is None:
+        return 'none'
+
+    windows = BaselineWindow.objects.filter(
+        session=session, student=device.student,
+    ).order_by('-started_at')
+
+    if windows.filter(ended_at__isnull=True).exists():
+        return 'capturing'
+    for window in windows:
+        if window.is_usable:
+            return 'ready'
+    return 'unusable' if windows.exists() else 'none'
 
 
 class PhysioDeviceView(APIView):
@@ -109,11 +135,18 @@ class PhysioDeviceView(APIView):
             return _err('Not permitted for this session.', code=403)
 
         device = ingest.bound_device(session)
+        signal = (
+            ingest.signal_status(session, device.student) if device
+            else {'live': False, 'contact': False, 'recent_samples': 0,
+                  'recent_beats': 0, 'last_bpm': None}
+        )
         return _ok({
             'device_id': device.device_id if device else None,
             'student_id': str(device.student_id) if device else None,
             'student_name': _name(device.student) if device else None,
             'battery_pct': device.battery_pct if device else None,
+            'signal': signal,
+            'baseline_state': _baseline_state(session, device),
             'roster': [
                 {'student_id': str(s.id), 'name': _name(s)}
                 for s in _roster(session)
