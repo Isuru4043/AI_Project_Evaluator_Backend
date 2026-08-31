@@ -166,6 +166,24 @@ class CVAnalyzeTriggerView(APIView):
                 'data': {'status': existing.status},
             })
 
+        has_recording = (
+            SessionRecording.objects
+            .filter(session=session)
+            .exclude(video_file_url__isnull=True)
+            .exclude(video_file_url='')
+            .exists()
+        )
+        if not has_recording:
+            return _err(
+                existing.error_message
+                if existing and existing.error_message
+                else (
+                    'No usable video was saved for this session. '
+                    'Behavioral analysis cannot be retried.'
+                ),
+                code=409,
+            )
+
         enqueue_cv_analysis(session.id)
         return Response({
             'success': True,

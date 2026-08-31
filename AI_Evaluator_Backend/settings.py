@@ -515,6 +515,13 @@ AGORA_CLOUD_RECORDING_ENABLED = os.getenv(
     'AGORA_CLOUD_RECORDING_ENABLED', 'false',
 ).lower() == 'true'
 AGORA_RECORDING_AZURE_REGION = int(os.getenv('AGORA_RECORDING_AZURE_REGION', '0'))
+# Prefer Agora's Southeast Asia REST edge for this deployment. The global
+# endpoint has intermittently exceeded the recording client's timeout from
+# this region. Override this for deployments hosted elsewhere.
+AGORA_REST_BASE_URL = os.getenv(
+    'AGORA_REST_BASE_URL',
+    'https://api-ap-southeast-1.agora.io',
+).rstrip('/')
 
 # =============================================================================
 # CV / Behavioral Analysis (exam-station-cv engine)

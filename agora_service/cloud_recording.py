@@ -24,8 +24,6 @@ from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
-_BASE_URL = 'https://api.agora.io/v1/apps'
-
 # UID the recording client joins as — must not collide with real participants.
 RECORDING_UID = 88888
 
@@ -36,6 +34,55 @@ _VENDOR_AZURE = 5
 
 def is_enabled() -> bool:
     return getattr(settings, 'AGORA_CLOUD_RECORDING_ENABLED', False)
+
+
+def _base_url() -> str:
+    """Return the configured regional Agora REST endpoint."""
+    root = getattr(
+        settings,
+        'AGORA_REST_BASE_URL',
+        'https://api-ap-southeast-1.agora.io',
+    ).rstrip('/')
+    return f'{root}/v1/apps'
+
+
+def _mark_start_failure(session, detail: str) -> None:
+    """Persist the real failure before a later analysis retry obscures it."""
+    try:
+        from cv_analysis.models import CVSessionReport
+
+        report, _ = CVSessionReport.objects.get_or_create(session=session)
+        if report.status == CVSessionReport.Status.COMPLETED:
+            return
+        report.status = CVSessionReport.Status.FAILED
+        report.error_message = (
+            f'Agora Cloud Recording failed to start: {detail}'
+        )[:2000]
+        report.save(update_fields=['status', 'error_message', 'updated_at'])
+    except Exception:
+        logger.exception(
+            'cloud_recording: could not persist start failure for session %s',
+            session.id,
+        )
+
+
+def _actionable_agora_error(response, operation: str) -> str:
+    """Return a useful operator-facing message for an Agora REST failure."""
+    raw = response.text[:400]
+    try:
+        body = response.json()
+    except (TypeError, ValueError):
+        body = {}
+
+    reason = str(body.get('reason') or '').strip()
+    if reason == 'invalid_appid':
+        return (
+            f'{operation} returned HTTP {response.status_code}: invalid_appid. '
+            'Enable Cloud Recording for the Agora project that owns AGORA_APP_ID, '
+            'and ensure AGORA_CUSTOMER_KEY/AGORA_CUSTOMER_SECRET belong to that '
+            'same Agora account.'
+        )
+    return f'{operation} returned HTTP {response.status_code}: {raw}'
 
 
 def _auth_header() -> dict:
@@ -98,17 +145,18 @@ def start_recording(session) -> Optional[dict]:
 
         # 1. acquire a resource id
         acquire = requests.post(
-            f'{_BASE_URL}/{app_id}/cloud_recording/acquire',
+            f'{_base_url()}/{app_id}/cloud_recording/acquire',
             json={
                 'cname': channel,
                 'uid': str(RECORDING_UID),
                 'clientRequest': {'resourceExpiredHour': 24},
             },
-            headers=headers, timeout=15,
+            headers=headers, timeout=30,
         )
         if acquire.status_code not in (200, 201):
-            logger.error('cloud_recording: acquire failed %d %s',
-                         acquire.status_code, acquire.text[:400])
+            detail = _actionable_agora_error(acquire, 'acquire')
+            logger.error('cloud_recording: %s', detail)
+            _mark_start_failure(session, detail)
             return None
         resource_id = acquire.json()['resourceId']
 
@@ -117,7 +165,7 @@ def start_recording(session) -> Optional[dict]:
             channel_name=channel, uid=RECORDING_UID, role=ROLE_PUBLISHER,
         )
         start = requests.post(
-            f'{_BASE_URL}/{app_id}/cloud_recording/resourceid/{resource_id}/mode/mix/start',
+            f'{_base_url()}/{app_id}/cloud_recording/resourceid/{resource_id}/mode/mix/start',
             json={
                 'cname': channel,
                 'uid': str(RECORDING_UID),
@@ -133,11 +181,12 @@ def start_recording(session) -> Optional[dict]:
                     'storageConfig': _storage_config(session),
                 },
             },
-            headers=headers, timeout=15,
+            headers=headers, timeout=30,
         )
         if start.status_code not in (200, 201):
-            logger.error('cloud_recording: start failed %d %s',
-                         start.status_code, start.text[:400])
+            detail = _actionable_agora_error(start, 'start')
+            logger.error('cloud_recording: %s', detail)
+            _mark_start_failure(session, detail)
             return None
         sid = start.json()['sid']
 
@@ -149,8 +198,9 @@ def start_recording(session) -> Optional[dict]:
         logger.info('cloud_recording: started channel=%s sid=%s', channel, sid)
         return {'resource_id': resource_id, 'sid': sid}
 
-    except Exception:
+    except Exception as exc:
         logger.exception('cloud_recording: start error for session %s', session.id)
+        _mark_start_failure(session, str(exc))
         return None
 
 
@@ -177,7 +227,7 @@ def stop_recording(session) -> Optional[dict]:
     channel = session.agora_channel_name
     try:
         resp = requests.post(
-            f'{_BASE_URL}/{app_id}/cloud_recording/resourceid/{resource_id}/sid/{sid}/mode/mix/stop',
+            f'{_base_url()}/{app_id}/cloud_recording/resourceid/{resource_id}/sid/{sid}/mode/mix/stop',
             json={
                 'cname': channel,
                 'uid': str(RECORDING_UID),

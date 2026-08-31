@@ -14,7 +14,8 @@ DEFAULT_RUBRIC = r'C:\Users\shami\Desktop\Test\Zero_Trust_Project_Evaluation_Rub
 DEFAULT_REPORT = r'C:\Users\shami\Desktop\Test\zerotrust.pdf'
 DEFAULT_EXAMINER = 'examiner@university.edu'
 DEFAULT_STUDENTS = (
-    'student@university.edu',
+    # 'student@university.edu',
+    'Pavith@gmail.com',
     'isuru.akalanka8058@gmail.com',
 )
 

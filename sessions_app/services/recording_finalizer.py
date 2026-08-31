@@ -50,8 +50,11 @@ def _locked_session_family(session_id):
     preview = EvaluationSession.objects.only(
         "id", "project_id", "group_id",
     ).get(id=session_id)
+    # `group` is nullable. PostgreSQL rejects SELECT ... FOR UPDATE when the
+    # query joins the nullable side of an outer join. Only the concrete
+    # session rows need locking; project is non-null and safe to join.
     sessions = EvaluationSession.objects.select_for_update().select_related(
-        "project", "group",
+        "project",
     )
     if preview.group_id:
         locked = list(
@@ -214,7 +217,26 @@ def finalize_online_recording(
                 if owner.agora_recording_sid:
                     detail = "Agora could not stop or return the recording file."
                 else:
-                    detail = "Agora Cloud Recording did not start for this session."
+                    # start_recording() stores Agora's exact REST error. Keep it;
+                    # replacing it here would hide actionable causes such as
+                    # invalid_appid or a disabled Cloud Recording product.
+                    from cv_analysis.models import CVSessionReport
+
+                    start_report = CVSessionReport.objects.filter(
+                        session=owner,
+                        status=CVSessionReport.Status.FAILED,
+                    ).first()
+                    stored_detail = str(
+                        getattr(start_report, "error_message", "") or ""
+                    )
+                    if stored_detail.startswith(
+                        "Agora Cloud Recording failed to start:"
+                    ):
+                        detail = stored_detail
+                    else:
+                        detail = (
+                            "Agora Cloud Recording did not start for this session."
+                        )
                 finalization_error = (
                     f"{detail} No video recording was saved."
                 )
