@@ -30,6 +30,7 @@ from core.models import (
     StudentProfile,
 )
 from physical_evaluation.authentication import PhysicalKioskAuthentication
+from physical_evaluation.models import PhysicalEvaluationRun, PhysicalKioskAccess
 from physiology.models import BaselineWindow
 from physiology.services import analysis, ingest
 
@@ -78,6 +79,15 @@ def _roster(session):
             .select_related('user')
         )
     return [session.student] if session.student_id else []
+
+
+def _kiosk_identity_ready(request, session):
+    if not isinstance(request.auth, PhysicalKioskAccess) or not session.group_id:
+        return True
+    run = PhysicalEvaluationRun.objects.filter(
+        session=session, kiosk_access=request.auth,
+    ).first()
+    return bool(run and run.identity_authorized)
 
 
 def _name(profile):
@@ -133,6 +143,8 @@ class PhysioDeviceView(APIView):
             return _err('Session not found.', code=404)
         if not _is_station(request.user, session):
             return _err('Not permitted for this session.', code=403)
+        if not _kiosk_identity_ready(request, session):
+            return _err('Complete identity review before heart-rate setup.', code=409)
 
         device = ingest.bound_device(session)
         signal = (
@@ -159,6 +171,8 @@ class PhysioDeviceView(APIView):
             return _err('Session not found.', code=404)
         if not _is_station(request.user, session):
             return _err('Not permitted for this session.', code=403)
+        if not _kiosk_identity_ready(request, session):
+            return _err('Complete identity review before heart-rate setup.', code=409)
 
         device_id = (request.data.get('device_id') or '').strip()
         if not device_id:

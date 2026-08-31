@@ -84,6 +84,12 @@ class PhysicalEvaluationRun(models.Model):
         RECORDING_FAILED = 'recording_failed', 'Recording failed'
         COMPLETED = 'completed', 'Completed'
 
+    class IdentityStatus(models.TextChoices):
+        PENDING = 'pending', 'Pending identity review'
+        VERIFIED = 'verified', 'All expected members verified'
+        OVERRIDDEN = 'overridden', 'Examiner PIN override'
+        NOT_REQUIRED = 'not_required', 'Individual session'
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     session = models.OneToOneField(
         EvaluationSession,
@@ -106,6 +112,22 @@ class PhysicalEvaluationRun(models.Model):
         blank=True,
         related_name='physical_run',
     )
+    identity_status = models.CharField(
+        max_length=20,
+        choices=IdentityStatus.choices,
+        default=IdentityStatus.PENDING,
+    )
+    identity_verification = models.JSONField(default=dict, blank=True)
+    identity_verified_at = models.DateTimeField(null=True, blank=True)
+    identity_override_at = models.DateTimeField(null=True, blank=True)
+    identity_override_reason = models.TextField(blank=True, default='')
+    identity_override_by = models.ForeignKey(
+        ExaminerProfile,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='physical_identity_overrides',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -115,6 +137,17 @@ class PhysicalEvaluationRun(models.Model):
             self.Status.DEMO_IN_PROGRESS,
             self.Status.VIVA_IN_PROGRESS,
         }
+
+    @property
+    def identity_authorized(self):
+        return (
+            not self.session.group_id
+            or self.identity_status in {
+                self.IdentityStatus.VERIFIED,
+                self.IdentityStatus.OVERRIDDEN,
+                self.IdentityStatus.NOT_REQUIRED,
+            }
+        )
 
     def __str__(self):
         return f'Physical run for {self.session_id} ({self.status})'

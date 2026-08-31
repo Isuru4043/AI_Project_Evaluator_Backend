@@ -148,3 +148,4 @@ websockets==16.0
 
 agora-token-builder==1.0.0
 django-q2
+Pillow>=10.4

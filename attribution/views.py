@@ -17,6 +17,7 @@ call to make.
 
 import logging
 
+from django.utils import timezone
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -36,7 +37,7 @@ from core.models import (
     VivaAnswer,
 )
 from physical_evaluation.authentication import PhysicalKioskAuthentication
-from physical_evaluation.models import PhysicalKioskAccess
+from physical_evaluation.models import PhysicalEvaluationRun, PhysicalKioskAccess
 from attribution.models import AnswerAttribution, UnknownSpeaker
 from attribution.services import binding as binding_service
 from attribution.services import engine, ingest
@@ -255,9 +256,28 @@ class SeatBindingView(APIView):
             logger.exception('Seat binding failed for session %s', session_id)
             return _err(f'Face binding failed: {e}', code=502)
 
-        if result.get('error'):
-            return _err(result['error'])
-        return _ok(result, 'Faces bound to students.')
+        run = PhysicalEvaluationRun.objects.filter(session=session).first()
+        if run is not None:
+            run.identity_verification = result
+            update_fields = ['identity_verification', 'updated_at']
+            if result.get('complete'):
+                run.identity_status = PhysicalEvaluationRun.IdentityStatus.VERIFIED
+                run.identity_verified_at = timezone.now()
+                update_fields.extend(['identity_status', 'identity_verified_at'])
+            elif run.identity_status != PhysicalEvaluationRun.IdentityStatus.OVERRIDDEN:
+                run.identity_status = PhysicalEvaluationRun.IdentityStatus.PENDING
+                run.identity_verified_at = None
+                update_fields.extend(['identity_status', 'identity_verified_at'])
+            run.save(update_fields=update_fields)
+
+        message = (
+            'All expected group members were verified.'
+            if result.get('complete')
+            else 'Identity review is incomplete. Retry or use an examiner override.'
+        )
+        # Incomplete verification is a valid review result, not a transport
+        # error: the kiosk needs the roster diagnostics to explain what failed.
+        return _ok(result, message)
 
 
 class SpeakerDetectionTestView(APIView):

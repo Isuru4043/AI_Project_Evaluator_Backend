@@ -23,6 +23,10 @@ import modal
 
 app = modal.App("exam-cv-analyze")
 
+# Returned with every identity response so Django can reject a stale rolling
+# deployment instead of silently treating a one-frame legacy result as final.
+ENGINE_VERSION = "face-binding-v2"
+
 ENGINE_SRC = "exam-station-cv/src/exam_cv"
 MODEL_DIR = "/root/models"
 FACE_LANDMARKER_URL = (
@@ -183,6 +187,9 @@ def bind_faces(
     frame_b64: str,
     enrollment_photos: dict,
     frames_b64: list | None = None,
+    match_threshold: float = 0.42,
+    match_margin: float = 0.05,
+    enrollment_embeddings: dict | None = None,
 ) -> dict:
     """Match faces across a short camera burst against the enrolment gallery.
 
@@ -200,6 +207,8 @@ def bind_faces(
     sys.path.insert(0, "/root")
     from exam_cv.faces.identity import (  # noqa: E402  (image-only import)
         ArcFaceEmbedder,
+        EnrollmentGallery,
+        assign_embeddings_one_to_one,
         build_gallery_from_photos,
     )
     from exam_cv.faces.mesh import MeshPipeline  # noqa: E402
@@ -222,8 +231,12 @@ def bind_faces(
     work = Path("/tmp/bind")
     work.mkdir(parents=True, exist_ok=True)
 
+    cached = enrollment_embeddings or {}
     photos = {}
+    download_failed = set()
     for student_id, value in enrollment_photos.items():
+        if cached.get(str(student_id)):
+            continue
         urls = value if isinstance(value, list) else [value]
         for index, photo_url in enumerate(urls):
             dest = work / f"{student_id}__{index}.jpg"
@@ -233,24 +246,42 @@ def bind_faces(
                 if image is not None and image.size:
                     photos.setdefault(student_id, []).append(image)
             except Exception as e:
+                download_failed.add(str(student_id))
                 print(
                     f"enrollment sample {index} failed for {student_id}: {e}",
                     flush=True,
                 )
 
-    if not photos:
-        print("no usable enrollment photos - nothing to match against", flush=True)
-        return {"frame_matches": [], "frames_processed": len(frames)}
+    if not photos and not cached:
+        return {
+            "engine_version": ENGINE_VERSION,
+            "frame_matches": [],
+            "matches": [],
+            "frames_processed": len(frames),
+            "unusable_enrollment": sorted(set(enrollment_photos) | download_failed),
+        }
 
     embedder = ArcFaceEmbedder()
 
-    # Separate detector instance: build_gallery_from_photos advances the
-    # tracker, which must not leak into the frame pass.
-    enroll_mesh = MeshPipeline(max_faces=2)
-    try:
-        gallery, skipped = build_gallery_from_photos(photos, enroll_mesh, embedder)
-    finally:
-        enroll_mesh.close()
+    gallery = EnrollmentGallery()
+    for student_id, vectors in cached.items():
+        for vector in vectors:
+            gallery.enroll(str(student_id), np.asarray(vector, dtype=np.float32))
+
+    skipped = []
+    if photos:
+        # Separate detector instance: enrollment advances the tracker, which
+        # must not leak into the room-frame pass.
+        enroll_mesh = MeshPipeline(max_faces=2)
+        try:
+            photo_gallery, skipped = build_gallery_from_photos(
+                photos, enroll_mesh, embedder,
+            )
+            for student_id, vectors in photo_gallery.serializable_embeddings().items():
+                for vector in vectors:
+                    gallery.enroll(student_id, np.asarray(vector, dtype=np.float32))
+        finally:
+            enroll_mesh.close()
 
     if skipped:
         print(
@@ -268,18 +299,27 @@ def bind_faces(
         frame_matches = []
         for frame in frames:
             matches = []
+            observations = []
+            embeddings = []
             for obs in mesh.process_frame(frame):
                 crop = mesh.crop(frame, obs)
                 if crop.size == 0:
                     continue
-                student_id, similarity = gallery.match_with_score(
-                    embedder.embed(crop)
-                )
+                observations.append(obs)
+                embeddings.append(embedder.embed(crop))
+            assigned = assign_embeddings_one_to_one(
+                embeddings,
+                gallery,
+                threshold=float(match_threshold),
+                min_margin=float(match_margin),
+            )
+            for obs, identity in zip(observations, assigned):
                 matches.append({
-                    "student_id": student_id,
+                    "student_id": identity["student_id"],
                     "track_ref": str(obs.track_id),
                     "bbox": [float(v) for v in obs.bbox],
-                    "confidence": max(0.0, float(similarity)),
+                    "confidence": identity["confidence"],
+                    "identity_margin": identity["identity_margin"],
                 })
             frame_matches.append(matches)
     finally:
@@ -324,9 +364,65 @@ def bind_faces(
     unknown_slots = max(0, max_detected - len(legacy_matches))
     legacy_matches.extend(best_unknowns[:unknown_slots])
     return {
+        "engine_version": ENGINE_VERSION,
         "frame_matches": frame_matches,
         "matches": legacy_matches,
         "frames_processed": len(frames),
+        # This diagnostic used to exist only in Modal logs, leaving the kiosk
+        # unable to distinguish a missing person from a bad enrollment image.
+        "unusable_enrollment": sorted(
+            set(enrollment_photos) - gallery.enrolled_ids()
+        ),
+    }
+
+
+@app.function(image=engine_image, cpu=2.0, memory=4096, timeout=300)
+def precompute_enrollment(enrollment_photos: dict) -> dict:
+    """Turn guided enrollment photos into reusable private ArcFace vectors."""
+    import sys
+    from pathlib import Path
+
+    import cv2
+
+    sys.path.insert(0, "/root")
+    from exam_cv.faces.identity import ArcFaceEmbedder, build_gallery_from_photos
+    from exam_cv.faces.mesh import MeshPipeline
+
+    work = Path("/tmp/enrollment")
+    work.mkdir(parents=True, exist_ok=True)
+    photos = {}
+    for student_id, value in enrollment_photos.items():
+        urls = value if isinstance(value, list) else [value]
+        for index, photo_url in enumerate(urls):
+            try:
+                destination = work / f"{student_id}__{index}.jpg"
+                _download(photo_url, destination)
+                image = cv2.imread(str(destination))
+                if image is not None and image.size:
+                    photos.setdefault(str(student_id), []).append(image)
+            except Exception:
+                # The final unusable list is returned to Django; no diagnostic
+                # is hidden only in container logs.
+                pass
+
+    if not photos:
+        return {
+            "engine_version": ENGINE_VERSION,
+            "embeddings": {},
+            "unusable_enrollment": sorted(enrollment_photos),
+        }
+    embedder = ArcFaceEmbedder()
+    mesh = MeshPipeline(max_faces=2)
+    try:
+        gallery, skipped = build_gallery_from_photos(photos, mesh, embedder)
+    finally:
+        mesh.close()
+    return {
+        "engine_version": ENGINE_VERSION,
+        "embeddings": gallery.serializable_embeddings(),
+        "unusable_enrollment": sorted(
+            set(enrollment_photos) - gallery.enrolled_ids()
+        ),
     }
 
 
@@ -352,10 +448,40 @@ def bind(payload: dict):
             frame_b64,
             photos,
             payload.get("frames_b64") or [frame_b64],
+            float(payload.get("match_threshold", 0.42)),
+            float(payload.get("match_margin", 0.05)),
+            payload.get("enrollment_embeddings") or {},
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"binding failed: {str(e)[:300]}")
     return result
+
+
+@app.function(image=api_image, secrets=[token_secret], timeout=300)
+@modal.fastapi_endpoint(method="POST")
+def enroll(payload: dict):
+    """Authenticated precomputation endpoint called after face registration."""
+    _check_token(payload.get("token", ""))
+    from fastapi import HTTPException
+
+    photos = payload.get("enrollment_photos") or {}
+    if not photos:
+        raise HTTPException(status_code=400, detail="enrollment_photos required")
+    try:
+        return precompute_enrollment.remote(photos)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"enrollment precomputation failed: {str(exc)[:300]}",
+        )
+
+
+@app.function(image=api_image, secrets=[token_secret], timeout=30)
+@modal.fastapi_endpoint(method="GET")
+def version(token: str):
+    """Deployment probe used to confirm the expected face-binding engine."""
+    _check_token(token)
+    return {"engine_version": ENGINE_VERSION}
 
 
 @app.function(image=api_image, secrets=[token_secret], timeout=60)
