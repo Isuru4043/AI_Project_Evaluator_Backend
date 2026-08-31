@@ -569,6 +569,16 @@ ATTRIBUTION_BINDING_BACKEND = os.getenv(
     'ATTRIBUTION_BINDING_BACKEND', 'modal',
 ).lower()
 MODAL_CV_BIND_URL = os.getenv('MODAL_CV_BIND_URL', '')
+MODAL_CV_ENROLL_URL = os.getenv('MODAL_CV_ENROLL_URL', '')
+ATTRIBUTION_IDENTITY_MIN_CONFIDENCE = float(os.getenv(
+    'ATTRIBUTION_IDENTITY_MIN_CONFIDENCE', '0.42',
+))
+ATTRIBUTION_IDENTITY_MIN_MARGIN = float(os.getenv(
+    'ATTRIBUTION_IDENTITY_MIN_MARGIN', '0.05',
+))
+ATTRIBUTION_IDENTITY_MIN_VOTES = int(os.getenv(
+    'ATTRIBUTION_IDENTITY_MIN_VOTES', '2',
+))
 
 # Shared secret for a physical exam station running the CV engine as its own
 # process (exam-station-cv --backend-url). It has no browser session, so it

@@ -8,7 +8,11 @@ a face we aren't sure about.
 
 import numpy as np
 
-from exam_cv.faces.identity import build_gallery_from_photos
+from exam_cv.faces.identity import (
+    EnrollmentGallery,
+    assign_embeddings_one_to_one,
+    build_gallery_from_photos,
+)
 
 
 class FakeEmbedder:
@@ -116,3 +120,46 @@ class TestBuildGalleryFromPhotos:
         assert gallery.enrolled_ids() == {'s1'}
         assert embedder.calls == 3
         assert gallery.match(embedder.embed(np.full((4, 4), 3.0))) == 's1'
+
+
+class TestGlobalGroupAssignment:
+    @staticmethod
+    def gallery(count):
+        gallery = EnrollmentGallery()
+        for index in range(count):
+            vector = np.zeros(count, dtype=np.float32)
+            vector[index] = 1
+            gallery.enroll(f's{index + 1}', vector)
+        return gallery
+
+    def test_three_people_are_assigned_once_even_when_face_order_changes(self):
+        gallery = self.gallery(3)
+        faces = [np.array([0, 0, 1]), np.array([1, 0, 0]), np.array([0, 1, 0])]
+
+        result = assign_embeddings_one_to_one(faces, gallery)
+
+        assert [item['student_id'] for item in result] == ['s3', 's1', 's2']
+        assert len({item['student_id'] for item in result}) == 3
+
+    def test_four_people_are_all_assigned_one_to_one(self):
+        gallery = self.gallery(4)
+        faces = [
+            np.array([0, 1, 0, 0]), np.array([0, 0, 0, 1]),
+            np.array([1, 0, 0, 0]), np.array([0, 0, 1, 0]),
+        ]
+
+        result = assign_embeddings_one_to_one(faces, gallery)
+
+        assert {item['student_id'] for item in result} == {'s1', 's2', 's3', 's4'}
+        assert len({item['student_id'] for item in result}) == 4
+
+    def test_close_identity_margin_remains_unknown(self):
+        gallery = EnrollmentGallery()
+        gallery.enroll('s1', np.array([1.0, 0.0]))
+        gallery.enroll('s2', np.array([0.999, 0.045]))
+
+        result = assign_embeddings_one_to_one(
+            [np.array([1.0, 0.02])], gallery, threshold=.42, min_margin=.05,
+        )
+
+        assert result[0]['student_id'] is None

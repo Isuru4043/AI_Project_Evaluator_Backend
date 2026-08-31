@@ -23,6 +23,7 @@ cv_analysis.services.timeline already performs.
 """
 
 import uuid
+import hashlib
 
 from django.db import models
 
@@ -54,6 +55,36 @@ class BindingMethod(models.TextChoices):
     ARCFACE = 'arcface', 'ArcFace vs enrollment photo'
     SEATING = 'seating', 'Seating order (left to right)'
     MANUAL = 'manual', 'Examiner assigned'
+
+
+class FaceEnrollmentEmbeddingCache(models.Model):
+    """Precomputed private ArcFace vectors for a student's enrollment set."""
+
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        READY = 'ready', 'Ready'
+        UNUSABLE = 'unusable', 'No usable enrollment'
+        FAILED = 'failed', 'Failed'
+
+    student = models.OneToOneField(
+        StudentProfile,
+        on_delete=models.CASCADE,
+        related_name='face_embedding_cache',
+        primary_key=True,
+    )
+    photo_fingerprint = models.CharField(max_length=64, db_index=True)
+    embeddings = models.JSONField(default=list, blank=True)
+    engine_version = models.CharField(max_length=64, blank=True, default='')
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.PENDING,
+    )
+    error_message = models.TextField(blank=True, default='')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    @staticmethod
+    def fingerprint(photo_refs):
+        canonical = '\n'.join(sorted(str(value).split('?', 1)[0] for value in photo_refs))
+        return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
 
 
 class SpeakerBinding(models.Model):

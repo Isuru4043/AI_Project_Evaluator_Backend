@@ -6,8 +6,9 @@ directly with scripted traces, the same way exam_cv tests decide_speaker.
 """
 
 from datetime import datetime, timedelta, timezone
+from unittest.mock import Mock, patch
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 
 from agora_service.transcript_parser import parse_vtt_to_speaker_turns
 from attribution.services.resolver import (
@@ -35,6 +36,52 @@ def window(start_s=0, end_s=30):
 
 
 class BindingBurstTests(SimpleTestCase):
+    def _full_group_burst(self, student_ids):
+        return [
+            [
+                {
+                    'student_id': student_id,
+                    'bbox': [index * .2, .1, index * .2 + .15, .4],
+                    'confidence': .81 + index * .01,
+                    'identity_margin': .12,
+                }
+                for index, student_id in enumerate(student_ids)
+            ]
+            for _ in range(5)
+        ]
+
+    def test_three_person_group_keeps_every_identity_across_five_frames(self):
+        from attribution.services.binding import _aggregate_frame_matches
+
+        result = _aggregate_frame_matches(
+            self._full_group_burst([ALICE, BOB, CARA]), min_votes=2,
+        )
+
+        self.assertEqual({item['student_id'] for item in result}, {ALICE, BOB, CARA})
+        self.assertTrue(all(item['votes'] == 5 for item in result))
+
+    def test_four_person_group_keeps_every_identity_across_five_frames(self):
+        from attribution.services.binding import _aggregate_frame_matches
+
+        students = [ALICE, BOB, CARA, 'dan-id']
+        result = _aggregate_frame_matches(
+            self._full_group_burst(students), min_votes=2,
+        )
+
+        self.assertEqual({item['student_id'] for item in result}, set(students))
+        self.assertEqual(len(result), 4)
+
+    def test_five_person_group_keeps_every_identity_across_five_frames(self):
+        from attribution.services.binding import _aggregate_frame_matches
+
+        students = [ALICE, BOB, CARA, 'dan-id', 'erin-id']
+        result = _aggregate_frame_matches(
+            self._full_group_burst(students), min_votes=2,
+        )
+
+        self.assertEqual({item['student_id'] for item in result}, set(students))
+        self.assertEqual(len(result), 5)
+
     def test_students_detected_in_different_frames_are_both_kept(self):
         from attribution.services.binding import _aggregate_frame_matches
 
@@ -62,6 +109,86 @@ class BindingBurstTests(SimpleTestCase):
 
         self.assertEqual(sum(item['student_id'] == ALICE for item in matches), 1)
         self.assertEqual(sum(item['student_id'] is None for item in matches), 1)
+
+    @override_settings(
+        MODAL_CV_BIND_URL='https://example.invalid/bind',
+        MODAL_CV_TOKEN='test-token',
+        ATTRIBUTION_IDENTITY_MIN_VOTES=2,
+    )
+    @patch('cv_analysis.services.runner._sas_for', return_value='https://blob.test/photo')
+    @patch('requests.post')
+    def test_legacy_modal_is_called_once_for_each_of_five_frames(
+        self, post, _sas,
+    ):
+        from attribution.services.binding import (
+            COMPAT_ENGINE_VERSION,
+            _bind_modal_frames,
+        )
+
+        responses = []
+        for frame_index in range(5):
+            response = Mock(status_code=200, text='')
+            response.json.return_value = {
+                'matches': [
+                    {
+                        'student_id': ALICE,
+                        'bbox': [0, 0, .3, .4],
+                        'confidence': .78,
+                        'track_ref': f'a-{frame_index}',
+                    },
+                    {
+                        'student_id': BOB,
+                        'bbox': [.5, 0, .8, .4],
+                        'confidence': .8,
+                        'track_ref': f'b-{frame_index}',
+                    },
+                ],
+            }
+            responses.append(response)
+        post.side_effect = responses
+
+        result = _bind_modal_frames(
+            [f'frame-{index}'.encode() for index in range(5)],
+            {ALICE: ['https://blob.test/faces/a.jpg'], BOB: ['https://blob.test/faces/b.jpg']},
+        )
+
+        self.assertEqual(post.call_count, 5)
+        self.assertEqual(result['frames_processed'], 5)
+        self.assertEqual(result['engine_version'], COMPAT_ENGINE_VERSION)
+        self.assertEqual({item['student_id'] for item in result['matches']}, {ALICE, BOB})
+        self.assertTrue(all(item['votes'] == 5 for item in result['matches']))
+
+    @override_settings(
+        MODAL_CV_BIND_URL='https://example.invalid/bind',
+        MODAL_CV_TOKEN='test-token',
+        ATTRIBUTION_IDENTITY_MIN_VOTES=2,
+    )
+    @patch('cv_analysis.services.runner._sas_for', return_value='https://blob.test/photo')
+    @patch('requests.post')
+    def test_unversioned_burst_modal_uses_compatibility_version(self, post, _sas):
+        from attribution.services.binding import (
+            COMPAT_ENGINE_VERSION,
+            _bind_modal_frames,
+        )
+
+        response = Mock(status_code=200, text='')
+        response.json.return_value = {
+            'frame_matches': [[
+                {'student_id': ALICE, 'bbox': [0, 0, .3, .4], 'confidence': .8},
+                {'student_id': BOB, 'bbox': [.5, 0, .8, .4], 'confidence': .82},
+            ] for _ in range(5)],
+            'frames_processed': 5,
+        }
+        post.return_value = response
+
+        result = _bind_modal_frames(
+            [f'frame-{index}'.encode() for index in range(5)],
+            {ALICE: ['https://blob.test/faces/a.jpg'], BOB: ['https://blob.test/faces/b.jpg']},
+        )
+
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(result['engine_version'], COMPAT_ENGINE_VERSION)
+        self.assertEqual({item['student_id'] for item in result['matches']}, {ALICE, BOB})
 
 
 class PhysicalKioskAttributionAuthTests(SimpleTestCase):
