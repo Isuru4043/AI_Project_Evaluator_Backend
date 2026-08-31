@@ -41,6 +41,10 @@ class PanelPinSerializer(serializers.Serializer):
     pin = serializers.CharField(max_length=128, trim_whitespace=False)
 
 
+class IdentityOverrideSerializer(PanelPinSerializer):
+    reason = serializers.CharField(min_length=5, max_length=500)
+
+
 class PhysicalSessionSerializer(serializers.Serializer):
     def to_representation(self, session):
         student = None
@@ -107,6 +111,8 @@ class PhysicalRunSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'session', 'status', 'recording_started_at',
             'viva_started_at', 'completed_at', 'recording_upload',
+            'identity_status', 'identity_verification', 'identity_verified_at',
+            'identity_override_at', 'identity_override_reason',
         ]
 
     def get_recording_upload(self, obj):

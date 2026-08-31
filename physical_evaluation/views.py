@@ -28,6 +28,7 @@ from physical_evaluation.models import (
     PhysicalRecordingUpload,
 )
 from physical_evaluation.serializers import (
+    IdentityOverrideSerializer,
     PanelPinSerializer,
     PhysicalProjectConfigSerializer,
     PhysicalRunSerializer,
@@ -446,6 +447,11 @@ class KioskSessionStartView(APIView):
                 # and resume chunk numbering safely after a kiosk refresh.
                 recording_started_at=now,
                 viva_started_at=now if not session.demo_enabled else None,
+                identity_status=(
+                    PhysicalEvaluationRun.IdentityStatus.PENDING
+                    if session.group_id
+                    else PhysicalEvaluationRun.IdentityStatus.NOT_REQUIRED
+                ),
             )
 
         data = PhysicalRunSerializer(run).data
@@ -467,6 +473,12 @@ class KioskDemoCompleteView(APIView):
             return _err('Active physical evaluation not found.', code=404)
         if run.status != PhysicalEvaluationRun.Status.DEMO_IN_PROGRESS:
             return _err('This physical evaluation is not in the demo phase.', code=409)
+        if not run.identity_authorized:
+            return _err(
+                'All expected group members must be verified, or an examiner '
+                'must authorize the identity-review override.',
+                code=409,
+            )
 
         now = timezone.now()
         with transaction.atomic():
@@ -481,6 +493,45 @@ class KioskDemoCompleteView(APIView):
             'viva_start_url': '/api/viva/sessions/start/',
             'viva_start_payload': {'session_id': str(run.session_id)},
         })
+
+
+class KioskIdentityOverrideView(APIView):
+    """Allow an assigned examiner at the kiosk to acknowledge an incomplete scan."""
+
+    authentication_classes = [PhysicalKioskAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, session_id):
+        serializer = IdentityOverrideSerializer(data=request.data)
+        if not serializer.is_valid():
+            return _err('Validation failed.', serializer.errors)
+        access = _kiosk_access(request)
+        run = _run_for_access(access, session_id)
+        if run is None:
+            return _err('Active physical evaluation not found.', code=404)
+        if not run.session.group_id:
+            return _err('Identity override is only required for group sessions.')
+        if not access.config.check_panel_pin(serializer.validated_data['pin']):
+            return _err('Invalid examiner PIN/password.', code=403)
+
+        now = timezone.now()
+        run.identity_status = PhysicalEvaluationRun.IdentityStatus.OVERRIDDEN
+        run.identity_override_at = now
+        run.identity_override_by = access.opened_by
+        run.identity_override_reason = serializer.validated_data['reason'].strip()
+        run.save(update_fields=[
+            'identity_status', 'identity_override_at', 'identity_override_by',
+            'identity_override_reason', 'updated_at',
+        ])
+        logger.warning(
+            'Identity review overridden for physical session %s by examiner %s',
+            session_id,
+            access.opened_by_id,
+        )
+        return _ok(
+            'Examiner override recorded. Heart-rate wearer setup remains a separate step.',
+            PhysicalRunSerializer(run).data,
+        )
 
 
 class KioskRecordingChunkUploadView(APIView):

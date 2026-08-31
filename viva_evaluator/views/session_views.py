@@ -16,7 +16,7 @@ from viva_evaluator.views._helpers import (
 )
 from authentication.authentication import CookieJWTAuthentication
 from physical_evaluation.authentication import PhysicalKioskAuthentication
-from physical_evaluation.models import PhysicalKioskAccess
+from physical_evaluation.models import PhysicalEvaluationRun, PhysicalKioskAccess
 from viva_evaluator.permissions import (
     CanParticipateInVivaSession,
     IsAssignedProjectExaminer,
@@ -60,6 +60,19 @@ class SessionStartView(APIView):
             )
 
             session = EvaluationSession.objects.get(id=session_id)
+            if isinstance(request.auth, PhysicalKioskAccess) and session.group_id:
+                physical_run = PhysicalEvaluationRun.objects.filter(
+                    session=session,
+                    kiosk_access=request.auth,
+                ).first()
+                if physical_run is None or not physical_run.identity_authorized:
+                    return Response(
+                        {
+                            "error": "Complete identity review for every expected group member, or use an examiner PIN override before starting the viva.",
+                            "code": "identity_review_required",
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
             submission = _resolve_session_submission(session)
 
             if not submission:

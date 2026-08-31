@@ -4,6 +4,7 @@ from physical_evaluation.views import (
     KioskActiveRunView,
     KioskCloseView,
     KioskDemoCompleteView,
+    KioskIdentityOverrideView,
     KioskOpenView,
     KioskSessionCompleteView,
     KioskSessionFinishView,
@@ -41,6 +42,11 @@ urlpatterns = [
         'kiosk/sessions/<uuid:session_id>/demo/complete/',
         KioskDemoCompleteView.as_view(),
         name='kiosk-demo-complete',
+    ),
+    path(
+        'kiosk/sessions/<uuid:session_id>/identity/override/',
+        KioskIdentityOverrideView.as_view(),
+        name='kiosk-identity-override',
     ),
     path(
         'kiosk/sessions/<uuid:session_id>/complete/',
