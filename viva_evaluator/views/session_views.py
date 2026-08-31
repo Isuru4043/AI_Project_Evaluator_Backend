@@ -652,6 +652,7 @@ class SessionDetailedReportView(APIView):
                 "location_room": session.location_room,
                 "student_name": session.student.user.full_name if session.student and getattr(session.student, 'user', None) else None,
                 "group_name": session.group.group_name if session.group else None,
+                "viva_weight_percentage": session.viva_weight_percentage,
             }
 
             # Get summary report if exists
@@ -676,10 +677,17 @@ class SessionDetailedReportView(APIView):
                     # If not, it defaults to 'group'
                     student_key = str(summary.student.id) if summary.student else 'group'
                     student_name = summary.student.user.full_name if summary.student and getattr(summary.student, 'user', None) else 'Group'
+                    final_score_percentage = float(summary.total_final_score or 0)
+                    viva_weight_percentage = session.viva_weight_percentage
                     reports_data[student_key] = {
                         "student_name": student_name,
                         "total_ai_score": summary.total_ai_score,
                         "total_final_score": summary.total_final_score,
+                        "viva_weight_percentage": viva_weight_percentage,
+                        "scaled_score": round(
+                            final_score_percentage * viva_weight_percentage / 100,
+                            2,
+                        ),
                         "grade": summary.grade,
                         "overall_feedback": summary.overall_feedback,
                         "emotional_summary": summary.emotional_summary,
