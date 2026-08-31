@@ -1,5 +1,5 @@
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from django.test import TestCase, override_settings
 from django.utils import timezone
@@ -174,6 +174,28 @@ class OnlineRecordingFinalizerTests(TestCase):
             SessionRecording.objects.filter(session=self.session).exists()
         )
 
+    @patch("agora_service.cloud_recording.is_enabled", return_value=True)
+    def test_missing_recording_preserves_detailed_start_failure(self, _enabled):
+        self.session.agora_recording_sid = ""
+        self.session.agora_recording_resource_id = ""
+        self.session.save(update_fields=[
+            "agora_recording_sid", "agora_recording_resource_id",
+        ])
+        CVSessionReport.objects.create(
+            session=self.session,
+            status=CVSessionReport.Status.FAILED,
+            error_message=(
+                "Agora Cloud Recording failed to start: acquire returned HTTP "
+                "400: invalid_appid. Enable Cloud Recording for the Agora project."
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            RecordingFinalizationError,
+            "invalid_appid.*Enable Cloud Recording",
+        ):
+            finalize_online_recording(self.session.id)
+
     @patch("sessions_app.services.recording_finalizer.finalize_online_recording")
     def test_automatic_failure_is_reported_without_losing_completion_payload(
         self, finalize_recording,
@@ -233,3 +255,53 @@ class OnlineRecordingFinalizerTests(TestCase):
 
         self.assertEqual(config["vendor"], 5)
         ensure.assert_called_once()
+
+    @override_settings(
+        AGORA_CLOUD_RECORDING_ENABLED=True,
+        AGORA_REST_BASE_URL="https://api-ap-southeast-1.agora.io",
+        AGORA_APP_ID="test-app",
+        AGORA_CUSTOMER_KEY="test-customer",
+        AGORA_CUSTOMER_SECRET="test-secret",
+    )
+    @patch("agora_service.token_builder.build_rtc_token", return_value="token")
+    @patch("agora_service.cloud_recording._storage_config", return_value={})
+    @patch("agora_service.cloud_recording.requests.post")
+    def test_cloud_recording_uses_configured_regional_endpoint(
+        self, post, _storage, _token,
+    ):
+        from agora_service.cloud_recording import start_recording
+
+        acquired = MagicMock(status_code=200)
+        acquired.json.return_value = {"resourceId": "regional-resource"}
+        started = MagicMock(status_code=200)
+        started.json.return_value = {"sid": "regional-sid"}
+        post.side_effect = [acquired, started]
+
+        result = start_recording(self.session)
+
+        self.assertEqual(result["sid"], "regional-sid")
+        self.assertTrue(
+            all(
+                call.args[0].startswith(
+                    "https://api-ap-southeast-1.agora.io/v1/apps/"
+                )
+                for call in post.call_args_list
+            )
+        )
+
+    @override_settings(
+        AGORA_CLOUD_RECORDING_ENABLED=True,
+        AGORA_APP_ID="test-app",
+        AGORA_CUSTOMER_KEY="test-customer",
+        AGORA_CUSTOMER_SECRET="test-secret",
+    )
+    @patch("agora_service.cloud_recording.requests.post")
+    def test_cloud_recording_start_failure_is_persisted(self, post):
+        from agora_service.cloud_recording import start_recording
+
+        post.side_effect = RuntimeError("regional endpoint timed out")
+
+        self.assertIsNone(start_recording(self.session))
+        report = CVSessionReport.objects.get(session=self.session)
+        self.assertEqual(report.status, CVSessionReport.Status.FAILED)
+        self.assertIn("regional endpoint timed out", report.error_message)
