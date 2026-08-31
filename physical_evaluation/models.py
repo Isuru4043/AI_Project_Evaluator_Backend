@@ -102,7 +102,10 @@ class PhysicalEvaluationRun(models.Model):
         related_name='runs',
     )
     status = models.CharField(max_length=30, choices=Status.choices)
-    recording_started_at = models.DateTimeField()
+    # Camera preview/identity setup can begin before protected recording. This
+    # is stamped only when the browser MediaRecorder actually starts at the
+    # demo/viva boundary, keeping video timecodes aligned with the file.
+    recording_started_at = models.DateTimeField(null=True, blank=True)
     viva_started_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
     recording = models.OneToOneField(

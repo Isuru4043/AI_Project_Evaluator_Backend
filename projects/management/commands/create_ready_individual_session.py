@@ -4,7 +4,7 @@ from .create_ready_session import Command as ReadySessionCommand
 
 
 DEFAULT_EXAMINER = 'examiner@university.edu'
-DEFAULT_STUDENT = 'Pavith@gmail.com'
+DEFAULT_STUDENT = 'student@university.edu'
 
 
 class Command(ReadySessionCommand):

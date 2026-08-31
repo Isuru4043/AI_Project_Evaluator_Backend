@@ -443,9 +443,9 @@ class KioskSessionStartView(APIView):
                 session=locked_session,
                 kiosk_access=access,
                 status=run_status,
-                # The browser uses this timestamp to preserve total duration
-                # and resume chunk numbering safely after a kiosk refresh.
-                recording_started_at=now,
+                # The room preview is active during identity/sensor setup, but
+                # protected recording begins only at the demo/viva boundary.
+                recording_started_at=None,
                 viva_started_at=now if not session.demo_enabled else None,
                 identity_status=(
                     PhysicalEvaluationRun.IdentityStatus.PENDING
@@ -458,6 +458,50 @@ class KioskSessionStartView(APIView):
         data['next_action'] = 'start_demo' if session.demo_enabled else 'start_viva'
         data['viva_start_url'] = '/api/viva/sessions/start/'
         return _ok('Physical evaluation started. Keep the room camera active.', data)
+
+
+class KioskRecordingStartView(APIView):
+    """Stamp the exact browser capture origin at the demo/viva boundary."""
+
+    authentication_classes = [PhysicalKioskAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, session_id):
+        from django.utils.dateparse import parse_datetime
+
+        access = _kiosk_access(request)
+        run = _run_for_access(access, session_id)
+        if run is None:
+            return _err('Active physical evaluation not found.', code=404)
+        if run.status not in {
+            PhysicalEvaluationRun.Status.DEMO_IN_PROGRESS,
+            PhysicalEvaluationRun.Status.VIVA_IN_PROGRESS,
+        }:
+            return _err('This physical evaluation is not accepting a recording.', code=409)
+        if not run.identity_authorized:
+            return _err(
+                'Identity review must be completed or overridden before recording starts.',
+                code=409,
+            )
+
+        now = timezone.now()
+        raw_started_at = str(request.data.get('started_at') or '').strip()
+        browser_started_at = parse_datetime(raw_started_at) if raw_started_at else None
+        if browser_started_at is not None and timezone.is_naive(browser_started_at):
+            browser_started_at = timezone.make_aware(browser_started_at)
+        # The kiosk is trusted, but reject stale/tampered origins. Normal HTTP
+        # latency is well inside this one-minute envelope.
+        if browser_started_at is None or abs((now - browser_started_at).total_seconds()) > 60:
+            browser_started_at = now
+
+        with transaction.atomic():
+            locked = PhysicalEvaluationRun.objects.select_for_update().get(id=run.id)
+            if locked.recording_started_at is None:
+                locked.recording_started_at = browser_started_at
+                locked.save(update_fields=['recording_started_at', 'updated_at'])
+
+        locked.refresh_from_db()
+        return _ok('Protected room recording started.', PhysicalRunSerializer(locked).data)
 
 
 class KioskDemoCompleteView(APIView):
@@ -555,6 +599,8 @@ class KioskRecordingChunkUploadView(APIView):
             PhysicalEvaluationRun.Status.RECORDING_FAILED,
         ]:
             return _err('This recording no longer accepts chunks.', code=409)
+        if run.recording_started_at is None:
+            return _err('Protected recording has not started yet.', code=409)
         if chunk_index < 0 or chunk_index >= self.MAX_CHUNKS:
             return _err('Invalid recording chunk index.')
         authorized_upload = _recording_upload_access(request)
@@ -654,6 +700,8 @@ class KioskRecordingFinalizeView(APIView):
             return _err('Physical evaluation not found.', code=404)
         if run.session.status != EvaluationSession.Status.COMPLETED:
             return _err('The shared viva evaluator has not completed this session yet.', code=409)
+        if run.recording_started_at is None:
+            return _err('No protected recording was started for this session.', code=409)
         if run.status not in [
             PhysicalEvaluationRun.Status.VIVA_IN_PROGRESS,
             PhysicalEvaluationRun.Status.RECORDING_UPLOADING,
@@ -831,6 +879,8 @@ class KioskSessionCompleteView(APIView):
             return _err('The physical evaluation is not in the viva phase.', code=409)
         if run.session.status != EvaluationSession.Status.COMPLETED:
             return _err('The shared viva evaluator has not completed this session yet.', code=409)
+        if run.recording_started_at is None:
+            return _err('No protected recording was started for this session.', code=409)
 
         video_file = request.FILES.get('video_file')
         audio_file = request.FILES.get('audio_file')
