@@ -194,6 +194,7 @@ class LiveQuestionPendingView(APIView):
                 {
                     'pending': None if question is None else _serialize_question(question),
                     'examiner_speaking': examiner_speaking,
+                    'paused': session.examiner_paused,
                 },
             )
         except Exception as e:

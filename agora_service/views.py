@@ -176,27 +176,60 @@ class AgoraRosterView(APIView):
             )
 
         roster = {}
+        screen_share_uids = set()
+        participants = []
+        added_user_ids = set()
+
+        def add_participant(user, display_name, participant_type):
+            if user.id in added_user_ids:
+                return
+            added_user_ids.add(user.id)
+            uid = _uid_from_user_id(user.id)
+            screen_uid = uid + 1000000000
+            roster[uid] = display_name
+            roster[screen_uid] = f'{display_name} — Screen share'
+            screen_share_uids.add(screen_uid)
+            participants.extend([
+                {
+                    'uid': uid,
+                    'owner_uid': uid,
+                    'display_name': display_name,
+                    'participant_type': participant_type,
+                    'stream_type': 'camera',
+                },
+                {
+                    'uid': screen_uid,
+                    'owner_uid': uid,
+                    'display_name': display_name,
+                    'participant_type': participant_type,
+                    'stream_type': 'screen_share',
+                },
+            ])
+
         # 1. Main student
         if session.student:
-            uid = _uid_from_user_id(session.student.user_id)
             name = self._get_display_name(session.student.user)
-            roster[uid] = name
+            add_participant(session.student.user, name, 'student')
 
         # 2. Group members (if group project)
         if session.group:
             for member in GroupMember.objects.filter(group=session.group).select_related('student__user'):
-                uid = _uid_from_user_id(member.student.user_id)
                 name = self._get_display_name(member.student.user)
-                roster[uid] = name
+                add_participant(member.student.user, name, 'student')
 
         # 3. Examiners assigned to this project
         for pe in ProjectExaminer.objects.filter(project=session.project).select_related('examiner__user'):
-            uid = _uid_from_user_id(pe.examiner.user_id)
             name = self._get_display_name(pe.examiner.user)
-            roster[uid] = f"{name} (Examiner)"
+            add_participant(
+                pe.examiner.user,
+                f'{name} (Examiner)',
+                'examiner',
+            )
 
         return Response({
             'success': True,
             'roster': roster,
+            'screen_share_uids': sorted(screen_share_uids),
+            'participants': participants,
         })
 

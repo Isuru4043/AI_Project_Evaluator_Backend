@@ -370,6 +370,7 @@ class LiveExaminerInterruptionTests(TestCase):
         self.assertEqual(pending_draft.status_code, 200, pending_draft.data)
         self.assertIsNone(pending_draft.data['data']['pending'])
         self.assertTrue(pending_draft.data['data']['examiner_speaking'])
+        self.assertTrue(pending_draft.data['data']['paused'])
 
         question_id = created.data['data']['question_id']
         empty = self.examiner_client.patch(
