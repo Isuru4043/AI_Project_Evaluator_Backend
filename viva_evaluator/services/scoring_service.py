@@ -1,5 +1,32 @@
 class ScoringService:
     @staticmethod
+    def _student_contribution_share(answer, student_profile):
+        """Return a student's recognized share of an answer.
+
+        Physical group vivas can have more than one legitimate speaker. Use
+        post-detection contribution evidence when it exists, and retain the
+        resolved answer owner as the fallback for online/legacy answers.
+        """
+        if student_profile is None:
+            return 0.0
+
+        try:
+            contributions = list(answer.contributions.all())
+        except (AttributeError, TypeError):
+            contributions = []
+
+        if contributions:
+            share = sum(
+                max(0.0, float(contribution.share or 0.0))
+                for contribution in contributions
+                if contribution.effective_student_id == student_profile.id
+            )
+            if share > 0:
+                return min(1.0, share)
+
+        return 1.0 if answer.student_id == student_profile.id else 0.0
+
+    @staticmethod
     def get_effective_score_for_answer(answer):
         """
         Gets the effective score for a VivaAnswer.
@@ -49,22 +76,26 @@ class ScoringService:
         total_earned = 0.0
 
         answers = []
-        for q in session.viva_questions.prefetch_related('answers', 'extension__criteria').all():
+        for q in session.viva_questions.prefetch_related(
+            'answers__contributions__student',
+            'answers__contributions__unknown_speaker__resolved_student',
+            'extension__criteria',
+        ).all():
             for a in q.answers.all():
                 try:
                     q_ext = q.extension
                     if q_ext and q_ext.criteria:
                         if q_ext.criteria.is_individual:
-                            # An individual criterion is awarded only to the
-                            # resolved primary answerer. Contribution shares
-                            # remain useful review evidence, but are not marks:
-                            # normalising a partial share by that same share
-                            # gave every contributor the whole answer score.
-                            if (
-                                student_profile is not None
-                                and a.student_id == student_profile.id
-                            ):
-                                answers.append((a, q_ext.criteria, 1.0))
+                            # Credit every recognized contributor to a joint
+                            # answer. The share weights multiple answers within
+                            # one criterion; it does not turn speaking duration
+                            # directly into marks, so answer quality remains the
+                            # primary scoring signal.
+                            share = ScoringService._student_contribution_share(
+                                a, student_profile,
+                            )
+                            if share > 0:
+                                answers.append((a, q_ext.criteria, share))
                         else:
                             # Group criteria measure the group, so every member
                             # carries the whole answer regardless of who spoke.

@@ -127,6 +127,9 @@ class CreateReadySessionCommandTests(TestCase):
         self.assertEqual(project.student_groups.get().members.count(), 2)
         self.assertEqual(project.rubric_categories.count(), 1)
         self.assertEqual(project.rubric_categories.get().criteria.count(), 1)
+        self.assertTrue(
+            project.rubric_categories.get().criteria.get().is_individual
+        )
         self.assertEqual(submission.index_status.status, SubmissionIndexStatus.IndexStatus.READY)
         self.assertEqual(session.submission, submission)
         self.assertEqual(session.group, project.student_groups.get())

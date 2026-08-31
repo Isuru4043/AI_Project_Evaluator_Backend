@@ -201,6 +201,65 @@ class PhysicalEvaluationAPITests(TestCase):
         )
         self.assertEqual(bypass.status_code, 403)
 
+    def test_recording_upload_does_not_block_the_next_active_run(self):
+        client, _ = self.open_kiosk()
+        started = client.post(f'/api/physical/kiosk/sessions/{self.session.id}/start/')
+        self.assertEqual(started.status_code, 200, started.data)
+
+        run = self.session.physical_run
+        run.status = PhysicalEvaluationRun.Status.RECORDING_UPLOADING
+        run.save(update_fields=['status', 'updated_at'])
+        self.session.status = EvaluationSession.Status.COMPLETED
+        self.session.save(update_fields=['status'])
+        PhysicalRecordingUpload.objects.create(
+            run=run,
+            status=PhysicalRecordingUpload.Status.UPLOADING,
+            uploaded_chunk_indices=[0, 1, 2],
+            expected_chunks=4,
+            duration_seconds=31,
+        )
+
+        project_sessions = self.examiner_client.get(
+            f'/api/projects/{self.project.id}/sessions/',
+        )
+        self.assertEqual(project_sessions.status_code, 200, project_sessions.data)
+        session_card = next(
+            item for item in project_sessions.data['data']
+            if str(item['id']) == str(self.session.id)
+        )
+        self.assertEqual(session_card['status'], EvaluationSession.Status.COMPLETED)
+        self.assertEqual(session_card['recording_status'], 'uploading')
+
+        behavior = self.examiner_client.get(
+            f'/api/sessions/{self.session.id}/cv/summary/',
+        )
+        self.assertEqual(behavior.status_code, 200, behavior.data)
+        self.assertEqual(behavior.data['data']['status'], 'recording_uploading')
+
+        active = client.get('/api/physical/kiosk/active/')
+        self.assertEqual(active.status_code, 200, active.data)
+        self.assertIsNone(active.data['data'])
+
+        next_session = EvaluationSession.objects.create(
+            project=self.project,
+            student=self.student,
+            submission=self.submission,
+            scheduled_start=timezone.now() - timedelta(minutes=1),
+            scheduled_end=timezone.now() + timedelta(minutes=59),
+            demo_enabled=False,
+            location_room='Engineering Room 42',
+        )
+        next_started = client.post(
+            f'/api/physical/kiosk/sessions/{next_session.id}/start/',
+        )
+        self.assertEqual(next_started.status_code, 200, next_started.data)
+        live = client.get('/api/physical/kiosk/active/')
+        self.assertEqual(live.status_code, 200, live.data)
+        self.assertEqual(
+            live.data['data']['session']['session_id'],
+            str(next_session.id),
+        )
+
     @patch('viva_evaluator.services.pipeline.process_answer_and_pick_next')
     def test_physical_answer_uses_existing_adaptive_scoring_pipeline(self, process_turn):
         self.session.demo_enabled = False
@@ -406,28 +465,38 @@ class PhysicalEvaluationAPITests(TestCase):
                 'duration_seconds': 42,
                 'mime_type': 'video/webm',
                 'extension': 'webm',
+                'defer_commit': True,
             },
             format='json',
         )
         self.assertEqual(finish.status_code, 202, finish.data)
+        recording_token = finish.data['data']['upload_token']
+        recording_client = APIClient()
+        recording_client.credentials(
+            HTTP_X_PHYSICAL_RECORDING_TOKEN=recording_token,
+        )
         self.session.physical_run.refresh_from_db()
         self.assertEqual(
             self.session.physical_run.status,
             PhysicalEvaluationRun.Status.RECORDING_UPLOADING,
         )
+        commit_blocks.assert_not_called()
 
-        # The same open kiosk can continue with the next student, but it cannot
-        # be closed or replaced while it still owns pending browser chunks.
+        # Closing the kiosk no longer cancels the detached recording upload.
         close_while_uploading = client.post(
             '/api/physical/kiosk/close/', {'pin': self.pin}, format='json',
         )
-        self.assertEqual(close_while_uploading.status_code, 409)
+        self.assertEqual(close_while_uploading.status_code, 200)
         reopen_while_uploading = self.examiner_client.post(
             f'/api/physical/projects/{self.project.id}/kiosk/open/',
             {'pin': self.pin},
             format='json',
         )
-        self.assertEqual(reopen_while_uploading.status_code, 409)
+        self.assertEqual(reopen_while_uploading.status_code, 200)
+        next_client = APIClient()
+        next_client.credentials(
+            HTTP_X_PHYSICAL_KIOSK_TOKEN=reopen_while_uploading.data['data']['kiosk_token'],
+        )
 
         # A second student can start while the first recording continues in
         # the background; upload state no longer locks the physical kiosk.
@@ -440,7 +509,7 @@ class PhysicalEvaluationAPITests(TestCase):
             demo_enabled=False,
             location_room='Engineering Room 42',
         )
-        next_started = client.post(
+        next_started = next_client.post(
             f'/api/physical/kiosk/sessions/{next_session.id}/start/',
         )
         self.assertEqual(next_started.status_code, 200, next_started.data)
@@ -451,7 +520,7 @@ class PhysicalEvaluationAPITests(TestCase):
                 f'chunk-{index}'.encode(),
                 content_type='video/webm',
             )
-            uploaded = client.post(
+            uploaded = recording_client.post(
                 f'/api/physical/kiosk/sessions/{self.session.id}/recording/chunks/{index}/',
                 {
                     'chunk': chunk,

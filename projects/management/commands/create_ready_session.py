@@ -47,7 +47,7 @@ class Command(BaseCommand):
         parser.add_argument('--panel-pin', default='1234')
         parser.add_argument('--start-in-minutes', type=int, default=1)
         parser.add_argument('--duration-minutes', type=int, default=60)
-        parser.add_argument('--max-questions', type=int, default=20)
+        parser.add_argument('--max-questions', type=int, default=6)
         parser.add_argument('--viva-weight', type=int, default=100)
         parser.add_argument('--academic-year', default=str(timezone.now().year))
         parser.add_argument(
@@ -314,7 +314,7 @@ class Command(BaseCommand):
                     weight_in_category=criteria_data.get('weight_in_category'),
                     description=criteria_data.get('description') or '',
                     questions_to_ask=int(criteria_data.get('questions_to_ask') or 3),
-                    is_individual=bool(criteria_data.get('is_individual', False)),
+                    is_individual=bool(criteria_data.get('is_individual', True)),
                 )
                 hint_model.objects.bulk_create([
                     hint_model(

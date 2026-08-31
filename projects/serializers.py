@@ -38,7 +38,7 @@ class RubricCriteriaSerializer(serializers.ModelSerializer):
         model = RubricCriteria
         fields = [
             'criteria_id', 'criteria_name', 'max_score',
-            'weight_in_category', 'description',
+            'weight_in_category', 'description', 'is_individual',
         ]
 
 
@@ -448,7 +448,7 @@ class RubricCriteriaSerializer(serializers.ModelSerializer):
         model = RubricCriteria
         fields = [
             'criteria_id', 'criteria_name', 'max_score',
-            'weight_in_category', 'description',
+            'weight_in_category', 'description', 'is_individual',
         ]
 
 
@@ -491,6 +491,7 @@ class RubricCriteriaCreateSerializer(serializers.Serializer):
         max_digits=5, decimal_places=2, required=False, allow_null=True, default=None,
     )
     description = serializers.CharField(required=False, allow_blank=True, allow_null=True, default=None)
+    is_individual = serializers.BooleanField(required=False, default=True)
 
 
 class RubricCriteriaUpdateSerializer(serializers.Serializer):
@@ -502,6 +503,7 @@ class RubricCriteriaUpdateSerializer(serializers.Serializer):
         max_digits=5, decimal_places=2, required=False, allow_null=True,
     )
     description = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    is_individual = serializers.BooleanField(required=False)
 
 
 # =============================================================================
@@ -563,12 +565,37 @@ class AutoScheduleSerializer(serializers.Serializer):
 # EVALUATION SESSION SERIALIZER
 # =============================================================================
 
+def physical_recording_status(session):
+    """Return recording progress without coupling academic session status to it."""
+    try:
+        run = session.physical_run
+    except Exception:
+        return None
+    try:
+        upload = run.recording_upload
+    except Exception:
+        upload = None
+    if upload is not None:
+        return upload.status
+    if run.status == 'recording_uploading':
+        return 'uploading'
+    if run.status == 'recording_failed':
+        return 'failed'
+    if run.status == 'completed' and run.recording_id:
+        return 'ready'
+    return None
+
+
 class EvaluationSessionSerializer(serializers.ModelSerializer):
     """Serializes an evaluation session with student / group info."""
 
     student_name = serializers.CharField(source='student.user.full_name', read_only=True, default=None)
     student_reg_no = serializers.CharField(source='student.registration_number', read_only=True, default=None)
     group_name = serializers.CharField(source='group.group_name', read_only=True, default=None)
+    recording_status = serializers.SerializerMethodField()
+
+    def get_recording_status(self, obj):
+        return physical_recording_status(obj)
 
     class Meta:
         model = EvaluationSession
@@ -576,7 +603,7 @@ class EvaluationSessionSerializer(serializers.ModelSerializer):
             'id', 'project', 'student_name', 'student_reg_no',
             'group_name', 'scheduled_start', 'scheduled_end',
             'actual_start', 'location_room', 'status', 'demo_enabled', 'max_total_questions',
-            'viva_weight_percentage'
+            'viva_weight_percentage', 'recording_status'
         ]
 
 

@@ -21,4 +21,6 @@ MIGRATION_MODULES = {
     'viva_evaluator': None,
     'cv_analysis': None,
     'physical_evaluation': None,
+    'attribution': None,
+    'physiology': None,
 }

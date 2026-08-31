@@ -74,7 +74,7 @@ class RubricCriteriaSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'criteria_name', 'max_score',
             'weight_in_category', 'description',
-            'questions_to_ask', 'question_hints',
+            'questions_to_ask', 'is_individual', 'question_hints',
         ]
         read_only_fields = ['id']
 
@@ -289,6 +289,7 @@ class RubricCriteriaUpdateSerializer(serializers.ModelSerializer):
         fields = [
             'criteria_name', 'max_score',
             'weight_in_category', 'description', 'questions_to_ask',
+            'is_individual',
         ]
 
 

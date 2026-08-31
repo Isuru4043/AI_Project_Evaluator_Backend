@@ -23,6 +23,16 @@ from viva_evaluator.views._helpers import (
 )
 
 
+def _invalidate_project_rubric(project, *, grouping_changed=True):
+    from viva_evaluator.services.pipeline.context import (
+        invalidate_project_rubric_cache,
+    )
+
+    if grouping_changed:
+        project.rubric_grouping_caches.all().delete()
+    invalidate_project_rubric_cache(project.id)
+
+
 class RubricCategoryCreateView(APIView):
     """
     POST /api/viva/projects/<project_id>/categories/
@@ -46,6 +56,7 @@ class RubricCategoryCreateView(APIView):
         serializer = RubricCategorySerializer(data=data)
         if serializer.is_valid():
             category = serializer.save(project=project)
+            _invalidate_project_rubric(project)
             return Response(
                 RubricCategorySerializer(category).data,
                 status=status.HTTP_201_CREATED,
@@ -76,6 +87,7 @@ class RubricCriteriaCreateView(APIView):
         serializer = RubricCriteriaSerializer(data=request.data)
         if serializer.is_valid():
             criteria = serializer.save(category=category)
+            _invalidate_project_rubric(category.project)
             return Response(
                 RubricCriteriaSerializer(criteria).data,
                 status=status.HTTP_201_CREATED,
@@ -105,6 +117,10 @@ class QuestionHintCreateView(APIView):
         serializer = CriteriaQuestionHintSerializer(data=request.data)
         if serializer.is_valid():
             hint = serializer.save(criteria=criteria)
+            _invalidate_project_rubric(
+                criteria.category.project,
+                grouping_changed=False,
+            )
             return Response(
                 CriteriaQuestionHintSerializer(hint).data,
                 status=status.HTTP_201_CREATED,
@@ -256,6 +272,7 @@ class RubricCategoryUpdateView(APIView):
         )
         if serializer.is_valid():
             serializer.save()
+            _invalidate_project_rubric(category.project)
             return Response(serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -284,6 +301,7 @@ class RubricCriteriaUpdateView(APIView):
         )
         if serializer.is_valid():
             serializer.save()
+            _invalidate_project_rubric(criteria.category.project)
             return Response(serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -305,7 +323,9 @@ class QuestionHintDeleteView(APIView):
                 {"error": "Hint not found."},
                 status=status.HTTP_404_NOT_FOUND,
             )
+        project = hint.criteria.category.project
         hint.delete()
+        _invalidate_project_rubric(project, grouping_changed=False)
         return Response(
             {"message": "Hint deleted successfully."},
             status=status.HTTP_200_OK,
