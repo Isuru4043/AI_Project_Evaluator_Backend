@@ -23,7 +23,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from authentication.authentication import CookieJWTAuthentication
-from attribution.authentication import ExamStationAuthentication
+from attribution.authentication import (
+    ExamStationAuthentication,
+    is_station_principal,
+)
 from core.models import (
     EvaluationSession,
     ExaminerProfile,
@@ -71,7 +74,7 @@ def _is_examiner_for(user, session) -> bool:
 
 def _is_participant(user, session) -> bool:
     """A session participant, the kiosk, or the assigned examiner."""
-    if getattr(user, 'is_kiosk', False):
+    if is_station_principal(user):
         return True
     if session.student and session.student.user_id == user.id:
         return True

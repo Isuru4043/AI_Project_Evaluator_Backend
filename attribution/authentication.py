@@ -71,3 +71,22 @@ class ExamStationAuthentication(authentication.BaseAuthentication):
 
     def authenticate_header(self, request):
         return 'X-Station-Token'
+
+
+def is_station_principal(user) -> bool:
+    """True for any trusted room device: an exam-station sidecar or the kiosk.
+
+    These are NOT Django users - the sidecar is a dataclass-like principal and
+    the kiosk is a frozen dataclass with no `id`. Callers must ask this BEFORE
+    running any ORM lookup against the principal, because filtering
+    `ExaminerProfile.objects.filter(user=<dataclass>)` raises rather than
+    returning empty, turning a permission check into a 500.
+
+    The kiosk identifies itself by `role`, not by an `is_kiosk` flag, so both
+    shapes are recognised here rather than at each call site.
+    """
+    if getattr(user, 'is_station', False):
+        return True
+    if getattr(user, 'is_kiosk', False):
+        return True
+    return getattr(user, 'role', None) == 'physical_kiosk'
