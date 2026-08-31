@@ -31,7 +31,8 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument(
-            'action', choices=['setup', 'simulate', 'timeline', 'reset'],
+            'action',
+            choices=['setup', 'simulate', 'timeline', 'reset', 'sidecar'],
         )
         parser.add_argument('--session-id', default=None)
         parser.add_argument('--group', action='store_true',
@@ -132,6 +133,61 @@ class Command(BaseCommand):
         return session
 
     # -- actions -----------------------------------------------------------
+
+    def _sidecar(self, session):
+        """Print the ready-to-paste sidecar command for the LIVE session.
+
+        The sidecar is a separate process and has to be told which session it
+        is feeding, but hunting that UUID out of the database mid-viva is
+        exactly the friction that gets it started late - and a baseline can
+        only be captured while it is already streaming.
+        """
+        from physical_evaluation.models import PhysicalEvaluationRun
+        from physiology.services import ingest
+
+        run = (
+            PhysicalEvaluationRun.objects
+            .filter(status__in=[
+                PhysicalEvaluationRun.Status.DEMO_IN_PROGRESS,
+                PhysicalEvaluationRun.Status.VIVA_IN_PROGRESS,
+            ])
+            .select_related('session__project')
+            .order_by('-created_at')
+            .first()
+        )
+        if run is None:
+            self._warn('No physical session is running. Start one in the kiosk first.')
+            return
+
+        target = run.session
+        device = ingest.bound_device(target)
+        token = getattr(settings, 'EXAM_STATION_TOKEN', '')
+        base = self.opts['backend'].rstrip('/')
+
+        self._head('Live physical session')
+        self._ok(f'{target.project.project_name}  [{run.status}]')
+        self._info(f'session {target.id}')
+        self._info(
+            f'band    {device.device_id} -> {device.student.user.full_name}'
+            if device else
+            'band    NOT BOUND - pick the wearer in the kiosk panel first'
+        )
+
+        if not token:
+            self._warn('EXAM_STATION_TOKEN is empty; the backend will reject this.')
+
+        self._head('Run this now, and keep it running for the whole session')
+        cmd = ' '.join([
+            r'venv\Scripts\python.exe -m physiology.station_sidecar',
+            f'--backend {base}/api/sessions/{target.id}/physio',
+            f'--token {token or "<EXAM_STATION_TOKEN>"}',
+            '--device VivaSense-HR',
+        ])
+        self.stdout.write('')
+        self.stdout.write('  ' + cmd)
+        self.stdout.write('')
+        self._info('The calm baseline records itself once beats start arriving,')
+        self._info('so start this BEFORE the demo phase ends.')
 
     def _setup(self, session):
         from physiology.services import ingest

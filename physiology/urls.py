@@ -10,11 +10,18 @@ from physiology.views import (
     PhysioDeviceView,
     PhysioSampleView,
     PhysioTimelineView,
+    StationActiveSessionView,
 )
 
 app_name = 'physiology'
 
 urlpatterns = [
+    # Not session-scoped: the band relay asks this which session to feed.
+    path(
+        'physio/station/active/',
+        StationActiveSessionView.as_view(),
+        name='physio-station-active',
+    ),
     path(
         'sessions/<uuid:session_id>/physio/device/',
         PhysioDeviceView.as_view(),
