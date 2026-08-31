@@ -52,7 +52,22 @@ class EnrollmentGallery:
         self._gallery: dict[str, list[np.ndarray]] = {}
 
     def enroll(self, student_id: str, embedding: np.ndarray) -> None:
-        self._gallery.setdefault(student_id, []).append(embedding)
+        vector = np.asarray(embedding, dtype=np.float32).reshape(-1)
+        vector = vector / (np.linalg.norm(vector) + 1e-9)
+        self._gallery.setdefault(student_id, []).append(vector)
+
+    def scores(self, embedding: np.ndarray) -> dict[str, float]:
+        """Return the best similarity for every enrolled student.
+
+        Keeping the complete score row lets the room binder solve one global
+        assignment. Matching each crop independently can assign the same
+        student to two faces and is especially unreliable in 3/4-person
+        groups where several candidates may have close scores.
+        """
+        return {
+            sid: max(cosine(embedding, enrolled) for enrolled in embeddings)
+            for sid, embeddings in self._gallery.items()
+        }
 
     def match_with_score(
         self,
@@ -66,8 +81,7 @@ class EnrollmentGallery:
         similarity rather than a hard-coded success value.
         """
         best_id, best_sim = None, -1.0
-        for sid, embs in self._gallery.items():
-            sim = max(cosine(embedding, e) for e in embs)
+        for sid, sim in self.scores(embedding).items():
             if sim > best_sim:
                 best_id, best_sim = sid, sim
         return (best_id if best_sim > threshold else None), best_sim
@@ -78,6 +92,71 @@ class EnrollmentGallery:
 
     def enrolled_ids(self) -> set[str]:
         return set(self._gallery.keys())
+
+    def serializable_embeddings(self) -> dict[str, list[list[float]]]:
+        return {
+            sid: [embedding.astype(float).tolist() for embedding in embeddings]
+            for sid, embeddings in self._gallery.items()
+        }
+
+
+def assign_embeddings_one_to_one(
+    embeddings: list[np.ndarray],
+    gallery: EnrollmentGallery,
+    threshold: float = 0.42,
+    min_margin: float = 0.05,
+) -> list[dict]:
+    """Globally assign room faces to distinct roster identities.
+
+    The small physical-room roster (normally 1-4 people) makes an exhaustive
+    assignment both clearer and safer than a greedy nearest-neighbour pass.
+    Each accepted match must clear an absolute similarity threshold and a
+    margin over that face's next-best identity. Ambiguous faces remain unknown.
+    """
+    score_rows = [gallery.scores(embedding) for embedding in embeddings]
+    best_score = float('-inf')
+    best_assignment: list[Optional[str]] = [None] * len(score_rows)
+
+    def search(index: int, used: set[str], assignment: list[Optional[str]], total: float):
+        nonlocal best_score, best_assignment
+        if index == len(score_rows):
+            if total > best_score:
+                best_score = total
+                best_assignment = assignment.copy()
+            return
+
+        # Unknown has a threshold-sized baseline. This means a candidate must
+        # actually clear the calibrated threshold to improve the assignment.
+        search(index + 1, used, [*assignment, None], total + threshold)
+        for student_id, score in score_rows[index].items():
+            if student_id in used or score < threshold:
+                continue
+            search(
+                index + 1,
+                used | {student_id},
+                [*assignment, student_id],
+                total + score,
+            )
+
+    search(0, set(), [], 0.0)
+
+    result: list[dict] = []
+    for row, student_id in zip(score_rows, best_assignment):
+        confidence = float(row.get(student_id, -1.0)) if student_id else max(
+            row.values(), default=-1.0,
+        )
+        alternatives = [
+            value for candidate, value in row.items() if candidate != student_id
+        ]
+        margin = confidence - max(alternatives, default=-1.0)
+        if student_id and margin < min_margin:
+            student_id = None
+        result.append({
+            'student_id': student_id,
+            'confidence': max(0.0, confidence),
+            'identity_margin': round(float(margin), 4),
+        })
+    return result
 
 
 def build_gallery_from_photos(

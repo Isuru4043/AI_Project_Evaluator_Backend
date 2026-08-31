@@ -105,6 +105,30 @@ class FacePhotoView(APIView):
             if old_url not in urls:
                 _delete_face_blob(old_url)
 
+        # Recognition vectors are prepared immediately after enrollment, not
+        # rebuilt for every physical session. The original photos remain the
+        # source of truth and binding can still fall back to them while this
+        # short background job is running.
+        try:
+            from django_q.tasks import async_task
+            from attribution.models import FaceEnrollmentEmbeddingCache
+
+            FaceEnrollmentEmbeddingCache.objects.update_or_create(
+                student=student,
+                defaults={
+                    'photo_fingerprint': FaceEnrollmentEmbeddingCache.fingerprint(urls),
+                    'embeddings': [],
+                    'engine_version': '',
+                    'status': FaceEnrollmentEmbeddingCache.Status.PENDING,
+                    'error_message': '',
+                },
+            )
+            async_task('attribution.tasks.refresh_face_embedding_cache', str(student.id))
+        except Exception:
+            # Enrollment itself is durable. A failed queue submission is
+            # visible as pending/failed and the binder can use photo fallback.
+            logger.exception('Could not queue face embedding preparation for %s', student.id)
+
         return Response({
             'success': True,
             'message': f'Face registration complete with {len(urls)} samples.',
