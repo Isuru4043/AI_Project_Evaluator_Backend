@@ -56,6 +56,10 @@ class Command(BaseCommand):
             '--no-demo', action='store_false', dest='demo_enabled', default=True,
             help='Send students directly to the viva instead of starting with demo mode.',
         )
+        parser.add_argument(
+            '--individual', action='store_true', default=False,
+            help='Create an individual project/session instead of a group session.',
+        )
 
     def handle(self, *args, **options):
         from core.models import (
@@ -145,6 +149,11 @@ class Command(BaseCommand):
                 'Student account(s) not found: ' + ', '.join(missing_students)
             )
         students = [students_by_email[email] for email in student_emails]
+        individual = bool(options['individual'])
+        if individual and len(students) != 1:
+            raise CommandError(
+                'An individual session requires exactly one --student-email.'
+            )
 
         self.stdout.write(f'Reading rubric: {rubric_path}')
         rubric_text = extract_text_from_file(str(rubric_path))
@@ -173,7 +182,7 @@ class Command(BaseCommand):
                     description=(
                         f'Automatically provisioned evaluation for {report_path.stem}.'
                     ),
-                    is_group_project=True,
+                    is_group_project=not individual,
                     submission_deadline=timezone.now() + timedelta(days=30),
                     status=Project.Status.DRAFT,
                     academic_year=options['academic_year'],
@@ -196,17 +205,25 @@ class Command(BaseCommand):
                     physical_config.set_panel_pin(options['panel_pin'])
                     physical_config.save()
 
-                group = StudentGroup.objects.create(
-                    project=project,
-                    group_name=f'{name} Group',
-                )
-                GroupMember.objects.bulk_create([
-                    GroupMember(group=group, student=student) for student in students
-                ])
-                submission = ProjectSubmission.objects.create(
-                    project=project,
-                    group=group,
-                )
+                group = None
+                if individual:
+                    submission = ProjectSubmission.objects.create(
+                        project=project,
+                        student=students[0],
+                    )
+                else:
+                    group = StudentGroup.objects.create(
+                        project=project,
+                        group_name=f'{name} Group',
+                    )
+                    GroupMember.objects.bulk_create([
+                        GroupMember(group=group, student=student)
+                        for student in students
+                    ])
+                    submission = ProjectSubmission.objects.create(
+                        project=project,
+                        group=group,
+                    )
                 index_status = SubmissionIndexStatus.objects.create(
                     submission=submission,
                     extracted_text=report_text,
@@ -227,7 +244,8 @@ class Command(BaseCommand):
             report_url = upload_report_to_blob(
                 report_file,
                 str(project.id),
-                group_id=str(group.id),
+                student_id=str(students[0].id) if individual else None,
+                group_id=str(group.id) if group else None,
             )
             submission.report_file_url = report_url
             submission.save(update_fields=['report_file_url'])
@@ -252,6 +270,7 @@ class Command(BaseCommand):
                 session = EvaluationSession.objects.create(
                     project=project,
                     group=group,
+                    student=students[0] if individual else None,
                     submission=submission,
                     scheduled_start=scheduled_start,
                     scheduled_end=scheduled_start + timedelta(minutes=duration),
@@ -265,7 +284,11 @@ class Command(BaseCommand):
                     max_total_questions=max_questions,
                     viva_weight_percentage=viva_weight,
                     grouping_cache=grouping_cache,
-                    agora_channel_name=f'group_{group.id}',
+                    agora_channel_name=(
+                        f'individual_{students[0].id}'
+                        if individual
+                        else f'group_{group.id}'
+                    ),
                 )
         except Exception as exc:
             if project is not None:
@@ -279,7 +302,10 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS('\nReady session created successfully.'))
         self.stdout.write(f'Project:       {project.project_name}')
         self.stdout.write(f'Project ID:    {project.id}')
-        self.stdout.write(f'Group:         {group.group_name}')
+        if group:
+            self.stdout.write(f'Group:         {group.group_name}')
+        else:
+            self.stdout.write(f'Student:       {students[0].user.full_name}')
         self.stdout.write(f'Session ID:    {session.id}')
         self.stdout.write(f'Mode:          {project.evaluation_mode}')
         self.stdout.write(f'Scheduled:     {session.scheduled_start:%Y-%m-%d %H:%M} - {session.scheduled_end:%H:%M}')

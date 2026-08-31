@@ -225,6 +225,7 @@ class CVSummaryView(APIView):
                             'artifact': None,
                             'recording_url': '',
                             'playback_url': None,
+                            'duration_seconds': getattr(upload, 'duration_seconds', None),
                             'question_timeline': build_question_timeline(session),
                             'error_message': '',
                             'updated_at': getattr(upload, 'updated_at', run.updated_at),
@@ -238,6 +239,7 @@ class CVSummaryView(APIView):
                             'artifact': None,
                             'recording_url': '',
                             'playback_url': None,
+                            'duration_seconds': getattr(upload, 'duration_seconds', None),
                             'question_timeline': build_question_timeline(session),
                             'error_message': getattr(upload, 'error_message', '') or 'Recording upload failed.',
                             'updated_at': getattr(upload, 'updated_at', run.updated_at),
@@ -261,6 +263,14 @@ class CVSummaryView(APIView):
         # Short-lived playback URL the examiner's <video> can stream without
         # a bearer header: a signed local endpoint, or an Azure SAS URL.
         playback_url = self._playback_url(request, session_id, report.recording_url)
+        recording = (
+            SessionRecording.objects
+            .filter(session=session)
+            .exclude(video_file_url__isnull=True)
+            .exclude(video_file_url='')
+            .order_by('-recorded_at')
+            .first()
+        )
 
         return Response({
             'success': True,
@@ -269,6 +279,7 @@ class CVSummaryView(APIView):
                 'artifact': report.artifact,
                 'recording_url': report.recording_url,
                 'playback_url': playback_url,
+                'duration_seconds': recording.duration_seconds if recording else None,
                 'question_timeline': build_question_timeline(session),
                 'error_message': report.error_message,
                 'updated_at': report.updated_at,
