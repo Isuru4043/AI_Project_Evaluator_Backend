@@ -142,6 +142,10 @@ class Relay:
         try:
             response = requests.get(
                 f'{self.api_base}/physio/station/active/',
+                # The band's own name is how the platform knows which session
+                # claimed it. Without this the server can only guess, and with
+                # two vivas running at once it guesses wrong.
+                params={'device': self.device_name},
                 headers={'X-Station-Token': self.token},
                 timeout=10,
             )
@@ -178,7 +182,8 @@ class Relay:
             )
         else:
             self.session_label = ''
-            logger.info('no session running; holding the band link')
+            reason = data.get('reason') or 'no session running'
+            logger.info('%s; holding the band link', reason)
 
     def add(self, sample: dict) -> None:
         sample['t'] = datetime.now(timezone.utc).isoformat()

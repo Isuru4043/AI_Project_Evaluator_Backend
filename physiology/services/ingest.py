@@ -35,10 +35,20 @@ def bind_device(session, device_id: str, student) -> PhysioDevice:
 
     Any previous binding is closed rather than deleted, so samples already
     captured keep the attribution that was true when they were recorded.
+
+    The release covers OTHER SESSIONS holding the same device_id, not just
+    this one. A band is a physical object on one wrist: leaving a stale claim
+    behind on a previous session made "which session owns this band" genuinely
+    ambiguous, and the relay then fed whichever claim happened to be newest -
+    somebody else's viva.
     """
+    now = timezone.now()
     PhysioDevice.objects.filter(
         session=session, unbound_at__isnull=True,
-    ).update(unbound_at=timezone.now())
+    ).update(unbound_at=now)
+    PhysioDevice.objects.filter(
+        device_id=device_id, unbound_at__isnull=True,
+    ).exclude(session=session).update(unbound_at=now)
 
     return PhysioDevice.objects.create(
         session=session, device_id=device_id, student=student,

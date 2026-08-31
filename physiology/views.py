@@ -387,17 +387,53 @@ class StationActiveSessionView(APIView):
             return _err('Exam stations only.', code=403)
 
         from physical_evaluation.models import PhysicalEvaluationRun
+        from physiology.models import PhysioDevice
 
-        run = (
-            PhysicalEvaluationRun.objects
-            .filter(status__in=[
-                PhysicalEvaluationRun.Status.DEMO_IN_PROGRESS,
-                PhysicalEvaluationRun.Status.VIVA_IN_PROGRESS,
-            ])
-            .select_related('session__project')
-            .order_by('-created_at')
-            .first()
-        )
+        active = PhysicalEvaluationRun.objects.filter(status__in=[
+            PhysicalEvaluationRun.Status.DEMO_IN_PROGRESS,
+            PhysicalEvaluationRun.Status.VIVA_IN_PROGRESS,
+        ])
+
+        # Which session has CLAIMED this band, rather than which session is
+        # newest. Picking the newest was wrong the moment two sessions ran at
+        # once: two kiosks minutes - or seconds - apart are indistinguishable
+        # by age or by activity, and the relay would feed somebody else's
+        # viva. The kiosk panel binding the band is the only unambiguous
+        # statement of which room this device is in, so that is what decides.
+        device_id = (request.query_params.get('device') or '').strip()
+        run = None
+        if device_id:
+            binding = (
+                PhysioDevice.objects
+                .filter(
+                    device_id=device_id,
+                    unbound_at__isnull=True,
+                    session__physical_run__in=active,
+                )
+                .select_related('session__project')
+                .order_by('-bound_at')
+                .first()
+            )
+            if binding is not None:
+                run = active.filter(session=binding.session).first()
+
+        if run is None:
+            # No claim yet. Fall back only when there is exactly one session
+            # running, where "which one" cannot be ambiguous; with several
+            # live at once, feeding a guess is worse than feeding nothing.
+            candidates = list(active.select_related('session__project')[:2])
+            if len(candidates) == 1:
+                run = candidates[0]
+            else:
+                return _ok({
+                    'session_id': None,
+                    'reason': (
+                        'no session has claimed this band'
+                        if candidates else 'no session running'
+                    ),
+                    'active_sessions': len(candidates),
+                })
+
         if run is None:
             return _ok({'session_id': None})
 
