@@ -7,15 +7,16 @@ from urllib.parse import unquote, urlparse
 from django.core.files.base import ContentFile
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 
 DEFAULT_RUBRIC = r'C:\Users\shami\Desktop\Test\Zero_Trust_Project_Evaluation_Rubric.pdf'
 DEFAULT_REPORT = r'C:\Users\shami\Desktop\Test\zerotrust.pdf'
-DEFAULT_EXAMINER = 'examiner@university.edu'
+DEFAULT_EXAMINER = 'examiner@university.edu' 
 DEFAULT_STUDENTS = (
-    # 'student@university.edu',
-    'Pavith@gmail.com',
+ 'student@university.edu',
+    'Pavith@gmail.com',  
     'isuru.akalanka8058@gmail.com',
 )
 
@@ -127,10 +128,14 @@ class Command(BaseCommand):
         if not student_emails or any(not email for email in student_emails):
             raise CommandError('At least one valid --student-email is required.')
 
+        email_query = Q()
+        for email in student_emails:
+            email_query |= Q(user__email__iexact=email)
+
         students_by_email = {
             profile.user.email.lower(): profile
             for profile in StudentProfile.objects.filter(
-                user__email__in=student_emails,
+                email_query,
                 user__role='student',
             ).select_related('user')
         }

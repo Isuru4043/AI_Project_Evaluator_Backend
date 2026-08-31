@@ -295,8 +295,37 @@ def bind_faces(
         f"burst bound {len(recognised)} students across {len(frames)} frames",
         flush=True,
     )
+
+    # Keep the old response contract during rolling deployments. Older API
+    # workers read only ``matches`` while current workers consume every item
+    # in ``frame_matches`` and perform their own temporal aggregation. Return
+    # the strongest observation for each identity so an older worker does not
+    # silently turn a successful multi-frame recognition pass into zero saved
+    # SpeakerBinding rows.
+    strongest_by_student = {}
+    best_unknowns = []
+    max_detected = 0
+    for matches in frame_matches:
+        max_detected = max(max_detected, len(matches))
+        unknowns = [match for match in matches if not match.get("student_id")]
+        if len(unknowns) > len(best_unknowns):
+            best_unknowns = unknowns
+        for match in matches:
+            student_id = match.get("student_id")
+            if not student_id:
+                continue
+            current = strongest_by_student.get(student_id)
+            if current is None or float(match.get("confidence", 0) or 0) > float(
+                current.get("confidence", 0) or 0
+            ):
+                strongest_by_student[student_id] = match
+
+    legacy_matches = list(strongest_by_student.values())
+    unknown_slots = max(0, max_detected - len(legacy_matches))
+    legacy_matches.extend(best_unknowns[:unknown_slots])
     return {
         "frame_matches": frame_matches,
+        "matches": legacy_matches,
         "frames_processed": len(frames),
     }
 

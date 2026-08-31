@@ -172,6 +172,11 @@ def bind_from_frames(session, frame_bytes_list: list[bytes]) -> dict:
         matches = _bind_local_frames(frames, photos)
     else:
         matches = _bind_modal_frames(frames, photos)
+    if not matches:
+        raise RuntimeError(
+            'No faces were returned by the recognition service. Keep every '
+            'participant visible, then retry identification.'
+        )
     frames_processed = max(
         (int(match.get('frames_processed', 0) or 0) for match in matches),
         default=len(frames),
