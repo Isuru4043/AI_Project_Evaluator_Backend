@@ -355,3 +355,96 @@ class PhysioTimelineView(APIView):
             payload['timeline'] = analysis.build_timeline(session, measured)
 
         return _ok(payload)
+
+
+class StationActiveSessionView(APIView):
+    """GET /api/physio/station/active/
+
+    Which physical session, if any, is running right now.
+
+    This exists so the band relay can be a SERVICE rather than a command
+    somebody types. A sidecar started with a session id in its URL has to be
+    launched by hand once per viva, which in practice means it gets launched
+    late or not at all - and a calm baseline can only be captured while it is
+    already streaming. Asking the platform "who am I feeding?" lets one
+    process start at boot and follow sessions as they come and go.
+
+    Station-token only: it reveals which room is busy, which is not a
+    student's business and not a browser's.
+
+    Single station per deployment is assumed. With several exam rooms sharing
+    one backend this would need scoping to the kiosk that opened the session.
+    """
+
+    authentication_classes = [
+        ExamStationAuthentication,
+        PhysicalKioskAuthentication,
+    ]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not is_station_principal(request.user):
+            return _err('Exam stations only.', code=403)
+
+        from physical_evaluation.models import PhysicalEvaluationRun
+        from physiology.models import PhysioDevice
+
+        active = PhysicalEvaluationRun.objects.filter(status__in=[
+            PhysicalEvaluationRun.Status.DEMO_IN_PROGRESS,
+            PhysicalEvaluationRun.Status.VIVA_IN_PROGRESS,
+        ])
+
+        # Which session has CLAIMED this band, rather than which session is
+        # newest. Picking the newest was wrong the moment two sessions ran at
+        # once: two kiosks minutes - or seconds - apart are indistinguishable
+        # by age or by activity, and the relay would feed somebody else's
+        # viva. The kiosk panel binding the band is the only unambiguous
+        # statement of which room this device is in, so that is what decides.
+        device_id = (request.query_params.get('device') or '').strip()
+        run = None
+        if device_id:
+            binding = (
+                PhysioDevice.objects
+                .filter(
+                    device_id=device_id,
+                    unbound_at__isnull=True,
+                    session__physical_run__in=active,
+                )
+                .select_related('session__project')
+                .order_by('-bound_at')
+                .first()
+            )
+            if binding is not None:
+                run = active.filter(session=binding.session).first()
+
+        if run is None:
+            # No claim yet. Fall back only when there is exactly one session
+            # running, where "which one" cannot be ambiguous; with several
+            # live at once, feeding a guess is worse than feeding nothing.
+            candidates = list(active.select_related('session__project')[:2])
+            if len(candidates) == 1:
+                run = candidates[0]
+            else:
+                return _ok({
+                    'session_id': None,
+                    'reason': (
+                        'no session has claimed this band'
+                        if candidates else 'no session running'
+                    ),
+                    'active_sessions': len(candidates),
+                })
+
+        if run is None:
+            return _ok({'session_id': None})
+
+        session = run.session
+        device = ingest.bound_device(session)
+        return _ok({
+            'session_id': str(session.id),
+            'project': session.project.project_name,
+            'phase': run.status,
+            # The relay posts regardless, but this tells the log whether the
+            # samples will be accepted or bounced for want of a wearer.
+            'device_bound': device is not None,
+            'student_name': _name(device.student) if device else None,
+        })
