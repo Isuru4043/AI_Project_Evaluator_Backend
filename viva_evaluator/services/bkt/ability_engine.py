@@ -207,14 +207,23 @@ def update_ability(
 def bloom_target_for_ability(p_lt: float) -> str:
     """
     Pick the next Bloom level to target. CAT theory says to ask items near the
-    current ability estimate (maximally informative). We keep the same mastery
-    thresholds the project already used so behaviour stays comparable; the real
-    upgrade is in how ability is *estimated*, not in this mapping.
+    current ability estimate (maximally informative).
+
+    The bands are deliberately generous. Ability starts at P_L0 = 0.30 and one
+    good answer moves it ~0.10, so the original 0.35/0.55/0.75 ladder pushed a
+    competent student to Analyze by the fourth or fifth question and Evaluate
+    soon after — an escalation far too steep for an undergraduate viva.
+    Widening the lower bands keeps students on Understand and Apply for most of
+    a normal session; Analyze and Evaluate are still reachable, but only once
+    mastery is genuinely well evidenced.
+
+    Tuning note: raise these to make the viva easier, lower them to make it
+    harder. This is the single strongest difficulty dial in the pipeline.
     """
-    if p_lt < 0.35:
+    if p_lt < 0.45:
         return 'Understand'
-    if p_lt < 0.55:
+    if p_lt < 0.65:
         return 'Apply'
-    if p_lt < 0.75:
+    if p_lt < 0.82:
         return 'Analyze'
     return 'Evaluate'
