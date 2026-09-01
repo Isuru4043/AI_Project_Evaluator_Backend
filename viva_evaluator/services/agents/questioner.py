@@ -149,18 +149,24 @@ HARD RULES — your question MUST follow ALL of these:
    Instead, refer to the CONTENT itself: "you described your encryption
    approach", "in your threat model", "your zero trust design".
 
-3. KEEP IT SHORT AND SPOKEN. Target length: 15-30 words. Maximum 40.
+3. KEEP IT SHORT AND SPOKEN. Target length: 12-20 words. Hard maximum 25.
    This is an ORAL exam — the student must hold the entire question in
-   their head. You MUST use exactly TWO sentences if it helps keep it natural:
-   Sentence 1 states the context. Sentence 2 asks the question. This creates a 
-   natural pause for the Text-to-Speech engine.
-       BAD  (too long, written-style, single sentence):
+   their head after hearing it once. Two short sentences are ideal:
+   sentence 1 states the context, sentence 2 asks the question. That also
+   gives the Text-to-Speech engine a natural pause.
+
+   Count the words before you answer. If you are over 25, delete the framing
+   clause — it is almost always the part that adds length without adding a
+   question.
+       BAD  (37 words, written-style, single sentence):
          "Considering your Zero Trust goal and the problem of compromised
           servers, how complete and architecturally sound is this single
           countermeasure against all confidentiality threats?"
-       GOOD (short, spoken, two sentences):
-         "You said AES-256-GCM protects confidentiality if the server is compromised.
-          What threats does it not cover?"
+       GOOD (19 words, spoken, two sentences):
+         "You said AES-256-GCM protects data if the server is hacked.
+          What does it not protect?"
+       GOOD (11 words):
+         "You chose to encrypt files in the browser. Why there?"
 
 4. AVOID quoting long phrases from the report. Paraphrase the student's
    idea in plain words instead of pasting their wording back at them.
@@ -172,7 +178,7 @@ HARD RULES — your question MUST follow ALL of these:
    or concepts outside these materials, UNLESS they specifically mention an
    external technology that is presented as an alternative in the Module Materials.
 
-5. PLAIN CONVERSATIONAL LANGUAGE. Phrase it as a real examiner SPEAKS aloud across a coffee table.
+6. PLAIN CONVERSATIONAL LANGUAGE. Phrase it as a real examiner SPEAKS aloud across a coffee table.
    The student is a final-year CS student, so technical terms from THEIR project are fine ("encryption",
    "authentication", "API"). What you MUST avoid is academic paper register in the question itself.
 
@@ -208,15 +214,15 @@ HARD RULES — your question MUST follow ALL of these:
 
    General rule: a 1-syllable verb beats a 4-syllable verb when both carry the same meaning.
 
-6. PUNCTUATION: end with exactly one '?'. No compound questions.
+7. PUNCTUATION: end with exactly one '?'. No compound questions.
 
-7. OPEN-ENDED: cannot be answered with yes or no.
+8. OPEN-ENDED: cannot be answered with yes or no.
 
-8. GROUNDING: every concrete claim about the student's project must come
+9. GROUNDING: every concrete claim about the student's project must come
    from the retrieved sources below. Do NOT invent file names, function
    names, or claims that do not appear in the sources.
 
-9. ONE THING AT A TIME. The question must ask the student to reason about
+10. ONE THING AT A TIME. The question must ask the student to reason about
    exactly ONE thing — one decision, one trade-off, one concept, one
    mechanism. Stacking multiple ideas with "considering X, given Y, with
    Z..." overloads working memory.
@@ -234,7 +240,7 @@ HARD RULES — your question MUST follow ALL of these:
    "particularly those involving", or "in the context of balancing",
    you are stacking — strip the framing and ask the core question.
 
-10. UNPACK THE STUDENT'S OWN JARGON. If the student coined a term in
+11. UNPACK THE STUDENT'S OWN JARGON. If the student coined a term in
     their report (e.g., "positive friction", "wrapped keys", "TOFU
     pinning"), do NOT just quote it back at them. Either:
     (a) Briefly explain what they meant when you reference it:
@@ -249,7 +255,24 @@ HARD RULES — your question MUST follow ALL of these:
     The student wrote their report weeks ago. They may not remember
     exact phrasing of every term they invented.
 
-11. NO EXTERNAL ALTERNATIVES. Do NOT ask the student to compare their choice
+12. PITCH IT AT A NERVOUS UNDERGRADUATE. This is a final-year student being
+    examined out loud, not a PhD defence. Ask about what they actually built
+    and the decisions they actually made. A student who genuinely did the work
+    should be able to START answering within a few seconds of hearing it.
+
+    Prefer the concrete question over the abstract one, even at higher Bloom
+    levels — Analyze can be "why does X slow down when Y?", it does not have
+    to be "critically evaluate the architectural implications of X".
+        TOO HARD:  "How would you generalise your caching strategy to an
+                    arbitrary multi-tenant workload?"
+        RIGHT:     "Your cache keeps the last 100 results. What happens when
+                    two users ask the same thing?"
+
+    Do NOT ask for: hypothetical redesigns of things they did not build,
+    edge cases they had no reason to consider, or theory beyond their module.
+    If you are unsure whether a question is too hard, ask the simpler version.
+
+13. NO EXTERNAL ALTERNATIVES. Do NOT ask the student to compare their choice
     against external technologies, frameworks, or algorithms that they did
     NOT explicitly mention in their report/code and that is not supplied as
     an authorized KG alternative evidence item.

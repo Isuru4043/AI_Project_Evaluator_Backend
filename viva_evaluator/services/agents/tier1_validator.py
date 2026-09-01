@@ -23,8 +23,11 @@ logger = logging.getLogger(__name__)
 # Configuration — tuneable from settings.py later if needed.
 # =============================================================================
 
-MIN_WORDS = 12
-MAX_WORDS = 60       # tightened from 80 — viva questions should be spoken-length
+MIN_WORDS = 8
+# The prompt asks for 12-20 words; this is the backstop, not the target. It sat
+# at 60, so a 55-word question sailed through validation while the prompt was
+# still politely asking for 40 — the rule that actually bound was the loose one.
+MAX_WORDS = 30
 MAX_QUESTION_MARKS = 1
 SIMILARITY_THRESHOLD = 0.82
 

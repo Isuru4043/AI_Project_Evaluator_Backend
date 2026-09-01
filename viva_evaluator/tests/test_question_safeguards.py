@@ -531,7 +531,10 @@ class SafeQuestionUnavailableViewTests(TestCase):
             ),
         ):
             response = SessionStartView().post(
-                SimpleNamespace(data={"session_id": "session-1"})
+                # auth=None: the view checks for a kiosk credential before it
+                # reaches the pipeline, so a request without one returns 500
+                # on an AttributeError instead of the 503 under test.
+                SimpleNamespace(data={"session_id": "session-1"}, auth=None)
             )
 
         self.assertEqual(response.status_code, 503)
