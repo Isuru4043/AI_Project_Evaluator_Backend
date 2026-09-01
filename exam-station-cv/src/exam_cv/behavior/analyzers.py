@@ -24,12 +24,30 @@ from ..contracts.schemas import (
 
 @dataclass
 class FaceTickObservation:
-    """What the face pipeline knows about one tick of the session."""
+    """What the face pipeline knows about one tick of the session.
+
+    ``gaze_on_camera`` and ``visible_ids`` are deliberately separate. A student
+    who turns far enough that the mesh loses their face is *not looking at the
+    camera* — that has to keep their look-away spell running — but they are
+    also not *present*, which is the presence analyzer's business. Folding the
+    two together (presence == "has a gaze entry") meant the most blatant
+    look-aways silently reset the gaze timer and were never flagged.
+    """
 
     t_ms: int
-    # student_id -> gaze on-camera (True/False); only identified faces appear
+    # student_id -> gaze on-camera (True/False). May include a student whose
+    # face was not detected this tick, recorded as False.
     gaze_on_camera: dict[str, bool] = field(default_factory=dict)
     unknown_face_count: int = 0  # faces present but matching no roster identity
+    # Students whose face was actually detected. None means "same as the gaze
+    # keys", which is what every caller predating the split meant.
+    visible_ids: Optional[set[str]] = None
+
+    @property
+    def present(self) -> set[str]:
+        if self.visible_ids is not None:
+            return set(self.visible_ids)
+        return set(self.gaze_on_camera)
 
 
 class GazeAnalyzer:
@@ -38,10 +56,10 @@ class GazeAnalyzer:
     Two thresholds, because looking away is not by itself suspicious — a
     student thinking through an answer glances off constantly:
 
-    * ``glance_threshold_ms`` (1.5s) marks an off-spell as a *glance* — an
+    * ``glance_threshold_ms`` (1.0s) marks an off-spell as a *glance* — an
       advisory BehavioralEvent, counted in the summary so the examiner sees
       "8 look-aways" without being shown eight of anything.
-    * ``flag_threshold_ms`` (2.5s) is the point an off-spell becomes long enough
+    * ``flag_threshold_ms`` (2.0s) is the point an off-spell becomes long enough
       to be worth watching, and earns one timecoded IntegrityFlag.
 
     Both are edge-triggered per off-spell, so a 40-second stare produces one
@@ -50,8 +68,8 @@ class GazeAnalyzer:
 
     def __init__(
         self,
-        glance_threshold_ms: int = 1500,
-        flag_threshold_ms: int = 2500,
+        glance_threshold_ms: int = 1000,
+        flag_threshold_ms: int = 2000,
         video_offset_ms: int = 0,
     ):
         self.glance_threshold_ms = glance_threshold_ms
@@ -63,6 +81,7 @@ class GazeAnalyzer:
 
     def push(self, obs: FaceTickObservation) -> list[BehavioralEvent | IntegrityFlag]:
         events: list[BehavioralEvent | IntegrityFlag] = []
+        present = obs.present
         for sid, on_camera in obs.gaze_on_camera.items():
             events.append(
                 BehavioralEvent(
@@ -90,7 +109,15 @@ class GazeAnalyzer:
                         payload={"duration_ms": off_for},
                     )
                 )
-            if off_for >= self.flag_threshold_ms and sid not in self._flag_open:
+            # While the face is not visible the spell keeps running — the time
+            # still counts against attention — but the marker belongs to the
+            # presence analyzer, which fires sooner and says the truer thing.
+            # Emitting both would put two dots on one incident.
+            if (
+                off_for >= self.flag_threshold_ms
+                and sid not in self._flag_open
+                and sid in present
+            ):
                 self._flag_open.add(sid)
                 events.append(
                     IntegrityFlag.at(
@@ -110,14 +137,20 @@ class GazeAnalyzer:
 class PresenceAnalyzer:
     """Absence intervals per student + unknown/extra-person integrity flags.
 
-    Flags are edge-triggered (one per incident, at incident start) so a
-    5-minute intrusion produces one timecoded note, not 600 events.
+    Presence is read from ``obs.present`` (the faces actually detected), never
+    from the gaze map, which may carry a False entry for a student precisely
+    because they are not visible.
+
+    ``absence_threshold_ms`` (1.5s) is short on purpose: turning away from the
+    camera for a second and a half during an oral exam is worth a timecoded
+    pointer. Flags are edge-triggered (one per incident, at incident start) so
+    a 5-minute intrusion produces one timecoded note, not 600 events.
     """
 
     def __init__(
         self,
         roster_ids: list[str],
-        absence_threshold_ms: int = 5000,
+        absence_threshold_ms: int = 1500,
         video_offset_ms: int = 0,
     ):
         self.roster_ids = list(roster_ids)
@@ -129,7 +162,7 @@ class PresenceAnalyzer:
 
     def push(self, obs: FaceTickObservation) -> list[BehavioralEvent | IntegrityFlag]:
         out: list[BehavioralEvent | IntegrityFlag] = []
-        present = set(obs.gaze_on_camera.keys())
+        present = obs.present
 
         for sid in self.roster_ids:
             if sid in present:
@@ -157,7 +190,10 @@ class PresenceAnalyzer:
                             t_ms=start,
                             kind=IntegrityKind.STUDENT_ABSENT,
                             note=(
-                                f"Student {sid} left the frame — review recording"
+                                f"Student {sid} turned away from or left the "
+                                f"camera for "
+                                f"{self.absence_threshold_ms / 1000:g}s+ — "
+                                f"review recording"
                             ),
                             video_offset_ms=self.video_offset_ms,
                             student_id=sid,

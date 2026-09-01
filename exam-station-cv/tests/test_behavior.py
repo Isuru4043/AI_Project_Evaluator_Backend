@@ -67,17 +67,55 @@ class TestGazeAnalyzer:
         assert flags[0].t_ms == 60_000          # anchored at look-away start
         assert flags[0].video_timecode == "00:01:00"
 
-    def test_default_flag_threshold_is_two_and_a_half_seconds(self):
+    def test_default_flag_threshold_is_two_seconds(self):
         g = GazeAnalyzer()
         out = []
         for t in range(0, 3000, TICK):
             out += g.push(FaceTickObservation(t, {"s1": False}))
 
         flags = [e for e in out if isinstance(e, IntegrityFlag)]
-        assert g.flag_threshold_ms == 2500
+        assert g.flag_threshold_ms == 2000
         assert len(flags) == 1
         assert flags[0].t_ms == 0
-        assert "2.5s+" in flags[0].note
+        assert "2s+" in flags[0].note
+
+    def test_look_away_survives_the_face_being_lost(self):
+        """Turning far enough that the mesh drops the face must not erase the
+        look-away: the spell keeps running, and the flag lands the moment the
+        student is visible again while still off-camera."""
+        g = GazeAnalyzer()
+        out = []
+        # Visible but off-camera for under the threshold.
+        for t in range(0, 1000, TICK):
+            out += g.push(
+                FaceTickObservation(t, {"s1": False}, visible_ids={"s1"})
+            )
+        assert not [e for e in out if isinstance(e, IntegrityFlag)]
+
+        # Face lost: the timer keeps running, but presence owns this window.
+        for t in range(1000, 2500, TICK):
+            out += g.push(FaceTickObservation(t, {"s1": False}, visible_ids=set()))
+        assert not [e for e in out if isinstance(e, IntegrityFlag)]
+
+        # Back in frame, still looking away — now past 2s in total.
+        out += g.push(
+            FaceTickObservation(2500, {"s1": False}, visible_ids={"s1"})
+        )
+        flags = [e for e in out if isinstance(e, IntegrityFlag)]
+        assert len(flags) == 1
+        assert flags[0].t_ms == 0  # anchored where the student first looked away
+
+    def test_off_camera_time_still_sampled_while_the_face_is_lost(self):
+        """The gaze samples keep coming, so attention_pct counts the gap."""
+        g = GazeAnalyzer()
+        out = g.push(FaceTickObservation(0, {"s1": False}, visible_ids=set()))
+        samples = [
+            e
+            for e in out
+            if isinstance(e, BehavioralEvent) and e.kind == BehavioralKind.GAZE_SAMPLE
+        ]
+        assert len(samples) == 1
+        assert samples[0].payload["on_camera"] is False
 
     def test_thinking_glance_stays_below_the_flag_threshold(self):
         """A 4s glance is a student thinking, not evidence — it counts as a
@@ -149,6 +187,29 @@ class TestPresenceAnalyzer:
         out += p.push(FaceTickObservation(2 * TICK, {"s1": True}, unknown_face_count=1))
         flags = [e for e in out if isinstance(e, IntegrityFlag)]
         assert len(flags) == 2
+
+    def test_default_absence_threshold_is_one_and_a_half_seconds(self):
+        p = PresenceAnalyzer(["s1"])
+        out = []
+        for t in range(0, 2000, TICK):
+            out += p.push(FaceTickObservation(t, {}))
+        flags = [e for e in out if isinstance(e, IntegrityFlag)]
+        assert p.absence_threshold_ms == 1500
+        assert len(flags) == 1
+        assert flags[0].kind == IntegrityKind.STUDENT_ABSENT
+        assert "1.5s+" in flags[0].note
+
+    def test_presence_reads_visibility_not_the_gaze_map(self):
+        """A student recorded as looking away is still in the room. Presence
+        must come from the faces actually detected, or an off-camera gaze would
+        masquerade as an absence."""
+        p = PresenceAnalyzer(["s1"])
+        out = []
+        for t in range(0, 4000, TICK):
+            out += p.push(
+                FaceTickObservation(t, {"s1": False}, visible_ids={"s1"})
+            )
+        assert not [e for e in out if isinstance(e, IntegrityFlag)]
 
     def test_video_timecode_respects_offset(self):
         p = PresenceAnalyzer(["s1"], absence_threshold_ms=0, video_offset_ms=2000)

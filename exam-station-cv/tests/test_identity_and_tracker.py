@@ -6,6 +6,7 @@ from exam_cv.faces.identity import EnrollmentGallery, IdentityResolver, cosine
 from exam_cv.faces.mesh import (
     IoUTracker,
     coarse_gaze_on_camera,
+    iris_gaze_on_camera,
     mouth_aspect_ratio,
 )
 
@@ -103,11 +104,15 @@ def synthetic_landmarks(
     mouth_open: float = 0.0,
     nose_shift: float = 0.0,
     iris_shift: float = 0.0,
+    iris_drop: float = 0.0,
+    eye_open: float = 0.04,
 ) -> np.ndarray:
     """478-point array with just the indices our features read set meaningfully.
 
-    iris_shift moves both irises off eye-center (looking away for the
-    iris-gaze path); nose_shift turns the head (coarse-gaze path).
+    iris_shift moves both irises sideways off eye-center and iris_drop moves
+    them down (both are the iris-gaze path); nose_shift turns the head (the
+    coarse-gaze path). eye_open is the lid separation — drop it toward 0 to
+    simulate a blink, which must not read as a downward look.
     """
     pts = np.full((478, 2), 0.5, dtype=np.float32)
     pts[61] = (0.40, 0.60)   # mouth left
@@ -118,11 +123,15 @@ def synthetic_landmarks(
     pts[133] = (0.45, 0.45)  # left eye inner
     pts[362] = (0.55, 0.45)  # right eye inner
     pts[263] = (0.65, 0.45)  # right eye outer
+    pts[159] = (0.40, 0.45 - eye_open / 2)   # left eye upper lid
+    pts[145] = (0.40, 0.45 + eye_open / 2)   # left eye lower lid
+    pts[386] = (0.60, 0.45 - eye_open / 2)   # right eye upper lid
+    pts[374] = (0.60, 0.45 + eye_open / 2)   # right eye lower lid
     pts[1] = (0.50 + nose_shift, 0.55)  # nose tip
     for idx in (468, 469, 470, 471, 472):  # left iris centered in left eye
-        pts[idx] = (0.40 + iris_shift, 0.45)
+        pts[idx] = (0.40 + iris_shift, 0.45 + iris_drop)
     for idx in (473, 474, 475, 476, 477):  # right iris centered in right eye
-        pts[idx] = (0.60 + iris_shift, 0.45)
+        pts[idx] = (0.60 + iris_shift, 0.45 + iris_drop)
     return pts
 
 
@@ -137,3 +146,31 @@ class TestLandmarkFeatures:
 
     def test_coarse_gaze_turned_head(self):
         assert not coarse_gaze_on_camera(synthetic_landmarks(nose_shift=0.15))
+
+    def test_coarse_gaze_catches_a_modest_head_turn(self):
+        """0.08 of eye width used to pass as attentive; a head turned that far
+        is a student reading something beside the screen."""
+        assert not coarse_gaze_on_camera(synthetic_landmarks(nose_shift=0.08))
+
+    def test_iris_gaze_frontal(self):
+        assert iris_gaze_on_camera(synthetic_landmarks())
+
+    def test_iris_gaze_sideways_glance(self):
+        # 0.02 of the 0.10 eye span ⇒ ratio 0.70, past the 0.18 band.
+        assert not iris_gaze_on_camera(synthetic_landmarks(iris_shift=0.02))
+
+    def test_iris_gaze_looking_down_at_notes(self):
+        """The posture horizontal-only gaze missed entirely: head straight,
+        eyes down on notes or a phone."""
+        assert not iris_gaze_on_camera(synthetic_landmarks(iris_drop=0.010))
+
+    def test_blink_is_not_a_look_away(self):
+        """Closing lids collapse onto the iris; without the eye-open guard
+        every blink would read as a downward glance."""
+        assert iris_gaze_on_camera(
+            synthetic_landmarks(iris_drop=0.010, eye_open=0.004)
+        )
+
+    def test_iris_gaze_falls_back_to_coarse_without_iris_landmarks(self):
+        unrefined = synthetic_landmarks(nose_shift=0.15)[:468]
+        assert not iris_gaze_on_camera(unrefined)
