@@ -5,10 +5,12 @@ Runs in <100ms with no LLM call. Catches the most common failure modes
 before paying for a Critic call (Week 6).
 
 CHECKS:
-    1. Word count in [15, 80]
+    1. Word count in [MIN_WORDS, MAX_WORDS]
     2. Exactly one question mark
     3. Contains an anchor phrase ("you mentioned" / "in your" / "your code" / ...)
-    4. Cosine similarity to recent questions < 0.82 (anti-repetition)
+    4. No document-location reference ("page 5", "Table 4.1") — the student is
+       in an oral exam with no report in front of them
+    5. Cosine similarity to recent questions < 0.82 (anti-repetition)
 """
 
 import logging
@@ -30,6 +32,24 @@ MIN_WORDS = 8
 MAX_WORDS = 30
 MAX_QUESTION_MARKS = 1
 SIMILARITY_THRESHOLD = 0.82
+
+# A viva question is not always syntactically interrogative. "Walk me through
+# one upload." is a question in every sense that matters in an oral exam, and
+# the generator prompt explicitly offers that form as a GOOD example — so the
+# gate has to accept it, or it rejects the very phrasing it asked for.
+# Anchored at a sentence start so a mid-sentence "explain" does not qualify.
+_SENTENCE_START = r'(?:^|(?<=[.!?])\s+)'
+IMPERATIVE_PROBE_RE = re.compile(
+    '|'.join(
+        _SENTENCE_START + probe
+        for probe in (
+            r'(?:walk|talk|take)\s+(?:me|us)\s+through\b',
+            r'(?:tell|show)\s+(?:me|us)\b',
+            r'(?:explain|describe|outline|justify)\b',
+        )
+    ),
+    re.IGNORECASE,
+)
 
 ANCHOR_PATTERNS = [
     # Direct references to student's words/work/choices
@@ -143,7 +163,7 @@ def validate_question(
 
     # Check 2: question mark count
     qmark_count = text.count('?')
-    if qmark_count == 0:
+    if qmark_count == 0 and not IMPERATIVE_PROBE_RE.search(text):
         failures.append('missing_question_mark')
     elif qmark_count > MAX_QUESTION_MARKS:
         failures.append(f'compound_question ({qmark_count} question marks)')

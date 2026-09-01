@@ -164,7 +164,12 @@ class AnswerSubmitView(APIView):
         question_id = request.data.get('question_id')
         answer_text = request.data.get('answer_text', '').strip()
         speech_metrics = request.data.get('speech_metrics')   # Week 6: optional
-        speaker_id = request.data.get('speaker_id', 'group')
+        # Distinguish a speaker the CALLER named from one the attribution engine
+        # infers further down. Only the former is an authorisation question;
+        # conflating them let an inferred name block the person who was actually
+        # typing from submitting their own answer.
+        named_speaker_id = request.data.get('speaker_id')
+        speaker_id = named_speaker_id or 'group'
 
         if not question_id or not answer_text:
             return Response(
@@ -253,9 +258,20 @@ class AnswerSubmitView(APIView):
             caller_student = None
             if not isinstance(request.auth, PhysicalKioskAccess):
                 caller_student = getattr(request.user, 'student_profile', None)
-                if speaker_id != 'group' and (
-                    caller_student is None or caller_student.id != student_profile.id
-                ):
+                # Guard the caller's own CLAIM, never the engine's inference.
+                # In a remote group viva the attribution engine names whichever
+                # member it heard speaking, which is frequently not the member
+                # holding the keyboard — checking that name here rejected a
+                # student for submitting their own answer.
+                claimed_another_participant = (
+                    named_speaker_id not in (None, '', 'group')
+                    and (
+                        caller_student is None
+                        or student_profile is None
+                        or caller_student.id != student_profile.id
+                    )
+                )
+                if claimed_another_participant:
                     return Response(
                         {"error": "You cannot submit an answer for another participant."},
                         status=status.HTTP_403_FORBIDDEN,
