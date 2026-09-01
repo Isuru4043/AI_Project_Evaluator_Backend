@@ -476,6 +476,29 @@ ELEVENLABS_PRICE_PER_1000_CHARACTERS_USD = float(
     os.getenv('ELEVENLABS_PRICE_PER_1000_CHARACTERS_USD', '0')
 )
 
+# Student answer transcription (ElevenLabs Scribe).  Reuses ELEVENLABS_API_KEY;
+# the browser posts short recorded utterances to an authenticated route so the
+# key stays server-side.  Disabled means the UI falls back to browser speech.
+ELEVENLABS_STT_ENABLED = os.getenv(
+    'ELEVENLABS_STT_ENABLED', 'false'
+).lower() == 'true'
+ELEVENLABS_STT_MODEL_ID = os.getenv(
+    'ELEVENLABS_STT_MODEL_ID', 'scribe_v1'
+).strip()
+# Empty means auto-detect; set e.g. 'eng' to pin the expected viva language.
+ELEVENLABS_STT_LANGUAGE_CODE = os.getenv(
+    'ELEVENLABS_STT_LANGUAGE_CODE', ''
+).strip()
+ELEVENLABS_STT_TIMEOUT_SECONDS = float(
+    os.getenv('ELEVENLABS_STT_TIMEOUT_SECONDS', '25')
+)
+ELEVENLABS_STT_MAX_AUDIO_BYTES = int(
+    os.getenv('ELEVENLABS_STT_MAX_AUDIO_BYTES', '12000000')
+)
+ELEVENLABS_STT_MIN_AUDIO_BYTES = int(
+    os.getenv('ELEVENLABS_STT_MIN_AUDIO_BYTES', '1200')
+)
+
 # Offline performance gates used by question_validation_report --enforce.
 # They never interrupt a live viva; tune them after collecting a representative
 # baseline for the deployment region and selected provider models.

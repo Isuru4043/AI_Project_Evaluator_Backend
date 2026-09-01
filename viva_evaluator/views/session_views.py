@@ -3,6 +3,7 @@ from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.parsers import FormParser, MultiPartParser
 from django.http import HttpResponse
 from django.utils import timezone
 
@@ -630,6 +631,76 @@ class QuestionAudioView(APIView):
             {"tts_status": current_status},
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
+
+
+class AnswerTranscriptionView(APIView):
+    """
+    POST /api/viva/sessions/<session_id>/transcribe/
+
+    Transcribes one recorded utterance with ElevenLabs Scribe and returns the
+    text.  The browser records short segments and posts them here so the API
+    key stays server-side; a disabled or failing provider returns a status the
+    client uses to fall back to browser dictation or typing.
+    """
+
+    authentication_classes = [PhysicalKioskAuthentication, CookieJWTAuthentication]
+    permission_classes = [IsAuthenticated, VivaSessionPermission]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request, session_id):
+        from viva_evaluator.services.stt import (
+            is_enabled,
+            max_audio_bytes,
+            transcribe_answer_audio,
+        )
+
+        if not is_enabled():
+            return Response(
+                {"stt_status": "disabled", "text": ""},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        upload = request.FILES.get("audio") or request.FILES.get("file")
+        if upload is None:
+            return Response(
+                {"error": "An 'audio' file is required.", "stt_status": "failed"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if upload.size and upload.size > max_audio_bytes():
+            return Response(
+                {"error": "Audio clip is too large.", "stt_status": "failed"},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+
+        result = transcribe_answer_audio(
+            upload.read(),
+            content_type=getattr(upload, "content_type", "") or "",
+            filename=getattr(upload, "name", "") or "",
+        )
+
+        if result.status == "disabled":
+            return Response(
+                {"stt_status": "disabled", "text": ""},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        if result.status == "failed":
+            logger.warning(
+                "[AnswerTranscriptionView] Transcription failed for session %s (%s)",
+                session_id, result.error,
+            )
+            return Response(
+                {"stt_status": "failed", "text": "", "error": result.error[:160]},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        # "empty" is a normal outcome for a clip that held only silence.
+        return Response({
+            "stt_status": result.status,
+            "text": result.text,
+            "language_code": result.language_code,
+            "language_probability": result.language_probability,
+            "latency_ms": result.latency_ms,
+        })
 
 
 class SessionDetailedReportView(APIView):
