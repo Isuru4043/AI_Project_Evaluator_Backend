@@ -22,9 +22,25 @@ _MOUTH_TOP, _MOUTH_BOTTOM = 13, 14
 _MOUTH_LEFT, _MOUTH_RIGHT = 61, 291
 _LEFT_EYE_OUTER, _LEFT_EYE_INNER = 33, 133
 _RIGHT_EYE_INNER, _RIGHT_EYE_OUTER = 362, 263
+_LEFT_EYE_TOP, _LEFT_EYE_BOTTOM = 159, 145
+_RIGHT_EYE_TOP, _RIGHT_EYE_BOTTOM = 386, 374
 _LEFT_IRIS = [468, 469, 470, 471, 472]   # refined mesh only
 _RIGHT_IRIS = [473, 474, 475, 476, 477]  # refined mesh only
 _NOSE_TIP = 1
+
+# Gaze tuning. These decide how far off-axis counts as "not on the task", and
+# they are the sensitivity dial for every look-away flag downstream — the
+# analyzers only time spells the geometry has already called off-camera.
+#
+# Horizontal offsets are fractions of the eye/iris span where 0 = dead centre
+# and 0.5 = pinned to a corner, so 0.30 (the original value) meant a student
+# could stare at the far edge of the desk and still read as on-camera.
+GAZE_COARSE_MAX_OFFSET = 0.22    # nose lateral offset / eye width
+GAZE_IRIS_MAX_OFFSET = 0.18      # |iris ratio − 0.5|, horizontal
+GAZE_IRIS_MAX_VERTICAL = 0.22    # |iris ratio − 0.5|, vertical (notes/phone)
+# Below this lid separation the eye is blinking or squinting and the vertical
+# iris position is meaningless, so only the horizontal test is trusted.
+GAZE_MIN_EYE_OPEN = 0.15         # lid separation / eye width
 
 
 @dataclass
@@ -41,9 +57,11 @@ def mouth_aspect_ratio(landmarks: np.ndarray) -> float:
     return float(v / (h + 1e-9))
 
 
-def coarse_gaze_on_camera(landmarks: np.ndarray, max_offset: float = 0.35) -> bool:
+def coarse_gaze_on_camera(
+    landmarks: np.ndarray, max_offset: float = GAZE_COARSE_MAX_OFFSET
+) -> bool:
     """Cheap gaze proxy for NON-speaker faces (no iris needed): nose position
-    relative to the eye line — a strongly turned head reads as off-camera."""
+    relative to the eye line — a turned head reads as off-camera."""
     eye_l = landmarks[_LEFT_EYE_OUTER]
     eye_r = landmarks[_RIGHT_EYE_OUTER]
     nose = landmarks[_NOSE_TIP]
@@ -53,23 +71,55 @@ def coarse_gaze_on_camera(landmarks: np.ndarray, max_offset: float = 0.35) -> bo
     return lateral <= max_offset
 
 
-def iris_gaze_on_camera(landmarks: np.ndarray, max_offset: float = 0.30) -> bool:
+def iris_gaze_on_camera(
+    landmarks: np.ndarray,
+    max_offset: float = GAZE_IRIS_MAX_OFFSET,
+    max_vertical_offset: float = GAZE_IRIS_MAX_VERTICAL,
+) -> bool:
     """Iris-based gaze (refined mesh only): iris center inside the central
-    band of the eye corners ⇒ looking toward the camera/task."""
+    band of the eye ⇒ looking toward the camera/task.
+
+    Both axes are checked. Horizontal alone missed the most common off-task
+    posture in an oral exam — head still, eyes down on notes or a phone —
+    because reading downward barely moves the iris sideways at all.
+
+    The vertical test is skipped for an eye that is closing: while blinking the
+    lids collapse onto the iris and the ratio is noise, which would otherwise
+    make every blink read as a look-away.
+    """
     if landmarks.shape[0] <= _RIGHT_IRIS[-1]:
         # Unrefined mesh — fall back to the coarse proxy.
         return coarse_gaze_on_camera(landmarks)
 
-    def _eye_ratio(iris_idx, inner, outer) -> float:
+    def _axis_ratio(iris_idx, a_idx, b_idx) -> float:
+        """Iris centre projected onto the a→b axis. 0.5 = centred."""
         iris = landmarks[iris_idx].mean(axis=0)
-        a, b = landmarks[inner], landmarks[outer]
+        a, b = landmarks[a_idx], landmarks[b_idx]
         span = np.linalg.norm(b - a) + 1e-9
-        # 0.5 = centered; 0 or 1 = pinned to a corner
         return float(np.dot(iris - a, b - a) / (span * span))
 
-    l = _eye_ratio(_LEFT_IRIS, _LEFT_EYE_OUTER, _LEFT_EYE_INNER)
-    r = _eye_ratio(_RIGHT_IRIS, _RIGHT_EYE_INNER, _RIGHT_EYE_OUTER)
-    return abs(l - 0.5) <= max_offset and abs(r - 0.5) <= max_offset
+    def _eye_open(top_idx, bottom_idx, outer_idx, inner_idx) -> float:
+        lids = np.linalg.norm(landmarks[bottom_idx] - landmarks[top_idx])
+        width = np.linalg.norm(landmarks[outer_idx] - landmarks[inner_idx]) + 1e-9
+        return float(lids / width)
+
+    horizontal = (
+        _axis_ratio(_LEFT_IRIS, _LEFT_EYE_OUTER, _LEFT_EYE_INNER),
+        _axis_ratio(_RIGHT_IRIS, _RIGHT_EYE_INNER, _RIGHT_EYE_OUTER),
+    )
+    if any(abs(ratio - 0.5) > max_offset for ratio in horizontal):
+        return False
+
+    for iris, top, bottom, outer, inner in (
+        (_LEFT_IRIS, _LEFT_EYE_TOP, _LEFT_EYE_BOTTOM, _LEFT_EYE_OUTER, _LEFT_EYE_INNER),
+        (_RIGHT_IRIS, _RIGHT_EYE_TOP, _RIGHT_EYE_BOTTOM, _RIGHT_EYE_OUTER, _RIGHT_EYE_INNER),
+    ):
+        if _eye_open(top, bottom, outer, inner) < GAZE_MIN_EYE_OPEN:
+            continue  # blinking — vertical position tells us nothing
+        if abs(_axis_ratio(iris, top, bottom) - 0.5) > max_vertical_offset:
+            return False
+
+    return True
 
 
 class IoUTracker:

@@ -49,6 +49,7 @@ from exam_cv.analyze import analyze  # noqa: E402
 from exam_cv.contracts.manifest import standalone_manifest  # noqa: E402
 from exam_cv.contracts.schemas import SessionMode  # noqa: E402
 from exam_cv.events.store import read_events  # noqa: E402
+from exam_cv.service import RunnerConfig  # noqa: E402
 
 
 def build_manifest(names: list[str], group: bool, out_dir: Path) -> Path:
@@ -130,8 +131,11 @@ def summarize_events(events_path: Path, roster: dict) -> None:
         spells = sorted(off_spells.get(sid, []), reverse=True)
         if spells:
             print(f"    look-aways   : {len(spells)}, longest {spells[0] / 1000:.1f}s")
-            if spells[0] < 6000:
-                print("                   (a flag needs a sustained 6s+ look-away)")
+            if spells[0] < RunnerConfig().gaze_flag_ms:
+                print(
+                    "                   (a flag needs a sustained "
+                    f"{RunnerConfig().gaze_flag_ms / 1000:g}s+ look-away)"
+                )
         else:
             print("    look-aways   : none")
 
