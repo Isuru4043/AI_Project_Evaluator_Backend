@@ -14,6 +14,7 @@ Endpoints (prefixed with /api/ in root urls):
     POST /api/sessions/<id>/live-questions/<qid>/answer/  student answers
 """
 
+from django.db import transaction
 from django.db.models import Max
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
@@ -79,18 +80,15 @@ def _serialize_question(q, answer=None):
     return {
         'question_id': str(q.id),
         'question_text': q.question_text,
+        'ready': bool((q.question_text or '').strip()),
         'question_order': q.question_order,
         'asked_at': q.generated_at,
-        'ready': bool((q.question_text or '').strip()),
         'answer': None if answer is None else {
             'answer_text': answer.transcribed_answer,
             'answered_at': answer.answered_at,
             'answered_by': _answered_by(answer),
         },
     }
-
-
-VOICE_QUESTION_PLACEHOLDER = '[Examiner asked question via voice]'
 
 
 def _open_examiner_questions(session):
@@ -110,23 +108,24 @@ def _open_examiner_questions(session):
 
 
 def _close_open_examiner_questions(session, blank_only=False):
-    """Stop delivering unanswered interjections, keeping them in the report.
+    """Stop delivering unanswered interjections when the examiner hands back.
 
-    A blank one was a voice question whose transcript never arrived; it is
-    labelled rather than deleted so the report still shows that the examiner
-    asked something at that point.
+    A blank row is a voice question the examiner began dictating and never
+    saved. The student never saw it, so it is removed rather than invented
+    into the transcript. A question that has text was really asked, so it
+    stays in the report and is only marked closed.
     """
     questions = _open_examiner_questions(session)
     if blank_only:
         questions = questions.filter(question_text='')
     # Resolve to ids first: the answers__isnull join makes this queryset
-    # unusable for a direct .update().
+    # unusable for a direct .update() or .delete().
     ids = list(questions.values_list('id', flat=True))
     if not ids:
         return 0
     rows = VivaQuestion.objects.filter(id__in=ids)
-    rows.filter(question_text='').update(question_text=VOICE_QUESTION_PLACEHOLDER)
-    rows.update(closed_at=timezone.now())
+    rows.filter(question_text='').delete()
+    rows.exclude(question_text='').update(closed_at=timezone.now())
     return len(ids)
 
 
@@ -230,14 +229,12 @@ class LiveQuestionPendingView(APIView):
             if _student_profile_in_session(request.user, session) is None:
                 return _err('You are not part of this session.', code=403)
 
-            question = _open_examiner_questions(session).first()
-            still_dictating = question is not None and not question.question_text.strip()
+            open_questions = _open_examiner_questions(session)
+            examiner_speaking = open_questions.filter(question_text='').exists()
+            question = open_questions.exclude(question_text='').first()
             return _ok('Pending examiner question.', {
-                'pending': (
-                    None if question is None or still_dictating
-                    else _serialize_question(question)
-                ),
-                'examiner_speaking': still_dictating,
+                'pending': None if question is None else _serialize_question(question),
+                'examiner_speaking': examiner_speaking,
                 'paused': bool(session.examiner_paused),
             })
         except Exception as e:
@@ -362,14 +359,10 @@ class ExaminerEndSessionView(APIView):
             if not ep or not _is_assigned(ep, session.project):
                 return _err('You are not assigned to this project.', code=403)
             
-            # Label any voice question whose transcript never arrived, and
-            # close whatever is still open so nothing is left pending against
-            # a finished session.
-            VivaQuestion.objects.filter(
-                session=session,
-                question_source=VivaQuestion.QuestionSource.EXAMINER,
-                question_text='',
-            ).update(question_text=VOICE_QUESTION_PLACEHOLDER)
+            # Ending the viva ends any interjection with it: an unsaved voice
+            # draft is discarded rather than invented into the transcript, and
+            # a real question left unanswered is closed so nothing stays
+            # pending against a finished session.
             _close_open_examiner_questions(session)
             
             session.status = EvaluationSession.Status.COMPLETED
@@ -420,21 +413,34 @@ class ExaminerCreatePreemptiveQuestionView(APIView):
             if not ep or not _is_assigned(ep, session.project):
                 return _err('You are not assigned to this project.', code=403)
             
-            # Starting a new voice question abandons an earlier draft that was
-            # never completed, so the student is never held by a stale one.
-            _close_open_examiner_questions(session, blank_only=True)
-
-            next_order = (
-                VivaQuestion.objects.filter(session=session)
-                .aggregate(m=Max('question_order'))['m'] or 0
-            ) + 1
-            question = VivaQuestion.objects.create(
-                session=session,
-                project=session.project,
-                question_text="",  # Blank initially
-                question_source=VivaQuestion.QuestionSource.EXAMINER,
-                question_order=next_order,
-            )
+            with transaction.atomic():
+                locked_session = EvaluationSession.objects.select_for_update().get(
+                    id=session.id,
+                )
+                existing = VivaQuestion.objects.filter(
+                    session=locked_session,
+                    question_source=VivaQuestion.QuestionSource.EXAMINER,
+                    question_text='',
+                    answers__isnull=True,
+                    closed_at__isnull=True,
+                ).order_by('question_order').first()
+                if existing is not None:
+                    question = existing
+                else:
+                    next_order = (
+                        VivaQuestion.objects.filter(session=locked_session)
+                        .aggregate(m=Max('question_order'))['m'] or 0
+                    ) + 1
+                    question = VivaQuestion.objects.create(
+                        session=locked_session,
+                        project=locked_session.project,
+                        question_text='',
+                        question_source=VivaQuestion.QuestionSource.EXAMINER,
+                        question_order=next_order,
+                    )
+                if not locked_session.examiner_paused:
+                    locked_session.examiner_paused = True
+                    locked_session.save(update_fields=['examiner_paused'])
             return _ok(
                 'Pre-emptive question created.',
                 _serialize_question(question),
@@ -466,9 +472,10 @@ class ExaminerUpdatePreemptiveQuestionView(APIView):
                 return _err('Examiner question not found.', code=404)
             
             question_text = (request.data.get('question_text') or '').strip()
-            if question_text:
-                question.question_text = question_text
-                question.save(update_fields=['question_text'])
+            if not question_text:
+                return _err('A transcribed or typed question is required.')
+            question.question_text = question_text
+            question.save(update_fields=['question_text'])
                 
             return _ok('Question text updated.', _serialize_question(question))
         except Exception as e:

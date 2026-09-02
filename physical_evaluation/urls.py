@@ -12,6 +12,7 @@ from physical_evaluation.views import (
     KioskSessionStartView,
     KioskRecordingChunkUploadView,
     KioskRecordingFinalizeView,
+    KioskRecordingStartView,
     KioskRecordingStatusView,
     PhysicalProjectSettingsView,
 )
@@ -57,6 +58,11 @@ urlpatterns = [
         'kiosk/sessions/<uuid:session_id>/finish/',
         KioskSessionFinishView.as_view(),
         name='kiosk-session-finish',
+    ),
+    path(
+        'kiosk/sessions/<uuid:session_id>/recording/start/',
+        KioskRecordingStartView.as_view(),
+        name='kiosk-recording-start',
     ),
     path(
         'kiosk/sessions/<uuid:session_id>/recording/chunks/<int:chunk_index>/',

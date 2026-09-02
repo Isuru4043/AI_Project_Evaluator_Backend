@@ -116,6 +116,16 @@ class PhysicalEvaluationAPITests(TestCase):
         client.credentials(HTTP_X_PHYSICAL_KIOSK_TOKEN=raw_token)
         return client, raw_token
 
+    def start_recording(self, client, session=None):
+        target = session or self.session
+        response = client.post(
+            f'/api/physical/kiosk/sessions/{target.id}/recording/start/',
+            {'started_at': timezone.now().isoformat()},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        return response
+
     def test_project_creation_initializes_physical_configuration(self):
         response = self.examiner_client.post(
             '/api/projects/create/',
@@ -167,6 +177,7 @@ class PhysicalEvaluationAPITests(TestCase):
 
         started = client.post(f'/api/physical/kiosk/sessions/{self.session.id}/start/')
         self.assertEqual(started.status_code, 200, started.data)
+        self.assertIsNone(started.data['data']['recording_started_at'])
         self.assertEqual(started.data['data']['next_action'], 'start_demo')
         self.session.refresh_from_db()
         self.assertEqual(self.session.status, EvaluationSession.Status.IN_PROGRESS)
@@ -320,6 +331,7 @@ class PhysicalEvaluationAPITests(TestCase):
         client, _ = self.open_kiosk()
         started = client.post(f'/api/physical/kiosk/sessions/{self.session.id}/start/')
         self.assertEqual(started.status_code, 200, started.data)
+        self.start_recording(client)
 
         self.session.status = EvaluationSession.Status.COMPLETED
         self.session.save(update_fields=['status'])
@@ -452,6 +464,7 @@ class PhysicalEvaluationAPITests(TestCase):
         client, _ = self.open_kiosk()
         started = client.post(f'/api/physical/kiosk/sessions/{self.session.id}/start/')
         self.assertEqual(started.status_code, 200, started.data)
+        self.start_recording(client)
 
         self.session.status = EvaluationSession.Status.COMPLETED
         self.session.save(update_fields=['status'])

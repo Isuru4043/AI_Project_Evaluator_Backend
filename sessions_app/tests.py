@@ -6,11 +6,16 @@ from django.utils import timezone
 
 from core.models import (
     EvaluationSession,
+    ExaminerProfile,
     Project,
+    ProjectExaminer,
     SessionRecording,
+    StudentProfile,
     StudentGroup,
+    User,
 )
 from cv_analysis.models import CVSessionReport
+from rest_framework.test import APIClient
 from sessions_app.services.recording_finalizer import (
     RecordingFinalizationError,
     finalize_completed_online_session,
@@ -369,19 +374,15 @@ class ExaminerInterjectionLifecycleTests(TestCase):
         self.assertEqual(asked.question_text, 'Why did you pick that algorithm?')
         self.assertFalse(_open_examiner_questions(self.session).exists())
 
-    def test_a_voice_question_with_no_transcript_is_labelled_not_lost(self):
-        from sessions_app.views_live import (
-            VOICE_QUESTION_PLACEHOLDER,
-            _close_open_examiner_questions,
-        )
+    def test_a_voice_question_with_no_transcript_is_dropped_not_invented(self):
+        from sessions_app.views_live import _close_open_examiner_questions
 
         draft = self._question('')
 
         _close_open_examiner_questions(self.session)
 
-        draft.refresh_from_db()
-        self.assertEqual(draft.question_text, VOICE_QUESTION_PLACEHOLDER)
-        self.assertIsNotNone(draft.closed_at)
+        # The student never saw it, so it must not reach the transcript.
+        self.assertFalse(self.VivaQuestion.objects.filter(id=draft.id).exists())
 
     def test_starting_a_new_voice_question_only_supersedes_drafts(self):
         from sessions_app.views_live import _close_open_examiner_questions
@@ -393,9 +394,8 @@ class ExaminerInterjectionLifecycleTests(TestCase):
             _close_open_examiner_questions(self.session, blank_only=True), 1,
         )
 
-        draft.refresh_from_db()
         real.refresh_from_db()
-        self.assertIsNotNone(draft.closed_at)
+        self.assertFalse(self.VivaQuestion.objects.filter(id=draft.id).exists())
         self.assertIsNone(real.closed_at)
 
     def test_an_answered_question_is_never_reopened_or_relabelled(self):
@@ -409,3 +409,113 @@ class ExaminerInterjectionLifecycleTests(TestCase):
         self.assertEqual(_close_open_examiner_questions(self.session), 0)
         answered.refresh_from_db()
         self.assertIsNone(answered.closed_at)
+
+
+class LiveExaminerInterruptionTests(TestCase):
+    def setUp(self):
+        self.examiner_user = User.objects.create_user(
+            email='live-examiner@example.com',
+            password='password',
+            full_name='Live Examiner',
+            role=User.Role.EXAMINER,
+        )
+        self.examiner = ExaminerProfile.objects.create(
+            user=self.examiner_user,
+            employee_id='LIVE-EXAMINER',
+        )
+        self.student_user = User.objects.create_user(
+            email='live-student@example.com',
+            password='password',
+            full_name='Live Student',
+            role=User.Role.STUDENT,
+        )
+        self.student = StudentProfile.objects.create(
+            user=self.student_user,
+            registration_number='LIVE-STUDENT',
+        )
+        self.project = Project.objects.create(project_name='Live interruption test')
+        ProjectExaminer.objects.create(
+            project=self.project,
+            examiner=self.examiner,
+            role_in_project=ProjectExaminer.RoleInProject.LEAD,
+        )
+        now = timezone.now()
+        self.session = EvaluationSession.objects.create(
+            project=self.project,
+            student=self.student,
+            scheduled_start=now - timedelta(minutes=5),
+            scheduled_end=now + timedelta(minutes=55),
+            actual_start=now - timedelta(minutes=4),
+            demo_completed_at=now - timedelta(minutes=4),
+            status=EvaluationSession.Status.IN_PROGRESS,
+        )
+        self.examiner_client = APIClient()
+        self.examiner_client.force_authenticate(self.examiner_user)
+        self.student_client = APIClient()
+        self.student_client.force_authenticate(self.student_user)
+
+    def test_voice_draft_pauses_ai_but_is_not_answerable_until_saved(self):
+        created = self.examiner_client.post(
+            f'/api/sessions/{self.session.id}/live-questions/preemptive/',
+        )
+        self.assertEqual(created.status_code, 201, created.data)
+        self.assertFalse(created.data['data']['ready'])
+        self.session.refresh_from_db()
+        self.assertTrue(self.session.examiner_paused)
+
+        pending_draft = self.student_client.get(
+            f'/api/sessions/{self.session.id}/live-questions/pending/',
+        )
+        self.assertEqual(pending_draft.status_code, 200, pending_draft.data)
+        self.assertIsNone(pending_draft.data['data']['pending'])
+        self.assertTrue(pending_draft.data['data']['examiner_speaking'])
+        self.assertTrue(pending_draft.data['data']['paused'])
+
+        question_id = created.data['data']['question_id']
+        empty = self.examiner_client.patch(
+            f'/api/sessions/{self.session.id}/live-questions/{question_id}/',
+            {'question_text': ''},
+            format='json',
+        )
+        self.assertEqual(empty.status_code, 400, empty.data)
+
+        saved = self.examiner_client.patch(
+            f'/api/sessions/{self.session.id}/live-questions/{question_id}/',
+            {'question_text': 'Which encryption key length did you use?'},
+            format='json',
+        )
+        self.assertEqual(saved.status_code, 200, saved.data)
+
+        pending_ready = self.student_client.get(
+            f'/api/sessions/{self.session.id}/live-questions/pending/',
+        )
+        self.assertEqual(pending_ready.status_code, 200, pending_ready.data)
+        self.assertFalse(pending_ready.data['data']['examiner_speaking'])
+        self.assertEqual(
+            pending_ready.data['data']['pending']['question_text'],
+            'Which encryption key length did you use?',
+        )
+        self.assertTrue(pending_ready.data['data']['pending']['ready'])
+
+    @patch('sessions_app.views_live.async_task')
+    def test_ending_session_discards_an_unsaved_voice_draft(self, async_task):
+        created = self.examiner_client.post(
+            f'/api/sessions/{self.session.id}/live-questions/preemptive/',
+        )
+        self.assertEqual(created.status_code, 201, created.data)
+
+        ended = self.examiner_client.post(
+            f'/api/sessions/{self.session.id}/live-questions/end-session/',
+        )
+        self.assertEqual(ended.status_code, 200, ended.data)
+        self.assertFalse(
+            self.session.viva_questions.filter(
+                id=created.data['data']['question_id'],
+            ).exists(),
+        )
+        self.session.refresh_from_db()
+        self.assertEqual(
+            self.session.status,
+            EvaluationSession.Status.COMPLETED,
+        )
+        async_task.assert_called_once()
