@@ -262,8 +262,12 @@ def _empty_review(session, unusable: set[str], error: str) -> dict:
     roster = _roster_review(session, [], unusable)
     return {
         'complete': False,
+        'partial': False,
+        'can_continue': False,
         'bindings': [],
         'roster': roster,
+        'present_student_ids': [],
+        'absent_student_ids': [item['student_id'] for item in roster],
         'unknown_faces': [],
         'unmatched': 0,
         'missing_enrollment': sorted(unusable),
@@ -273,6 +277,33 @@ def _empty_review(session, unusable: set[str], error: str) -> dict:
         'engine_version': ENGINE_VERSION,
         'error': error,
     }
+
+
+def _review_continuation(
+    roster: list[dict],
+    unknown_faces: list[dict],
+    frames_processed: int,
+    required_frames: int,
+    engine_version: str,
+) -> tuple[bool, bool]:
+    """Return (complete, partial) without conflating absence with identity."""
+    engine_current = engine_version in {ENGINE_VERSION, COMPAT_ENGINE_VERSION}
+    complete = (
+        bool(roster)
+        and all(item['status'] == 'verified' for item in roster)
+        and not unknown_faces
+        and frames_processed >= required_frames
+        and engine_current
+    )
+    partial = (
+        not complete
+        and any(item['status'] == 'verified' for item in roster)
+        and any(item['status'] != 'verified' for item in roster)
+        and not unknown_faces
+        and frames_processed >= required_frames
+        and engine_current
+    )
+    return complete, partial
 def bind_from_frames(session, frame_bytes_list: list[bytes]) -> dict:
     """Detect faces across a short camera burst and bind them to students.
 
@@ -361,17 +392,26 @@ def bind_from_frames(session, frame_bytes_list: list[bytes]) -> dict:
     unknown_faces = [item for item in created if not item.get('student_id')]
     required_frames = min(5, len(frames))
     engine_version = backend_result.get('engine_version', 'legacy')
-    complete = (
-        bool(roster)
-        and all(item['status'] == 'verified' for item in roster)
-        and not unknown_faces
-        and frames_processed >= required_frames
-        and engine_version in {ENGINE_VERSION, COMPAT_ENGINE_VERSION}
+    complete, partial = _review_continuation(
+        roster, unknown_faces, frames_processed, required_frames, engine_version,
     )
+    present_student_ids = [
+        item['student_id'] for item in roster if item['status'] == 'verified'
+    ]
+    absent_student_ids = [
+        item['student_id'] for item in roster if item['status'] != 'verified'
+    ]
+    # A group may continue with the members who actually attend. Every visible
+    # face must still be recognised, and missing roster members remain absent
+    # rather than being silently marked as verified.
     result = {
         'complete': complete,
+        'partial': partial,
+        'can_continue': complete or partial,
         'bindings': created,
         'roster': roster,
+        'present_student_ids': present_student_ids,
+        'absent_student_ids': absent_student_ids,
         'unknown_faces': unknown_faces,
         'unmatched': unmatched,
         'missing_enrollment': sorted(unusable),

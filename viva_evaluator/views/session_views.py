@@ -69,7 +69,7 @@ class SessionStartView(APIView):
                 if physical_run is None or not physical_run.identity_authorized:
                     return Response(
                         {
-                            "error": "Complete identity review for every expected group member, or use an examiner PIN override before starting the viva.",
+                            "error": "Verify at least one present group member with no unknown faces, or use an examiner PIN override before starting the viva.",
                             "code": "identity_review_required",
                         },
                         status=status.HTTP_409_CONFLICT,
