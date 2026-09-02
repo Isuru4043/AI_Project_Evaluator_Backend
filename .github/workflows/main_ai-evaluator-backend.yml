@@ -123,6 +123,23 @@ jobs:
             # Run migrations just in case
             python3 manage.py migrate
             
+            # Give gunicorn a worker timeout long enough for face binding.
+            # Seat binding waits on the Modal recognition engine, measured
+            # at 15-24s, and gunicorn's 30s default was killing the worker
+            # mid-request. nginx then answered the browser itself, and an
+            # nginx error page carries none of Django's CORS headers, so
+            # the kiosk reported a CORS failure that was really a dead worker.
+            # This uses a drop-in with GUNICORN_CMD_ARGS instead of editing
+            # ExecStart: if any line here fails, the service still starts
+            # exactly as it did before.
+            sudo mkdir -p /etc/systemd/system/gunicorn.service.d || true
+            { echo '[Service]'; echo 'Environment="GUNICORN_CMD_ARGS=--timeout 180 --graceful-timeout 60"'; } | sudo tee /etc/systemd/system/gunicorn.service.d/timeout.conf > /dev/null || true
+            sudo systemctl daemon-reload || true
+
+            # Print what the unit actually runs, so the next slow-endpoint
+            # problem is diagnosable from the Actions log alone.
+            systemctl cat gunicorn | grep -E 'WorkingDirectory|ExecStart|GUNICORN_CMD_ARGS' || true
+
             # Restart the web server
             sudo systemctl restart gunicorn
             

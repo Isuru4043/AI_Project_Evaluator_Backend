@@ -27,6 +27,7 @@ from .contracts.schemas import (
 )
 from .contracts.sink import ArtifactSink, FileSink
 from .events.store import append_event
+from .faces.identity import face_chip
 from .report.summary import build_summary_from_log
 from .speaker.attribution import (
     LipActivityTracker,
@@ -53,9 +54,16 @@ def is_unknown_id(student_id) -> bool:
 @dataclass
 class RunnerConfig:
     window_ms: int = 800       # speaker-decision window
-    tick_ms: int = 333         # behavioral tick (~3 FPS)
+    tick_ms: int = 250         # behavioral tick (4 FPS)
     min_turn_ms: int = 700
     merge_gap_ms: int = 600
+    # Behavioral sensitivity, all in session milliseconds. The tick rate bounds
+    # how precisely these can be resolved: at 250 ms the 1.5 s absence needs six
+    # consecutive ticks, which is enough to ride out a single dropped detection
+    # without softening the threshold itself.
+    gaze_glance_ms: int = 1000     # counted as a look-away in the summary
+    gaze_flag_ms: int = 2000       # eyes off camera this long ⇒ integrity flag
+    absence_flag_ms: int = 1500    # face away/out of frame this long ⇒ flag
 
 
 class SessionRunner:
@@ -131,7 +139,8 @@ class SessionRunner:
             self.identity.resolve(
                 obs.track_id,
                 frame.t_ms,
-                crop_provider=lambda o=obs: self.mesh.crop(frame.image, o),
+                # Same aligned chip as the enrollment gallery (identity.face_chip).
+                crop_provider=lambda o=obs: face_chip(self.mesh, frame.image, o),
             ) or unknown_track_id(obs.track_id)
             for obs in observations
         ]
@@ -165,8 +174,21 @@ class SessionRunner:
             merge_gap_ms=self.cfg.merge_gap_ms,
         )
         video_offset_ms = 0
-        gaze = GazeAnalyzer(video_offset_ms=video_offset_ms)
-        presence = PresenceAnalyzer(roster_ids, video_offset_ms=video_offset_ms)
+        gaze = GazeAnalyzer(
+            glance_threshold_ms=self.cfg.gaze_glance_ms,
+            flag_threshold_ms=self.cfg.gaze_flag_ms,
+            video_offset_ms=video_offset_ms,
+        )
+        presence = PresenceAnalyzer(
+            roster_ids,
+            absence_threshold_ms=self.cfg.absence_flag_ms,
+            video_offset_ms=video_offset_ms,
+        )
+        # Roster students whose face has been detected at least once. A student
+        # who never appears (no enrolment photo, wrong camera) is a different
+        # problem from one who turns away mid-answer, and only the second
+        # should drive look-away timing.
+        seen_ids: set[str] = set()
 
         next_window = self.cfg.window_ms
         next_tick = 0
@@ -251,10 +273,20 @@ class SessionRunner:
                         else:
                             gaze_map[sid] = coarse_gaze_on_camera(obs.landmarks)
 
+                    visible_ids = set(gaze_map)
+                    seen_ids.update(sid for sid in visible_ids if sid in roster_ids)
+                    # A face the mesh has lost is emphatically not looking at
+                    # the camera, so the look-away spell has to keep running
+                    # instead of resetting — turning far enough to disappear
+                    # used to erase the very evidence it created.
+                    for sid in seen_ids - visible_ids:
+                        gaze_map[sid] = False
+
                     face_tick = FaceTickObservation(
                         t_ms=frame.t_ms,
                         gaze_on_camera=gaze_map,
                         unknown_face_count=max(unknown_faces, tick_unknown),
+                        visible_ids=visible_ids,
                     )
                     for ev in gaze.push(face_tick):
                         append_event(self.events_path, ev)
@@ -450,7 +482,7 @@ def _enroll_interactively(manifest, camera, mesh, gallery, embedder, snapshots: 
             if len(faces) != 1:
                 continue
             gallery.enroll(
-                entry.student_id, embedder.embed(mesh.crop(frame.image, faces[0]))
+                entry.student_id, embedder.embed(face_chip(mesh, frame.image, faces[0]))
             )
             captured += 1
             if captured >= snapshots:

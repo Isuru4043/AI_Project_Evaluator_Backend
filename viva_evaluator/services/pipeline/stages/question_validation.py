@@ -99,8 +99,12 @@ def validate_question_candidate(
     )
 
     evidence_package = ensure_question_evidence_package(questioner_input)
+    # The band tracks the length the prompt actually asks for (12-20 words,
+    # hard cap 25). It used to be 18-45, which after the length retune would
+    # have sent every well-formed short question to the Critic while waving
+    # through the over-long ones this change exists to stop.
     high_confidence_tier1 = (
-        18 <= tier1.word_count <= 45
+        10 <= tier1.word_count <= 26
         and tier1.similarity_to_recent < 0.65
         and not questioner_input.clarify_mode
         and not _requires_critic(

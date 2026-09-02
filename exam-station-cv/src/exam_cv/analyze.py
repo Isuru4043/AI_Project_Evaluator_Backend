@@ -200,6 +200,12 @@ class SeatingMesh:
     def crop(self, image, obs, pad=0.2):
         return self._mesh.crop(image, obs, pad)
 
+    def aligned_crop(self, image, obs, size=112):
+        # Forward the real detector's alignment so identity.face_chip keeps
+        # embedding aligned chips through this wrapper too.
+        align = getattr(self._mesh, "aligned_crop", None)
+        return align(image, obs, size) if align is not None else None
+
     def close(self):
         self._mesh.close()
 

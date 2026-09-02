@@ -579,3 +579,72 @@ class LiveEvidenceSinkTests(SimpleTestCase):
             t_ms=1000, kind=BehavioralKind.GAZE_SAMPLE, student_id=ALICE,
         ))
         self.assertEqual(sink._pending, [])
+
+
+class EnrollmentCacheWriteBackTests(SimpleTestCase):
+    """The first scan after enrollment warms the vector cache; later scans
+    must not download or embed the photos again."""
+
+    PHOTOS = {ALICE: ['https://blob.test/faces/a.jpg?sv=sas'], BOB: ['https://blob.test/faces/b.jpg']}
+
+    @patch('attribution.services.binding.FaceEnrollmentEmbeddingCache')
+    def test_fresh_vectors_from_current_engine_are_stored(self, cache_model):
+        from attribution.services.binding import ENGINE_VERSION, store_fresh_embeddings
+
+        cache_model.fingerprint.side_effect = lambda refs: 'fp:' + refs[0].split('?')[0]
+        cache_model.Status.READY = 'ready'
+        stored = store_fresh_embeddings(
+            self.PHOTOS,
+            {
+                'engine_version': ENGINE_VERSION,
+                'enrollment_embeddings': {ALICE: [[0.1] * 4], BOB: [[0.2] * 4]},
+            },
+            already_cached={BOB},
+        )
+
+        self.assertEqual(stored, 1)
+        cache_model.objects.update_or_create.assert_called_once()
+        kwargs = cache_model.objects.update_or_create.call_args.kwargs
+        self.assertEqual(kwargs['student_id'], ALICE)
+        self.assertEqual(kwargs['defaults']['engine_version'], ENGINE_VERSION)
+        self.assertEqual(kwargs['defaults']['status'], 'ready')
+        self.assertEqual(kwargs['defaults']['photo_fingerprint'], 'fp:https://blob.test/faces/a.jpg')
+        self.assertEqual(kwargs['defaults']['embeddings'], [[0.1] * 4])
+
+    @patch('attribution.services.binding.FaceEnrollmentEmbeddingCache')
+    def test_stale_engine_output_is_never_cached(self, cache_model):
+        from attribution.services.binding import COMPAT_ENGINE_VERSION, store_fresh_embeddings
+
+        stored = store_fresh_embeddings(
+            self.PHOTOS,
+            {
+                'engine_version': COMPAT_ENGINE_VERSION,
+                'enrollment_embeddings': {ALICE: [[0.1] * 4]},
+            },
+        )
+
+        self.assertEqual(stored, 0)
+        cache_model.objects.update_or_create.assert_not_called()
+
+    @override_settings(
+        MODAL_CV_BIND_URL='https://example.invalid/bind',
+        MODAL_CV_TOKEN='test-token',
+    )
+    @patch('cv_analysis.services.runner._sas_for', return_value='https://blob.test/photo')
+    @patch('requests.post')
+    def test_modal_adapter_passes_fresh_vectors_through(self, post, _sas):
+        from attribution.services.binding import ENGINE_VERSION, _bind_modal_frames
+
+        response = Mock(status_code=200, text='')
+        response.json.return_value = {
+            'engine_version': ENGINE_VERSION,
+            'frame_matches': [[{'student_id': ALICE, 'bbox': [0, 0, .3, .4], 'confidence': .8, 'track_ref': '1'}]],
+            'frames_processed': 1,
+            'enrollment_embeddings': {ALICE: [[0.5] * 4]},
+        }
+        post.return_value = response
+
+        result = _bind_modal_frames([b'frame'], {ALICE: ['https://blob.test/faces/a.jpg']})
+
+        self.assertEqual(result['engine_version'], ENGINE_VERSION)
+        self.assertEqual(result['enrollment_embeddings'], {ALICE: [[0.5] * 4]})

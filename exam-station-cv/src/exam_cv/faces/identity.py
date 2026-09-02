@@ -159,6 +159,19 @@ def assign_embeddings_one_to_one(
     return result
 
 
+def face_chip(mesh, image: np.ndarray, obs) -> np.ndarray:
+    """The crop ArcFace embeds: landmark-aligned when the mesh allows it.
+
+    Enrollment photos and live room frames MUST go through this same function.
+    Comparing an aligned probe against an unaligned gallery (or vice versa) is
+    worse than either alone, which is why the alignment lives here rather than
+    at one call site.
+    """
+    align = getattr(mesh, "aligned_crop", None)
+    chip = align(image, obs) if align is not None else None
+    return chip if chip is not None else mesh.crop(image, obs)
+
+
 def build_gallery_from_photos(
     photos: dict[str, np.ndarray | list[np.ndarray]],
     mesh,
@@ -185,7 +198,7 @@ def build_gallery_from_photos(
             observations = mesh.process_frame(image)
             if len(observations) != 1:
                 continue
-            crop = mesh.crop(image, observations[0])
+            crop = face_chip(mesh, image, observations[0])
             if crop.size == 0:
                 continue
             gallery.enroll(student_id, embedder.embed(crop))
