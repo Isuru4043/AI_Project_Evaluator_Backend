@@ -748,6 +748,17 @@ class VivaQuestion(models.Model):
     )
     question_order = models.IntegerField()
     generated_at = models.DateTimeField(auto_now_add=True)
+    closed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=(
+            'Set when the examiner handed the viva back to the AI while this '
+            'question was still unanswered. The question stays in the report, '
+            'but is no longer delivered to the student - without this an '
+            'abandoned interjection is pending forever and freezes that '
+            "student's screen while the rest of the group moves on."
+        ),
+    )
 
     class Meta:
         verbose_name = 'Viva Question'
