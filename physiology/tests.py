@@ -274,3 +274,54 @@ class SmallRiseTests(SimpleTestCase):
         window = compute(varied(30, ibi=750.0, swing=10.0))  # 80 bpm
         result = arousal(window, 70.0, 4.0, 45.0)
         self.assertAlmostEqual(result.hr_delta, 10.0, delta=1.0)
+
+
+class ShortCalmWindowTests(SimpleTestCase):
+    """A ten-second calm window has to produce a usable baseline.
+
+    The window was shortened from forty-five seconds because it is dead time
+    in front of an examiner. The usability floor for a baseline was hard-coded
+    to the thirty-second analysis figure of twenty beats, which a ten-second
+    window can never reach at any resting rate, so the shorter window would
+    have silently produced nothing but unusable baselines.
+    """
+
+    @staticmethod
+    def _window(beat_count, ibi=1000.0):
+        """A closed BaselineWindow carrying the metrics of a real trace."""
+        from physiology.models import BaselineWindow
+
+        m = compute(varied(beat_count, ibi=ibi))
+        return BaselineWindow(
+            hr_mean=m.mean_hr,
+            rmssd=m.rmssd,
+            sdnn=m.sdnn,
+            beat_count=m.beat_count,
+            quality=m.quality,
+        )
+
+    def test_ten_seconds_at_a_slow_resting_rate_is_usable(self):
+        from physiology.services.metrics import MIN_BASELINE_BEATS
+
+        # 50 bpm for ten seconds is about eight beats: the worst realistic case.
+        window = self._window(8, ibi=1200.0)
+
+        self.assertGreaterEqual(window.beat_count, MIN_BASELINE_BEATS)
+        self.assertTrue(window.is_usable)
+
+    def test_ten_seconds_at_a_normal_rate_is_usable(self):
+        self.assertTrue(self._window(11).is_usable)
+
+    def test_a_window_with_almost_nothing_in_it_is_still_rejected(self):
+        # A clip that was only briefly on the finger must not become a
+        # baseline; a wrong reference point corrupts every later comparison.
+        self.assertFalse(self._window(4).is_usable)
+
+    def test_the_analysis_floor_is_unchanged(self):
+        from physiology.services.metrics import MIN_BASELINE_BEATS
+
+        # Rolling 30 s windows keep the stricter requirement: relaxing that
+        # would admit noise into the arousal rule itself.
+        self.assertEqual(MIN_BEATS, 20)
+        self.assertLess(MIN_BASELINE_BEATS, MIN_BEATS)
+        self.assertFalse(compute(varied(MIN_BASELINE_BEATS)).is_usable)

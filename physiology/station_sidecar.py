@@ -42,8 +42,11 @@ logger = logging.getLogger('physio.relay')
 HR_MEASUREMENT_UUID = '00002a37-0000-1000-8000-00805f9b34fb'
 BATTERY_LEVEL_UUID = '00002a19-0000-1000-8000-00805f9b34fb'
 
-FLUSH_SECONDS = 5.0
-SESSION_POLL_SECONDS = 10.0
+# Both of these are setup latency the operator waits through before a
+# viva can start, and the traffic is a few beats of JSON, so they are
+# tuned for responsiveness rather than for saving requests.
+FLUSH_SECONDS = 2.0
+SESSION_POLL_SECONDS = 4.0
 RECONNECT_DELAY_S = 5.0
 SCAN_TIMEOUT_S = 15.0
 MAX_BATCH = 200
