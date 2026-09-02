@@ -25,7 +25,7 @@ app = modal.App("exam-cv-analyze")
 
 # Returned with every identity response so Django can reject a stale rolling
 # deployment instead of silently treating a one-frame legacy result as final.
-ENGINE_VERSION = "face-binding-v2"
+ENGINE_VERSION = "face-binding-v3-aligned"
 
 ENGINE_SRC = "exam-station-cv/src/exam_cv"
 MODEL_DIR = "/root/models"
@@ -182,7 +182,26 @@ def analyze_recording(
     return json.loads(summary.model_dump_json())
 
 
-@app.function(image=engine_image, cpu=2.0, memory=4096, timeout=300)
+_MODEL_CACHE: dict = {}
+
+
+def _shared_embedder(factory):
+    """One ArcFace session per warm container rather than one per request."""
+    embedder = _MODEL_CACHE.get("arcface")
+    if embedder is None:
+        embedder = _MODEL_CACHE["arcface"] = factory()
+    return embedder
+
+
+@app.function(
+    image=engine_image,
+    cpu=2.0,
+    memory=4096,
+    timeout=300,
+    # A kiosk scans several times per session; keep the models loaded
+    # between scans instead of paying the ~10s cold start each time.
+    scaledown_window=600,
+)
 def bind_faces(
     frame_b64: str,
     enrollment_photos: dict,
@@ -210,8 +229,12 @@ def bind_faces(
         EnrollmentGallery,
         assign_embeddings_one_to_one,
         build_gallery_from_photos,
+        face_chip,
     )
-    from exam_cv.faces.mesh import MeshPipeline  # noqa: E402
+    from exam_cv.faces.mesh import (  # noqa: E402
+        MeshPipeline,
+        detect_faces_multiscale,
+    )
 
     encoded_frames = (frames_b64 or [frame_b64])[:10]
     frames = [
@@ -261,7 +284,7 @@ def bind_faces(
             "unusable_enrollment": sorted(set(enrollment_photos) | download_failed),
         }
 
-    embedder = ArcFaceEmbedder()
+    embedder = _shared_embedder(ArcFaceEmbedder)
 
     gallery = EnrollmentGallery()
     for student_id, vectors in cached.items():
@@ -269,6 +292,9 @@ def bind_faces(
             gallery.enroll(str(student_id), np.asarray(vector, dtype=np.float32))
 
     skipped = []
+    # Vectors built from photos on this call. Django stores them so the next
+    # scan sends ``enrollment_embeddings`` and no photo is downloaded again.
+    fresh_embeddings = {}
     if photos:
         # Separate detector instance: enrollment advances the tracker, which
         # must not leak into the room-frame pass.
@@ -277,7 +303,8 @@ def bind_faces(
             photo_gallery, skipped = build_gallery_from_photos(
                 photos, enroll_mesh, embedder,
             )
-            for student_id, vectors in photo_gallery.serializable_embeddings().items():
+            fresh_embeddings = photo_gallery.serializable_embeddings()
+            for student_id, vectors in fresh_embeddings.items():
                 for vector in vectors:
                     gallery.enroll(student_id, np.asarray(vector, dtype=np.float32))
         finally:
@@ -301,8 +328,12 @@ def bind_faces(
             matches = []
             observations = []
             embeddings = []
-            for obs in mesh.process_frame(frame):
-                crop = mesh.crop(frame, obs)
+            # Tiled pass finds the small faces of a shared station camera
+            # that a single full-frame detection misses.
+            for obs in detect_faces_multiscale(
+                mesh, frame, expected_faces=len(gallery.enrolled_ids()),
+            ):
+                crop = face_chip(mesh, frame, obs)
                 if crop.size == 0:
                     continue
                 observations.append(obs)
@@ -368,6 +399,7 @@ def bind_faces(
         "frame_matches": frame_matches,
         "matches": legacy_matches,
         "frames_processed": len(frames),
+        "enrollment_embeddings": fresh_embeddings,
         # This diagnostic used to exist only in Modal logs, leaving the kiosk
         # unable to distinguish a missing person from a bad enrollment image.
         "unusable_enrollment": sorted(

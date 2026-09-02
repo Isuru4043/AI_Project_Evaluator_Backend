@@ -262,5 +262,190 @@ class MeshPipeline:
         y1 = min(h, int((y1 + pad * bh) * h))
         return image_bgr[y0:y1, x0:x1]
 
+    def aligned_crop(self, image_bgr: np.ndarray, obs: FaceObservation, size: int = 112):
+        """ArcFace-aligned 112x112 chip (see module-level ``aligned_crop``).
+
+        Exposed as a method so ``identity.face_chip`` aligns for every real
+        detector while numpy-only test fakes, which have no landmark
+        geometry to align, keep their plain ``crop``.
+        """
+        return aligned_crop(image_bgr, obs, size)
+
     def close(self) -> None:
         self._landmarker.close()
+
+
+# ArcFace's canonical 112x112 five-point template (insightface ``arcface_dst``):
+# image-left eye, image-right eye, nose tip, image-left mouth corner,
+# image-right mouth corner.
+_ARCFACE_TEMPLATE_112 = np.array(
+    [
+        [38.2946, 51.6963],
+        [73.5318, 51.5014],
+        [56.0252, 71.7366],
+        [41.5493, 92.3655],
+        [70.7299, 92.2041],
+    ],
+    dtype=np.float32,
+)
+_ALIGN_LEFT_IRIS = slice(468, 473)
+_ALIGN_RIGHT_IRIS = slice(473, 478)
+_ALIGN_NOSE_TIP = 1
+_ALIGN_MOUTH_CORNERS = (61, 291)
+
+
+def five_point_landmarks(
+    landmarks: Optional[np.ndarray], width: int, height: int
+) -> Optional[np.ndarray]:
+    """ArcFace's five alignment points, in pixels, from a 478-point mesh.
+
+    Returns None when the mesh lacks the iris block (unrefined 468-point
+    output, or a detector stub) so the caller can fall back to a bbox crop.
+    Eyes and mouth corners are ordered by image x, so a mirrored webcam feed
+    still maps onto the template correctly.
+    """
+    if landmarks is None or len(landmarks) < 478:
+        return None
+    eyes = sorted(
+        (landmarks[_ALIGN_LEFT_IRIS].mean(axis=0), landmarks[_ALIGN_RIGHT_IRIS].mean(axis=0)),
+        key=lambda p: float(p[0]),
+    )
+    mouth = sorted(
+        (landmarks[_ALIGN_MOUTH_CORNERS[0]], landmarks[_ALIGN_MOUTH_CORNERS[1]]),
+        key=lambda p: float(p[0]),
+    )
+    points = np.array(
+        [eyes[0], eyes[1], landmarks[_ALIGN_NOSE_TIP], mouth[0], mouth[1]],
+        dtype=np.float32,
+    )
+    points[:, 0] *= width
+    points[:, 1] *= height
+    return points
+
+
+def aligned_crop(
+    image_bgr: np.ndarray, obs: FaceObservation, size: int = 112
+) -> Optional[np.ndarray]:
+    """Eye/nose/mouth-aligned face chip - the input ArcFace was trained on.
+
+    A loose bbox crop leaves head roll, scale and framing in the image, which
+    ArcFace does not tolerate. Measured on real enrollment photos, the same
+    person's unaligned crops scored 0.13-0.34 cosine (below the 0.42 match
+    gate) while aligned chips scored 0.49-0.85, and two different people fell
+    from 0.45 (a false near-match) to 0.20. This is the standard InsightFace
+    ``norm_crop`` warp, done with cv2 alone so it needs no scikit-image.
+
+    Returns None when the observation carries no iris landmarks; callers then
+    use ``MeshPipeline.crop``.
+    """
+    h, w = image_bgr.shape[:2]
+    source = five_point_landmarks(getattr(obs, "landmarks", None), w, h)
+    if source is None:
+        return None
+    import cv2
+
+    template = _ARCFACE_TEMPLATE_112 * (size / 112.0)
+    matrix, _ = cv2.estimateAffinePartial2D(source, template, method=cv2.LMEDS)
+    if matrix is None:
+        return None
+    return cv2.warpAffine(image_bgr, matrix, (size, size), borderValue=0)
+
+
+def _box_iou(a, b) -> float:
+    ix0, iy0 = max(a[0], b[0]), max(a[1], b[1])
+    ix1, iy1 = min(a[2], b[2]), min(a[3], b[3])
+    inter = max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0)
+    if inter <= 0:
+        return 0.0
+    area = lambda r: max(0.0, r[2] - r[0]) * max(0.0, r[3] - r[1])  # noqa: E731
+    return inter / (area(a) + area(b) - inter + 1e-9)
+
+
+def _tile_offsets(length: int, tile: int, stride: int) -> list[int]:
+    """Window starts covering [0, length) with the last one flush to the end."""
+    if tile >= length:
+        return [0]
+    offsets = list(range(0, length - tile, stride))
+    offsets.append(length - tile)
+    return sorted(set(offsets))
+
+
+def detect_faces_multiscale(
+    mesh,
+    image_bgr: np.ndarray,
+    expected_faces: Optional[int] = None,
+    max_levels: int = 3,
+    min_iou_same_face: float = 0.3,
+) -> list[FaceObservation]:
+    """Every face in a still frame, including the small ones one pass misses.
+
+    FaceLandmarker's detector shrinks the whole frame to 128px before looking
+    for faces, so a face narrower than roughly 10% of the frame is invisible
+    to it. Measured on a 1280x720 station frame with three people: 160px
+    faces were all found, at 120px one of three was lost, at 90px none were
+    found. That is the "not detected although everyone is in view" case of a
+    shared exam-station camera.
+
+    This runs the SAME detector (rule 1: one detector) on the full frame and
+    then, only while fewer than ``expected_faces`` have been found, on
+    progressively smaller overlapping tiles where each face fills a larger
+    share of the input. Landmarks come back normalized to the tile and are
+    mapped into frame coordinates, so callers crop from the original pixels.
+    Duplicates across overlapping tiles are merged by box overlap, keeping
+    the largest (least edge-clipped) observation.
+
+    For still-frame binding only: the tracker inside ``mesh`` sees tile
+    coordinates, so never call this from the video loop.
+    """
+    h, w = image_bgr.shape[:2]
+    found: list[FaceObservation] = list(mesh.process_frame(image_bgr))
+    keep_alive = []  # tile arrays must outlive the loop: the mesh memoizes on id()
+
+    def enough() -> bool:
+        return expected_faces is not None and len(found) >= int(expected_faces)
+
+    for level in range(1, max(1, int(max_levels))):
+        if enough():
+            break
+        cols = level + 1
+        side = int(np.ceil(w / cols))
+        if h <= side * 1.25:
+            tile_w, tile_h = side, h
+        else:
+            tile_w = tile_h = side
+        stride_x = max(1, int(tile_w * 0.75))
+        stride_y = max(1, int(tile_h * 0.75))
+        for y0 in _tile_offsets(h, tile_h, stride_y):
+            for x0 in _tile_offsets(w, tile_w, stride_x):
+                tile = np.ascontiguousarray(image_bgr[y0:y0 + tile_h, x0:x0 + tile_w])
+                keep_alive.append(tile)
+                th, tw = tile.shape[:2]
+                for obs in mesh.process_frame(tile):
+                    pts = np.asarray(obs.landmarks, dtype=np.float32).copy()
+                    pts[:, 0] = (x0 + pts[:, 0] * tw) / w
+                    pts[:, 1] = (y0 + pts[:, 1] * th) / h
+                    bx0, by0 = pts.min(axis=0)
+                    bx1, by1 = pts.max(axis=0)
+                    found.append(FaceObservation(
+                        track_id=-1,
+                        bbox=(float(bx0), float(by0), float(bx1), float(by1)),
+                        landmarks=pts,
+                    ))
+    return _merge_observations(found, min_iou_same_face)
+
+
+def _merge_observations(
+    observations: list[FaceObservation], min_iou: float
+) -> list[FaceObservation]:
+    """Drop duplicates of the same face; largest box wins; ids left-to-right."""
+    area = lambda o: (o.bbox[2] - o.bbox[0]) * (o.bbox[3] - o.bbox[1])  # noqa: E731
+    merged: list[FaceObservation] = []
+    for obs in sorted(observations, key=area, reverse=True):
+        if any(_box_iou(obs.bbox, kept.bbox) >= min_iou for kept in merged):
+            continue
+        merged.append(obs)
+    merged.sort(key=lambda o: o.bbox[0])
+    return [
+        FaceObservation(track_id=index, bbox=o.bbox, landmarks=o.landmarks)
+        for index, o in enumerate(merged)
+    ]
