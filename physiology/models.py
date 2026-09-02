@@ -167,10 +167,18 @@ class BaselineWindow(models.Model):
 
     @property
     def is_usable(self) -> bool:
-        """Whether this baseline can support a comparison at all."""
+        """Whether this baseline can support a comparison at all.
+
+        The floor tracks the length of the calm window (see
+        ``MIN_BASELINE_BEATS``); it used to be hard-coded to the 30 s analysis
+        figure, which a short calm period can never reach, so shortening the
+        window alone would have left every baseline unusable.
+        """
+        from physiology.services.metrics import MIN_BASELINE_BEATS
+
         return (
             self.hr_mean is not None
             and self.rmssd is not None
-            and self.beat_count >= 20
+            and self.beat_count >= MIN_BASELINE_BEATS
             and self.quality >= 0.5
         )
