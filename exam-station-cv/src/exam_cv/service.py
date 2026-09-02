@@ -27,6 +27,7 @@ from .contracts.schemas import (
 )
 from .contracts.sink import ArtifactSink, FileSink
 from .events.store import append_event
+from .faces.identity import face_chip
 from .report.summary import build_summary_from_log
 from .speaker.attribution import (
     LipActivityTracker,
@@ -138,7 +139,8 @@ class SessionRunner:
             self.identity.resolve(
                 obs.track_id,
                 frame.t_ms,
-                crop_provider=lambda o=obs: self.mesh.crop(frame.image, o),
+                # Same aligned chip as the enrollment gallery (identity.face_chip).
+                crop_provider=lambda o=obs: face_chip(self.mesh, frame.image, o),
             ) or unknown_track_id(obs.track_id)
             for obs in observations
         ]
@@ -480,7 +482,7 @@ def _enroll_interactively(manifest, camera, mesh, gallery, embedder, snapshots: 
             if len(faces) != 1:
                 continue
             gallery.enroll(
-                entry.student_id, embedder.embed(mesh.crop(frame.image, faces[0]))
+                entry.student_id, embedder.embed(face_chip(mesh, frame.image, faces[0]))
             )
             captured += 1
             if captured >= snapshots:

@@ -33,7 +33,7 @@ from attribution.models import (
 
 logger = logging.getLogger(__name__)
 
-ENGINE_VERSION = 'face-binding-v2'
+ENGINE_VERSION = 'face-binding-v3-aligned'
 COMPAT_ENGINE_VERSION = 'face-binding-v2-legacy-adapter'
 DEFAULT_MATCH_THRESHOLD = 0.42
 DEFAULT_MATCH_MARGIN = 0.05
@@ -81,6 +81,41 @@ def cached_enrollment_embeddings(photos: dict[str, list[str]]) -> tuple[dict, se
         elif cache.status == FaceEnrollmentEmbeddingCache.Status.UNUSABLE:
             unusable.add(str(cache.student_id))
     return vectors, unusable
+
+
+def store_fresh_embeddings(
+    photos: dict[str, list[str]], backend_result: dict, already_cached=(),
+) -> int:
+    """Keep vectors the engine just built from photos, so the next scan is fast.
+
+    Only output from the current engine version is stored: a stale deployment
+    (compat adapter) embeds unaligned crops that must never be compared with
+    aligned ones. Failures are never cached, so a transient photo download
+    error cannot hide a student until they re-enrol.
+    """
+    fresh = backend_result.get('enrollment_embeddings') or {}
+    if backend_result.get('engine_version') != ENGINE_VERSION or not isinstance(fresh, dict):
+        return 0
+    stored = 0
+    for student_id, vectors in fresh.items():
+        sid = str(student_id)
+        if sid in already_cached or sid not in photos or not vectors:
+            continue
+        try:
+            FaceEnrollmentEmbeddingCache.objects.update_or_create(
+                student_id=sid,
+                defaults={
+                    'photo_fingerprint': FaceEnrollmentEmbeddingCache.fingerprint(photos[sid]),
+                    'embeddings': vectors,
+                    'engine_version': ENGINE_VERSION,
+                    'status': FaceEnrollmentEmbeddingCache.Status.READY,
+                    'error_message': '',
+                },
+            )
+            stored += 1
+        except Exception:
+            logger.exception('Could not cache enrollment vectors for %s', sid)
+    return stored
 
 
 def _aggregate_frame_matches(
@@ -272,6 +307,7 @@ def bind_from_frames(session, frame_bytes_list: list[bytes]) -> dict:
     backend_result['unusable_enrollment'] = sorted((
         set(backend_result.get('unusable_enrollment', [])) | cached_unusable
     ) - recognised_ids)
+    store_fresh_embeddings(photos, backend_result, already_cached=set(cached_vectors))
     if not matches:
         unusable = set(missing_enrollments(session)) | {
             str(value) for value in backend_result.get('unusable_enrollment', [])
@@ -504,6 +540,7 @@ def _bind_modal_frames(
             ),
             'frames_processed': body.get('frames_processed', len(body['frame_matches'])),
             'unusable_enrollment': body.get('unusable_enrollment', []),
+            'enrollment_embeddings': body.get('enrollment_embeddings') or {},
             # The immediately preceding deployment already understood a full
             # frame burst but did not expose a version endpoint. Treat that
             # exact response shape as the bounded compatibility adapter.
@@ -566,9 +603,13 @@ def _bind_local_frames(
     from exam_cv.faces.identity import (  # type: ignore
         ArcFaceEmbedder,
         assign_embeddings_one_to_one,
+        face_chip,
         build_gallery_from_photos,
     )
-    from exam_cv.faces.mesh import MeshPipeline  # type: ignore
+    from exam_cv.faces.mesh import (  # type: ignore
+        MeshPipeline,
+        detect_faces_multiscale,
+    )
 
     from cv_analysis.services.runner import _download_blob
     from cv_analysis.services.storage import is_local_recording
@@ -630,8 +671,10 @@ def _bind_local_frames(
                 matches = []
                 observations = []
                 embeddings = []
-                for obs in mesh.process_frame(frame):
-                    crop = mesh.crop(frame, obs)
+                for obs in detect_faces_multiscale(
+                    mesh, frame, expected_faces=len(gallery.enrolled_ids()),
+                ):
+                    crop = face_chip(mesh, frame, obs)
                     if crop.size == 0:
                         continue
                     observations.append(obs)
