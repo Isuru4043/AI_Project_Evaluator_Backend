@@ -285,7 +285,8 @@ class AnswerSubmitView(APIView):
 
             from viva_evaluator.services.answer_idempotency import (
                 IdempotencyConflict, acquire_claim, complete_claim,
-                request_fingerprint, resolve_idempotency_key, speaker_key,
+                has_client_key, request_fingerprint, resolve_idempotency_key,
+                speaker_key,
             )
             logical_speaker = (
                 f"student:{caller_student.id}"
@@ -314,6 +315,10 @@ class AnswerSubmitView(APIView):
                         speech_metrics=speech_metrics,
                         speaker_id=logical_speaker,
                     ),
+                    # Only a key the caller chose carries a promise about the
+                    # payload. A key we derived from question and speaker must
+                    # not turn a re-submitted answer into a dead end.
+                    strict_hash=has_client_key(request),
                 )
             except IdempotencyConflict as exc:
                 return Response(

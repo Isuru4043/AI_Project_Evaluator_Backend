@@ -235,10 +235,20 @@ def record_attribution(
         _record_contributions(attribution, answer, decision)
 
         # Keep the answer itself in step, so existing report code that reads
-        # VivaAnswer.student sees the resolved speaker without changes. An
-        # unknown speaker leaves it null: the answer belongs to nobody on the
-        # roster yet, and claiming otherwise would be the guess we refuse.
-        if str(answer.student_id or '') != str(student_id or ''):
+        # VivaAnswer.student sees the resolved speaker without changes.
+        #
+        # Naming a speaker is a positive finding, so it is written. Failing to
+        # name one is not: it means this window carried no confident evidence,
+        # which is the normal case for a remote individual viva where there is
+        # no Agora per-UID contest and no CV to run. Clearing the owner there
+        # threw away what the submit path already knew for certain, and the
+        # scorer then credited the answer to nobody - every scored answer was
+        # dropped from the student's total and the report read 0/100.
+        #
+        # So an inconclusive decision leaves an existing owner alone. An
+        # unenrolled speaker still yields a null owner on an answer that never
+        # had one, which is the guess we continue to refuse.
+        if student_id and str(answer.student_id or '') != str(student_id):
             answer.student_id = student_id
             answer.save(update_fields=['student'])
 
