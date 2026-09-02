@@ -384,3 +384,194 @@ class GroupScoringReportTests(TestCase):
         self.assertEqual(response.data['data']['overall_score'], 0.85)
         self.assertEqual(response.data['data']['scores_status'], 'approved')
         generate_report.assert_not_called()
+
+
+class DerivedKeyRetryTests(TestCase):
+    """A retry after a turn that failed must not strand the student.
+
+    The submit view derives the idempotency key from question and speaker, so
+    a second press of Submit reuses it by construction. Speech recognition
+    almost never reproduces byte-identical text, so treating that as a key
+    reused with a different payload rejected every retry and left the student
+    stuck on the question with a conflict error.
+    """
+
+    def setUp(self):
+        self.project = Project.objects.create(project_name='Derived key retries')
+        now = timezone.now()
+        self.session = EvaluationSession.objects.create(
+            project=self.project,
+            scheduled_start=now - timedelta(minutes=5),
+            scheduled_end=now + timedelta(minutes=55),
+            actual_start=now - timedelta(minutes=4),
+            status=EvaluationSession.Status.IN_PROGRESS,
+        )
+        self.question = VivaQuestion.objects.create(
+            session=self.session,
+            project=self.project,
+            question_text='Explain your caching strategy.',
+            question_order=1,
+        )
+        self.speaker = 'student:derived-key'
+        self.key = f'answer:{self.question.id}:{self.speaker}'
+        self.first_hash = request_fingerprint(
+            answer_text='We cache reads', speech_metrics=None, speaker_id=self.speaker,
+        )
+        self.second_hash = request_fingerprint(
+            answer_text='We cache reads at the edge',
+            speech_metrics=None,
+            speaker_id=self.speaker,
+        )
+
+    def _acquire(self, request_hash, strict_hash=False):
+        return acquire_claim(
+            session=self.session,
+            question=self.question,
+            speaker=self.speaker,
+            idempotency_key=self.key,
+            request_hash=request_hash,
+            strict_hash=strict_hash,
+        )
+
+    def test_retry_after_a_failure_that_saved_the_answer_is_allowed(self):
+        claim = self._acquire(self.first_hash).claim
+        VivaAnswer.objects.create(
+            question=self.question,
+            deduplication_key=self.speaker,
+            transcribed_answer='We cache reads',
+        )
+        VivaAnswerProcessingClaim.objects.filter(pk=claim.pk).update(
+            status=VivaAnswerProcessingClaim.Status.FAILED,
+            error_code='pipeline_error',
+        )
+
+        result = self._acquire(self.second_hash)
+
+        # Persistence dedupes on the speaker key, so re-running only finishes
+        # the turn; it never writes a second answer or edits the first.
+        self.assertEqual(result.action, 'process')
+
+    def test_resubmitting_an_answered_question_replays_instead_of_erroring(self):
+        claim = self._acquire(self.first_hash).claim
+        VivaAnswerProcessingClaim.objects.filter(pk=claim.pk).update(
+            status=VivaAnswerProcessingClaim.Status.COMPLETED,
+            response_payload={'answer_saved': True},
+        )
+
+        result = self._acquire(self.second_hash)
+
+        self.assertEqual(result.action, 'replay')
+        self.assertEqual(result.claim.response_payload, {'answer_saved': True})
+
+    def test_a_client_chosen_key_still_may_not_change_its_payload(self):
+        claim = self._acquire(self.first_hash, strict_hash=True).claim
+        VivaAnswerProcessingClaim.objects.filter(pk=claim.pk).update(
+            status=VivaAnswerProcessingClaim.Status.COMPLETED,
+            response_payload={'answer_saved': True},
+        )
+
+        with self.assertRaises(IdempotencyConflict):
+            self._acquire(self.second_hash, strict_hash=True)
+
+
+class IndividualVivaScoringTests(TestCase):
+    """A scored individual viva must not total zero.
+
+    Two failures combined to report 0/100 on a viva whose answers were scored.
+    The session-level report passes no student, and filtering individual
+    criteria by contribution share matched nothing. Separately, attribution
+    cleared the answer's owner whenever a window carried no confident
+    evidence, which is the normal case for a remote individual viva.
+    """
+
+    def setUp(self):
+        self.project = Project.objects.create(project_name='Individual viva scoring')
+        self.student = self._student('solo@example.com', 'REG-SOLO')
+        self.session = EvaluationSession.objects.create(
+            project=self.project,
+            student=self.student,
+            scheduled_start=timezone.now(),
+            scheduled_end=timezone.now() + timedelta(hours=1),
+            status=EvaluationSession.Status.COMPLETED,
+        )
+        category = RubricCategory.objects.create(
+            project=self.project,
+            category_name='Knowledge',
+            weight_percentage=100,
+        )
+        self.criterion = RubricCriteria.objects.create(
+            category=category,
+            criteria_name='Individual understanding',
+            max_score=10,
+            is_individual=True,
+        )
+
+    @staticmethod
+    def _student(email, registration_number):
+        user = User.objects.create_user(
+            email=email,
+            password='test-password',
+            full_name='Solo Student',
+            role=User.Role.STUDENT,
+        )
+        return StudentProfile.objects.create(
+            user=user, registration_number=registration_number,
+        )
+
+    def _answer(self, order, score, *, student, dedup):
+        question = VivaQuestion.objects.create(
+            session=self.session,
+            project=self.project,
+            question_text=f'Question {order}',
+            question_order=order,
+        )
+        VivaQuestionExtension.objects.create(question=question, criteria=self.criterion)
+        return VivaAnswer.objects.create(
+            question=question,
+            student=student,
+            deduplication_key=dedup,
+            ai_answer_score=score,
+            transcribed_answer='Test answer',
+        )
+
+    def test_session_level_report_scores_individual_criteria(self):
+        from viva_evaluator.services.scoring_service import ScoringService
+
+        self._answer(1, 2.2, student=self.student, dedup=f'student:{self.student.id}')
+        self._answer(2, 3.1, student=self.student, dedup=f'student:{self.student.id}')
+
+        result = ScoringService.aggregate_student_score(self.session, None)
+
+        self.assertEqual(result['percentage'], 26.5)
+        self.assertNotEqual(result['grade'], 'N/A')
+
+    def test_an_answer_whose_owner_was_cleared_still_scores(self):
+        from viva_evaluator.services.scoring_service import ScoringService
+
+        # The owner survives in deduplication_key, which attribution never
+        # rewrites, so historic answers still reach the right student.
+        self._answer(1, 2.2, student=None, dedup=f'student:{self.student.id}')
+        self._answer(2, 3.1, student=None, dedup=f'student:{self.student.id}')
+
+        result = ScoringService.aggregate_student_score(self.session, self.student)
+
+        self.assertEqual(result['percentage'], 26.5)
+
+    def test_attribution_never_clears_an_owner_it_cannot_improve_on(self):
+        from unittest.mock import patch
+
+        from attribution.services.engine import record_attribution
+
+        answer = self._answer(
+            1, 2.2, student=self.student, dedup=f'student:{self.student.id}',
+        )
+        inconclusive = type('Decision', (), {
+            'student_id': None, 'unknown_key': None, 'confidence': 0.0,
+            'breakdown': {}, 'co_speakers': [], 'method': 'none',
+        })()
+
+        with patch('attribution.services.engine.is_enabled', return_value=True):
+            record_attribution(answer, self.session, inconclusive)
+
+        answer.refresh_from_db()
+        self.assertEqual(answer.student_id, self.student.id)

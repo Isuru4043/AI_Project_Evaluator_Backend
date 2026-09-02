@@ -24,7 +24,17 @@ class ScoringService:
             if share > 0:
                 return min(1.0, share)
 
-        return 1.0 if answer.student_id == student_profile.id else 0.0
+        if answer.student_id == student_profile.id:
+            return 1.0
+
+        # The submit path stamps the owner into deduplication_key as well, and
+        # that copy is never rewritten by attribution. Historic answers whose
+        # FK was cleared before that was fixed still score correctly from it.
+        return (
+            1.0
+            if (answer.deduplication_key or '') == f'student:{student_profile.id}'
+            else 0.0
+        )
 
     @staticmethod
     def get_effective_score_for_answer(answer):
@@ -85,7 +95,7 @@ class ScoringService:
                 try:
                     q_ext = q.extension
                     if q_ext and q_ext.criteria:
-                        if q_ext.criteria.is_individual:
+                        if q_ext.criteria.is_individual and student_profile is not None:
                             # Credit every recognized contributor to a joint
                             # answer. The share weights multiple answers within
                             # one criterion; it does not turn speaking duration
@@ -96,6 +106,12 @@ class ScoringService:
                             )
                             if share > 0:
                                 answers.append((a, q_ext.criteria, share))
+                        elif q_ext.criteria.is_individual:
+                            # No student was named, so this is the session-level
+                            # report. There is nobody to split an individual
+                            # criterion between, and filtering by share here
+                            # matched nothing and scored the whole viva zero.
+                            answers.append((a, q_ext.criteria, 1.0))
                         else:
                             # Group criteria measure the group, so every member
                             # carries the whole answer regardless of who spoke.

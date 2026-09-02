@@ -48,6 +48,21 @@ def request_fingerprint(*, answer_text, speech_metrics, speaker_id) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def has_client_key(request) -> bool:
+    """Whether the caller chose the key, rather than us deriving one.
+
+    It decides how strict a repeat submission is treated. A client that picks
+    its own key is making a promise about the payload, so reusing that key for
+    different content is a contract violation worth rejecting. A key we derived
+    ourselves from question and speaker carries no such promise: the same
+    student pressing submit again after a failed turn legitimately sends a
+    slightly different transcript, and refusing it strands them on the question.
+    """
+    return bool(
+        request.headers.get("Idempotency-Key") or request.data.get("idempotency_key")
+    )
+
+
 def resolve_idempotency_key(request, *, question_id, speaker_id) -> str:
     supplied = request.headers.get("Idempotency-Key") or request.data.get(
         "idempotency_key"
@@ -65,7 +80,9 @@ def resolve_idempotency_key(request, *, question_id, speaker_id) -> str:
     return f"answer:{question_id}:{speaker_id}"
 
 
-def acquire_claim(*, session, question, speaker, idempotency_key, request_hash):
+def acquire_claim(
+    *, session, question, speaker, idempotency_key, request_hash, strict_hash=True,
+):
     owner_token = uuid.uuid4()
     now = timezone.now()
     defaults = {
@@ -107,7 +124,14 @@ def acquire_claim(*, session, question, speaker, idempotency_key, request_hash):
             answer_was_persisted = claim.question.answers.filter(
                 deduplication_key=claim.speaker_key,
             ).exists()
-            if not created and recoverable and not answer_was_persisted:
+            # A persisted answer is immutable, so a client-chosen key may not
+            # be re-pointed at different content. With a derived key it is safe
+            # to retry: persistence is keyed on the same speaker and returns
+            # the answer already stored rather than writing a second one, so
+            # the retry only finishes the turn that failed after saving.
+            if not created and recoverable and (
+                not answer_was_persisted or not strict_hash
+            ):
                 claim.status = VivaAnswerProcessingClaim.Status.PROCESSING
                 claim.idempotency_key = idempotency_key
                 claim.request_hash = request_hash
@@ -129,10 +153,13 @@ def acquire_claim(*, session, question, speaker, idempotency_key, request_hash):
                 raise IdempotencyConflict(
                     "This question already has a submission with another idempotency key."
                 )
-            if claim.request_hash != request_hash:
+            if claim.request_hash != request_hash and strict_hash:
                 raise IdempotencyConflict(
                     "The idempotency key was already used with a different answer."
                 )
+            # A derived key falls through: a completed turn replays its stored
+            # response and the student's screen moves on, which is what a
+            # duplicate submit of an already-answered question should do.
             if created:
                 return ClaimResult(claim, "process")
             if claim.status == VivaAnswerProcessingClaim.Status.COMPLETED:
@@ -174,7 +201,9 @@ def acquire_claim(*, session, question, speaker, idempotency_key, request_hash):
             ).first()
         if winner is None:
             raise
-        if winner.idempotency_key != idempotency_key or winner.request_hash != request_hash:
+        if winner.idempotency_key != idempotency_key or (
+            strict_hash and winner.request_hash != request_hash
+        ):
             raise IdempotencyConflict(
                 "This question already has a different answer submission."
             )
