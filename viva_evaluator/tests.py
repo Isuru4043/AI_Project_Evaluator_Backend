@@ -1,4 +1,5 @@
 from datetime import timedelta
+from unittest.mock import patch
 
 from django.test import TestCase
 from django.utils import timezone
@@ -13,6 +14,7 @@ from core.models import (
     ProjectExaminer,
     RubricCategory,
     RubricCriteria,
+    SessionSummaryReport,
     StudentGroup,
     StudentProfile,
     User,
@@ -331,3 +333,54 @@ class GroupScoringReportTests(TestCase):
             format='json',
         )
         self.assertEqual(retry.status_code, 200, retry.data)
+
+    def test_student_report_waits_for_examiner_approval(self):
+        self.client.force_authenticate(self.alice.user)
+
+        with patch(
+            'viva_evaluator.services.reporting.generate_post_viva_report'
+        ) as generate_report:
+            response = self.client.get(
+                f'/api/viva/sessions/{self.session.id}/report/'
+            )
+
+        self.assertEqual(response.status_code, 202, response.data)
+        self.assertEqual(response.data['scores_status'], 'draft')
+        generate_report.assert_not_called()
+
+    def test_student_can_read_only_own_approved_report(self):
+        SessionSummaryReport.objects.create(
+            session=self.session,
+            student=self.alice,
+            total_final_score=85,
+            scores_status=SessionSummaryReport.ScoresStatus.APPROVED,
+            scores_approved_at=timezone.now(),
+            is_published=True,
+            published_at=timezone.now(),
+        )
+        SessionSummaryReport.objects.create(
+            session=self.session,
+            student=self.bob,
+            total_final_score=65,
+            scores_status=SessionSummaryReport.ScoresStatus.APPROVED,
+            scores_approved_at=timezone.now(),
+            is_published=True,
+            published_at=timezone.now(),
+        )
+        self.client.force_authenticate(self.alice.user)
+
+        with patch(
+            'viva_evaluator.services.reporting.generate_post_viva_report'
+        ) as generate_report:
+            response = self.client.get(
+                f'/api/viva/sessions/{self.session.id}/report/'
+            )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(list(response.data['reports']), [str(self.alice.id)])
+        self.assertEqual(
+            response.data['data']['speaker_id'], str(self.alice.id)
+        )
+        self.assertEqual(response.data['data']['overall_score'], 0.85)
+        self.assertEqual(response.data['data']['scores_status'], 'approved')
+        generate_report.assert_not_called()

@@ -19,10 +19,12 @@ from authentication.authentication import CookieJWTAuthentication
 from physical_evaluation.authentication import PhysicalKioskAuthentication
 from physical_evaluation.models import PhysicalEvaluationRun, PhysicalKioskAccess
 from viva_evaluator.permissions import (
+    EXAMINER,
     CanParticipateInVivaSession,
     IsAssignedProjectExaminer,
     IsAssignedSessionExaminer,
     VivaSessionPermission,
+    session_roles_for_user,
 )
 from viva_evaluator.services.pipeline.exceptions import (
     QuestionGenerationUnavailableError,
@@ -387,20 +389,60 @@ class SessionReportView(APIView):
     session is COMPLETED so examiners can review mid-session if needed —
     the report just reflects whatever turns have happened so far.
     """
-    permission_classes = [IsAuthenticated, IsAssignedSessionExaminer]
+    permission_classes = [IsAuthenticated, VivaSessionPermission]
 
     def get(self, request, session_id):
         try:
-            from core.models import EvaluationSession
+            from core.models import EvaluationSession, SessionSummaryReport
             from viva_evaluator.services.reporting import generate_post_viva_report
 
-            session = EvaluationSession.objects.get(id=session_id)
+            session = EvaluationSession.objects.select_related(
+                'student', 'group'
+            ).get(id=session_id)
+
+            roles = session_roles_for_user(request.user, session)
+            is_examiner = EXAMINER in roles
+            participant_student = None
+            if not is_examiner:
+                participant_student = request.user.student_profile
+                summary = session.summary_reports.filter(
+                    student=participant_student,
+                    scores_status=SessionSummaryReport.ScoresStatus.APPROVED,
+                    is_published=True,
+                ).first()
+                if summary is None:
+                    return Response(
+                        {
+                            "message": "Final results are waiting for examiner approval.",
+                            "scores_status": "draft",
+                            "session_status": session.status,
+                        },
+                        status=status.HTTP_202_ACCEPTED,
+                    )
+
+                from viva_evaluator.services.session_reports import (
+                    build_published_student_report,
+                )
+
+                student_key = str(participant_student.id)
+                student_report = build_published_student_report(
+                    session, participant_student, summary
+                )
+                return Response(
+                    {
+                        "reports": {student_key: student_report},
+                        "session_status": session.status,
+                        "data": student_report,
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
             reports = generate_post_viva_report(session)
+
             return Response({
                 "reports": reports,
                 "session_status": session.status,
-                # Safe fallback for frontend until it's fully updated:
-                "data": next(iter(reports.values())) if reports else None
+                "data": next(iter(reports.values())) if reports else None,
             }, status=status.HTTP_200_OK)
 
         except EvaluationSession.DoesNotExist:

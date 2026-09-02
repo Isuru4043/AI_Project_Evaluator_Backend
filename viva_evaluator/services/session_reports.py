@@ -70,6 +70,66 @@ def refresh_draft_summary_reports(session):
     return refreshed
 
 
+def build_published_student_report(session, student, summary):
+    """Build the stable, student-safe payload for one published result."""
+    from viva_evaluator.services.reporting.post_viva_report import (
+        _build_transcript,
+    )
+    from viva_evaluator.services.scoring_service import ScoringService
+
+    scoring = ScoringService.aggregate_student_score(session, student)
+    criteria_by_id = {
+        str(criteria.id): criteria
+        for category in session.project.rubric_categories.prefetch_related(
+            'criteria'
+        ).all()
+        for criteria in category.criteria.all()
+    }
+    per_criterion_scores = {}
+    for criteria_id, earned in scoring.get('per_criteria', {}).items():
+        criteria = criteria_by_id.get(str(criteria_id))
+        if criteria is None:
+            continue
+        maximum = float(criteria.max_score or 0)
+        score_out_of_ten = (float(earned) / maximum * 10) if maximum else 0
+        per_criterion_scores[criteria.criteria_name] = round(
+            score_out_of_ten, 2
+        )
+
+    questions = list(
+        session.viva_questions.select_related(
+            'extension__criteria'
+        ).prefetch_related(
+            'answers__extension'
+        ).order_by('question_order')
+    )
+    percentage = float(summary.total_final_score or 0)
+    weight = float(session.viva_weight_percentage or 100)
+    feedback = (
+        summary.overall_feedback
+        or 'The examiner has approved this final viva result.'
+    )
+
+    return {
+        'session_id': str(session.id),
+        'speaker_id': str(student.id),
+        'overall_score': round(percentage / 100, 4),
+        'viva_weight_percentage': weight,
+        'scaled_score': round(percentage * weight / 100, 2),
+        'per_criterion_scores': per_criterion_scores,
+        'xai_report': {
+            'overall_summary': feedback,
+            'examiner_recommendation': feedback,
+        },
+        'transcript': _build_transcript(questions),
+        'scores_status': summary.scores_status,
+        'scores_approved_at': (
+            summary.scores_approved_at.isoformat()
+            if summary.scores_approved_at else None
+        ),
+    }
+
+
 def unresolved_individual_answers(session):
     """Individual-rubric answers that cannot safely be assigned a mark yet."""
     from attribution.models import AttributionStatus
