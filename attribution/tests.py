@@ -82,6 +82,41 @@ class BindingBurstTests(SimpleTestCase):
         self.assertEqual({item['student_id'] for item in result}, set(students))
         self.assertEqual(len(result), 5)
 
+    def test_verified_present_members_can_continue_when_roster_member_is_absent(self):
+        from attribution.services.binding import ENGINE_VERSION, _review_continuation
+
+        complete, partial = _review_continuation(
+            [
+                {'student_id': ALICE, 'status': 'verified'},
+                {'student_id': BOB, 'status': 'verified'},
+                {'student_id': CARA, 'status': 'not_detected'},
+            ],
+            unknown_faces=[],
+            frames_processed=5,
+            required_frames=5,
+            engine_version=ENGINE_VERSION,
+        )
+
+        self.assertFalse(complete)
+        self.assertTrue(partial)
+
+    def test_unknown_visible_face_blocks_partial_continuation(self):
+        from attribution.services.binding import ENGINE_VERSION, _review_continuation
+
+        complete, partial = _review_continuation(
+            [
+                {'student_id': ALICE, 'status': 'verified'},
+                {'student_id': BOB, 'status': 'not_detected'},
+            ],
+            unknown_faces=[{'student_id': None}],
+            frames_processed=5,
+            required_frames=5,
+            engine_version=ENGINE_VERSION,
+        )
+
+        self.assertFalse(complete)
+        self.assertFalse(partial)
+
     def test_students_detected_in_different_frames_are_both_kept(self):
         from attribution.services.binding import _aggregate_frame_matches
 

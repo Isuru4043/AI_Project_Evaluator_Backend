@@ -480,7 +480,7 @@ class KioskRecordingStartView(APIView):
             return _err('This physical evaluation is not accepting a recording.', code=409)
         if not run.identity_authorized:
             return _err(
-                'Identity review must be completed or overridden before recording starts.',
+                'At least one present group member must be verified, with no unknown faces, before recording starts.',
                 code=409,
             )
 
@@ -519,8 +519,8 @@ class KioskDemoCompleteView(APIView):
             return _err('This physical evaluation is not in the demo phase.', code=409)
         if not run.identity_authorized:
             return _err(
-                'All expected group members must be verified, or an examiner '
-                'must authorize the identity-review override.',
+                'At least one present group member must be verified with no '
+                'unknown faces, or an examiner must authorize the identity-review override.',
                 code=409,
             )
 

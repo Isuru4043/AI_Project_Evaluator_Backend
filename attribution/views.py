@@ -264,6 +264,10 @@ class SeatBindingView(APIView):
                 run.identity_status = PhysicalEvaluationRun.IdentityStatus.VERIFIED
                 run.identity_verified_at = timezone.now()
                 update_fields.extend(['identity_status', 'identity_verified_at'])
+            elif result.get('partial'):
+                run.identity_status = PhysicalEvaluationRun.IdentityStatus.PARTIAL
+                run.identity_verified_at = timezone.now()
+                update_fields.extend(['identity_status', 'identity_verified_at'])
             elif run.identity_status != PhysicalEvaluationRun.IdentityStatus.OVERRIDDEN:
                 run.identity_status = PhysicalEvaluationRun.IdentityStatus.PENDING
                 run.identity_verified_at = None
@@ -273,7 +277,11 @@ class SeatBindingView(APIView):
         message = (
             'All expected group members were verified.'
             if result.get('complete')
-            else 'Identity review is incomplete. Retry or use an examiner override.'
+            else (
+                'The members present were verified. Absent roster members were recorded.'
+                if result.get('partial')
+                else 'Identity review is incomplete. Retry or use an examiner override.'
+            )
         )
         # Incomplete verification is a valid review result, not a transport
         # error: the kiosk needs the roster diagnostics to explain what failed.

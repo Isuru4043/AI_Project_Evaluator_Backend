@@ -87,6 +87,7 @@ class PhysicalEvaluationRun(models.Model):
     class IdentityStatus(models.TextChoices):
         PENDING = 'pending', 'Pending identity review'
         VERIFIED = 'verified', 'All expected members verified'
+        PARTIAL = 'partial', 'Present group members verified'
         OVERRIDDEN = 'overridden', 'Examiner PIN override'
         NOT_REQUIRED = 'not_required', 'Individual session'
 
@@ -147,6 +148,7 @@ class PhysicalEvaluationRun(models.Model):
             not self.session.group_id
             or self.identity_status in {
                 self.IdentityStatus.VERIFIED,
+                self.IdentityStatus.PARTIAL,
                 self.IdentityStatus.OVERRIDDEN,
                 self.IdentityStatus.NOT_REQUIRED,
             }

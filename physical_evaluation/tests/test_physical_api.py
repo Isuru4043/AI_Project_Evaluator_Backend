@@ -1,4 +1,5 @@
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -143,6 +144,15 @@ class PhysicalEvaluationAPITests(TestCase):
         self.assertEqual(project.physical_config.location, 'Lab A')
         self.assertTrue(project.physical_config.check_panel_pin('Secret-123'))
         self.assertNotIn('physical_panel_pin', response.data['data'])
+
+    def test_partial_identity_status_authorizes_present_group_members(self):
+        run = SimpleNamespace(
+            session=SimpleNamespace(group_id='group-id'),
+            identity_status=PhysicalEvaluationRun.IdentityStatus.PARTIAL,
+            IdentityStatus=PhysicalEvaluationRun.IdentityStatus,
+        )
+
+        self.assertTrue(PhysicalEvaluationRun.identity_authorized.fget(run))
 
     def test_existing_project_creation_contract_still_defaults_to_remote(self):
         response = self.examiner_client.post(
