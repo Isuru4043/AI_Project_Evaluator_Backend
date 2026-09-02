@@ -312,6 +312,105 @@ class OnlineRecordingFinalizerTests(TestCase):
         self.assertIn("regional endpoint timed out", report.error_message)
 
 
+class ExaminerInterjectionLifecycleTests(TestCase):
+    """An interjection must end when the examiner hands back to the AI.
+
+    While it did not, the student's pending poll kept returning the same
+    question: their screen stayed on the examiner panel and the group-sync
+    poll kept returning early, so they stopped advancing with their group.
+    """
+
+    def setUp(self):
+        from core.models import VivaQuestion
+
+        self.VivaQuestion = VivaQuestion
+        self.project = Project.objects.create(
+            project_name="Group viva interjections",
+            evaluation_mode=Project.EvaluationMode.REMOTE,
+        )
+        now = timezone.now()
+        self.session = EvaluationSession.objects.create(
+            project=self.project,
+            scheduled_start=now - timedelta(minutes=20),
+            scheduled_end=now + timedelta(minutes=40),
+            actual_start=now - timedelta(minutes=10),
+            status=EvaluationSession.Status.IN_PROGRESS,
+            examiner_paused=True,
+        )
+
+    def _question(self, text, order=1):
+        return self.VivaQuestion.objects.create(
+            session=self.session,
+            project=self.project,
+            question_text=text,
+            question_source=self.VivaQuestion.QuestionSource.EXAMINER,
+            question_order=order,
+        )
+
+    def test_open_questions_are_the_unanswered_unclosed_ones(self):
+        from sessions_app.views_live import _open_examiner_questions
+
+        asked = self._question('Explain your caching layer.', 1)
+        closed = self._question('Already handled.', 2)
+        closed.closed_at = timezone.now()
+        closed.save(update_fields=['closed_at'])
+
+        self.assertEqual(
+            [q.id for q in _open_examiner_questions(self.session)], [asked.id],
+        )
+
+    def test_resume_closes_the_question_but_keeps_it_for_the_report(self):
+        from sessions_app.views_live import (
+            _close_open_examiner_questions,
+            _open_examiner_questions,
+        )
+
+        asked = self._question('Why did you pick that algorithm?')
+
+        self.assertEqual(_close_open_examiner_questions(self.session), 1)
+
+        asked.refresh_from_db()
+        self.assertIsNotNone(asked.closed_at)
+        self.assertEqual(asked.question_text, 'Why did you pick that algorithm?')
+        self.assertFalse(_open_examiner_questions(self.session).exists())
+
+    def test_a_voice_question_with_no_transcript_is_dropped_not_invented(self):
+        from sessions_app.views_live import _close_open_examiner_questions
+
+        draft = self._question('')
+
+        _close_open_examiner_questions(self.session)
+
+        # The student never saw it, so it must not reach the transcript.
+        self.assertFalse(self.VivaQuestion.objects.filter(id=draft.id).exists())
+
+    def test_starting_a_new_voice_question_only_supersedes_drafts(self):
+        from sessions_app.views_live import _close_open_examiner_questions
+
+        draft = self._question('', 1)
+        real = self._question('A question the student still owes.', 2)
+
+        self.assertEqual(
+            _close_open_examiner_questions(self.session, blank_only=True), 1,
+        )
+
+        real.refresh_from_db()
+        self.assertFalse(self.VivaQuestion.objects.filter(id=draft.id).exists())
+        self.assertIsNone(real.closed_at)
+
+    def test_an_answered_question_is_never_reopened_or_relabelled(self):
+        from core.models import VivaAnswer
+
+        answered = self._question('Answered already.')
+        VivaAnswer.objects.create(question=answered, transcribed_answer='Yes.')
+
+        from sessions_app.views_live import _close_open_examiner_questions
+
+        self.assertEqual(_close_open_examiner_questions(self.session), 0)
+        answered.refresh_from_db()
+        self.assertIsNone(answered.closed_at)
+
+
 class LiveExaminerInterruptionTests(TestCase):
     def setUp(self):
         self.examiner_user = User.objects.create_user(
