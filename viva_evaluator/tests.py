@@ -575,3 +575,176 @@ class IndividualVivaScoringTests(TestCase):
 
         answer.refresh_from_db()
         self.assertEqual(answer.student_id, self.student.id)
+
+
+class BlankReportTests(TestCase):
+    """A report with no readable content must not carry a viva.
+
+    Indexing used to mark such a submission READY, because it deliberately
+    persists an empty index so retrieval cannot fail later. The viva then
+    started normally: with nothing retrievable the questioner falls back to
+    broad rubric-shaped questions containing none of the student's own work,
+    and the marks that come out look exactly like earned ones.
+    """
+
+    def setUp(self):
+        from core.models import ProjectSubmission
+
+        self.project = Project.objects.create(project_name='Blank report')
+        user = User.objects.create_user(
+            email='blank@example.com',
+            password='test-password',
+            full_name='Blank Reporter',
+            role=User.Role.STUDENT,
+        )
+        self.student = StudentProfile.objects.create(
+            user=user, registration_number='REG-BLANK',
+        )
+        self.submission = ProjectSubmission.objects.create(
+            project=self.project, student=self.student,
+        )
+
+    def _index_with(self, chunks):
+        """Run the indexing worker over a report that yields these chunks."""
+        from unittest.mock import patch
+
+        from viva_evaluator.models import SubmissionIndexStatus
+        from viva_evaluator.services.indexing import indexing_runner
+
+        with patch(
+            'viva_evaluator.services.indexing.index_report',
+            return_value={'chunks': chunks, 'images_captioned': 0},
+        ), patch(
+            'viva_evaluator.services.rag.vector_store.save_index_for_submission',
+            return_value=(len(chunks), 384),
+        ):
+            indexing_runner._run_report_indexing(self.submission.id, b'%PDF-fake')
+        return SubmissionIndexStatus.objects.get(submission=self.submission)
+
+    def _session_payload(self):
+        now = timezone.now()
+        return {
+            'project': str(self.project.id),
+            'student': str(self.student.id),
+            'submission': str(self.submission.id),
+            'scheduled_start': now.isoformat(),
+            'scheduled_end': (now + timedelta(hours=1)).isoformat(),
+        }
+
+    def test_a_report_with_no_content_is_marked_failed_with_a_reason(self):
+        from viva_evaluator.models import SubmissionIndexStatus
+        from viva_evaluator.services.indexing.indexing_runner import NO_CONTENT_MESSAGE
+
+        row = self._index_with([])
+
+        self.assertEqual(row.status, SubmissionIndexStatus.IndexStatus.FAILED)
+        self.assertEqual(row.error_message, NO_CONTENT_MESSAGE)
+
+    def test_a_report_with_content_is_still_marked_ready(self):
+        from viva_evaluator.models import SubmissionIndexStatus
+
+        row = self._index_with([{'text': 'A real paragraph of project work.'}])
+
+        self.assertEqual(row.status, SubmissionIndexStatus.IndexStatus.READY)
+        self.assertIsNone(row.error_message)
+
+    def test_no_session_can_be_created_against_an_empty_report(self):
+        from viva_evaluator.serializers import EvaluationSessionCreateSerializer
+
+        self._index_with([])
+        serializer = EvaluationSessionCreateSerializer(data=self._session_payload())
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('No readable content', str(serializer.errors))
+
+    def test_a_submission_still_being_indexed_can_still_be_scheduled(self):
+        from viva_evaluator.models import SubmissionIndexStatus
+        from viva_evaluator.serializers import EvaluationSessionCreateSerializer
+
+        SubmissionIndexStatus.objects.update_or_create(
+            submission=self.submission,
+            defaults={'status': SubmissionIndexStatus.IndexStatus.PROCESSING},
+        )
+        serializer = EvaluationSessionCreateSerializer(data=self._session_payload())
+
+        # Scheduling moments after an upload is the normal case; the viva start
+        # gate checks readiness again before any question is asked.
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+
+class BlankReportSchedulingTests(TestCase):
+    """The scheduler the examiner actually uses must refuse an empty report.
+
+    Sessions are created by the project scheduler, which does not attach a
+    submission - it is resolved at viva time from the student or the group.
+    So the guard has to live where the schedule is built, or a session is
+    created for a report that can never carry one.
+    """
+
+    def setUp(self):
+        from core.models import ProjectSubmission
+
+        self.project = Project.objects.create(project_name='Scheduling guard')
+        user = User.objects.create_user(
+            email='empty-report@example.com',
+            password='test-password',
+            full_name='Empty Reporter',
+            role=User.Role.STUDENT,
+        )
+        self.student = StudentProfile.objects.create(
+            user=user, registration_number='REG-EMPTY',
+        )
+        self.submission = ProjectSubmission.objects.create(
+            project=self.project, student=self.student,
+        )
+
+    def _mark(self, status_value, message=''):
+        from viva_evaluator.models import SubmissionIndexStatus
+
+        SubmissionIndexStatus.objects.update_or_create(
+            submission=self.submission,
+            defaults={'status': status_value, 'error_message': message},
+        )
+
+    def test_a_failed_submission_blocks_scheduling_and_says_why(self):
+        from projects.views.session_views import unusable_submission_reason
+        from viva_evaluator.models import SubmissionIndexStatus
+        from viva_evaluator.services.indexing.indexing_runner import NO_CONTENT_MESSAGE
+
+        self._mark(SubmissionIndexStatus.IndexStatus.FAILED, NO_CONTENT_MESSAGE)
+
+        self.assertEqual(
+            unusable_submission_reason(self.project, student=self.student),
+            NO_CONTENT_MESSAGE,
+        )
+
+    def test_a_ready_submission_schedules_normally(self):
+        from projects.views.session_views import unusable_submission_reason
+        from viva_evaluator.models import SubmissionIndexStatus
+
+        self._mark(SubmissionIndexStatus.IndexStatus.READY)
+
+        self.assertIsNone(
+            unusable_submission_reason(self.project, student=self.student),
+        )
+
+    def test_indexing_still_in_flight_does_not_block_scheduling(self):
+        from projects.views.session_views import unusable_submission_reason
+        from viva_evaluator.models import SubmissionIndexStatus
+
+        self._mark(SubmissionIndexStatus.IndexStatus.PROCESSING)
+
+        self.assertIsNone(
+            unusable_submission_reason(self.project, student=self.student),
+        )
+
+    def test_a_student_with_no_submission_at_all_is_not_blocked_here(self):
+        from projects.views.session_views import unusable_submission_reason
+
+        # Enrolment is checked separately by the scheduler; this guard only
+        # rules on submissions it can actually see.
+        self.submission.delete()
+
+        self.assertIsNone(
+            unusable_submission_reason(self.project, student=self.student),
+        )

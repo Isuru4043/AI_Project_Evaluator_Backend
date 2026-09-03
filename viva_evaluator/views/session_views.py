@@ -87,6 +87,23 @@ class SessionStartView(APIView):
             # Make sure submission is ready
             try:
                 index_status = _get_or_create_index_status(submission)
+                if index_status.status == SubmissionIndexStatus.IndexStatus.FAILED:
+                    # A failed index never becomes ready by waiting, so telling
+                    # the examiner to wait would strand them. The stored reason
+                    # says what to do - most often that the report carried no
+                    # readable content, which is the one case where starting
+                    # anyway would produce a viva with nothing of the student's
+                    # own work in it.
+                    return Response(
+                        {
+                            "error": (
+                                index_status.error_message
+                                or "The submission could not be processed."
+                            ),
+                            "code": "submission_unusable",
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
                 if index_status.status != SubmissionIndexStatus.IndexStatus.READY:
                     return Response(
                         {"error": "Submission is not ready yet. Please wait for processing to complete."},
