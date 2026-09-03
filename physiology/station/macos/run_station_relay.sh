@@ -11,9 +11,13 @@
 # =============================================================================
 
 # --- The API root. NOT a session URL: the relay finds the session itself.
-#     If Django runs on THIS Mac        -> http://127.0.0.1:8000/api
-#     If Django runs on another machine -> http://<that-machine-ip>:8000/api
-BACKEND="http://127.0.0.1:8000/api"
+#     This MUST point at the same backend the kiosk browser is talking to.
+#     Getting it wrong is silent from the band's side: the OLED shows a pulse,
+#     the relay stays connected, and nothing ever reaches the system.
+#       kiosk on https://www.vivasense.tech -> https://api.vivasense.tech/api
+#       Django running on THIS Mac          -> http://127.0.0.1:8000/api
+#       Django on another machine           -> http://<that-machine-ip>:8000/api
+BACKEND="https://api.vivasense.tech/api"
 
 # --- Must match EXAM_STATION_TOKEN in the backend's environment.
 STATION_TOKEN="2208720c-f09f-4fa7-8070-7663ea807d605e3d55e9-7658-4285-81ba-c12a6bacd46c"
