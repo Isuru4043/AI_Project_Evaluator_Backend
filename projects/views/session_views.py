@@ -23,6 +23,36 @@ from projects.views.project_views import _err, _get_examiner_profile, _get_stude
 from viva_evaluator.services.rubric_extractor import generate_viva_grouping
 
 
+def unusable_submission_reason(project, *, student=None, group=None):
+    """Why no viva can be scheduled here yet, or None if it can.
+
+    Mirrors how a session resolves its own submission at viva time (see
+    ``_resolve_session_submission``): a group session examines the group's
+    submission, an individual session the student's own.
+
+    Only a settled failure blocks. The usual cause is a report that carried no
+    readable content, and a viva against one asks broad rubric-shaped
+    questions with nothing of the student's own work in them, then awards
+    marks that look exactly like earned ones. A submission still being indexed
+    is fine to schedule against; the viva start gate checks again before any
+    question is asked.
+    """
+    from viva_evaluator.models import SubmissionIndexStatus
+
+    query = ProjectSubmission.objects.filter(project=project)
+    query = query.filter(group=group) if group is not None else query.filter(student=student)
+    submission = query.select_related('index_status').first()
+    if submission is None:
+        return None
+
+    index_status = getattr(submission, 'index_status', None)
+    if index_status is None:
+        return None
+    if index_status.status != SubmissionIndexStatus.IndexStatus.FAILED:
+        return None
+    return index_status.error_message or 'This submission could not be processed.'
+
+
 class ManualScheduleView(APIView):
     """POST /api/projects/<project_id>/sessions/schedule/manual/"""
     permission_classes = [IsAuthenticated, IsExaminer]
@@ -74,6 +104,9 @@ class ManualScheduleView(APIView):
                             return _err(f'Student {sid} not found.')
                         if not ProjectSubmission.objects.filter(project=project, student=sp).exists():
                             return _err(f'Student {sp.user.full_name} is not enrolled in this project.')
+                        reason = unusable_submission_reason(project, student=sp)
+                        if reason:
+                            return _err(f'{sp.user.full_name}: {reason}')
 
                         session = EvaluationSession.objects.create(
                             project=project, student=sp, group=None,
@@ -95,6 +128,9 @@ class ManualScheduleView(APIView):
                         group = StudentGroup.objects.filter(id=gid, project=project).first()
                         if not group:
                             return _err(f'Group {gid} not found in this project.')
+                        reason = unusable_submission_reason(project, group=group)
+                        if reason:
+                            return _err(f'{group.group_name}: {reason}')
 
                         session = EvaluationSession.objects.create(
                             project=project, student=None, group=group,
@@ -180,6 +216,23 @@ class AutoScheduleView(APIView):
 
             if n == 0:
                 return _err('No students/groups enrolled in this project.')
+
+            # Refuse the whole batch rather than quietly scheduling around an
+            # unusable submission: the examiner would otherwise get a plan that
+            # silently omits somebody, or worse, includes a viva that can never
+            # be grounded in the student's own work.
+            blocked = []
+            for entity in entities:
+                if project.is_group_project:
+                    reason = unusable_submission_reason(project, group=entity)
+                    label = entity.group_name
+                else:
+                    reason = unusable_submission_reason(project, student=entity.student)
+                    label = entity.student.user.full_name
+                if reason:
+                    blocked.append(f'{label}: {reason}')
+            if blocked:
+                return _err(' '.join(blocked))
 
             if total_required > total_available:
                 return _err(

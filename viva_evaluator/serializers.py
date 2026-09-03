@@ -264,6 +264,22 @@ class EvaluationSessionCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 "Submission does not belong to the selected project."
             )
+
+        # A submission whose indexing failed can never carry a viva. The most
+        # common cause is a report with no readable content, and scheduling a
+        # session against one produces a viva of generic rubric-shaped
+        # questions containing nothing of the student's own work - which then
+        # earns real marks. Refuse at creation, where it is still cheap to fix.
+        #
+        # Only a settled failure blocks. A submission still being indexed is
+        # fine to schedule against; that is the normal case moments after an
+        # upload, and the viva start gate checks readiness again anyway.
+        index_status = getattr(submission, 'index_status', None) if submission else None
+        if index_status is not None and index_status.status == SubmissionIndexStatus.IndexStatus.FAILED:
+            raise serializers.ValidationError(
+                index_status.error_message
+                or "This submission could not be processed, so no viva can be scheduled against it."
+            )
         return data
 
 
