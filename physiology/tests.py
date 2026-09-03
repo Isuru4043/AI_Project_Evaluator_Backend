@@ -325,3 +325,124 @@ class ShortCalmWindowTests(SimpleTestCase):
         self.assertEqual(MIN_BEATS, 20)
         self.assertLess(MIN_BASELINE_BEATS, MIN_BEATS)
         self.assertFalse(compute(varied(MIN_BASELINE_BEATS)).is_usable)
+
+
+class RelayDiagnosticsTests(SimpleTestCase):
+    """The relay must say why beats are not arriving.
+
+    Every way it can fail to deliver used to be invisible at INFO: an
+    unreachable backend and a 404 logged at DEBUG, and the "no session" branch
+    never ran on the first poll because the id had not changed from None. The
+    operator saw a running relay, a band showing a pulse on its own screen,
+    and no way to tell which of those was happening.
+    """
+
+    def _relay(self):
+        from physiology.station_sidecar import Relay
+
+        return Relay(
+            api_base='https://example.invalid/api',
+            token='station-token',
+            device_name='VivaSense-HR',
+            address=None,
+        )
+
+    def test_an_unreachable_platform_is_reported_once_not_every_poll(self):
+        from unittest.mock import patch
+
+        relay = self._relay()
+        with patch('requests.get', side_effect=OSError('connection refused')):
+            with self.assertLogs('physio.relay', level='WARNING') as first:
+                relay.poll_session()
+            self.assertIn('cannot reach the platform', first.output[0])
+            self.assertIn('https://example.invalid/api', first.output[0])
+
+            # Same fault again: no second line, or the log becomes unreadable
+            # at four polls a second.
+            with patch.object(relay, '_report_poll_problem') as report:
+                relay.poll_session()
+                report.assert_called_once()
+
+    def test_a_bad_status_code_is_reported_rather_than_swallowed(self):
+        from unittest.mock import Mock, patch
+
+        relay = self._relay()
+        response = Mock(status_code=404, text='not found')
+        with patch('requests.get', return_value=response):
+            with self.assertLogs('physio.relay', level='WARNING') as logs:
+                relay.poll_session()
+
+        self.assertIn('404', logs.output[0])
+
+    def test_a_rejected_token_names_the_setting_to_check(self):
+        from unittest.mock import Mock, patch
+
+        relay = self._relay()
+        response = Mock(status_code=403, text='forbidden')
+        with patch('requests.get', return_value=response):
+            with self.assertLogs('physio.relay', level='WARNING') as logs:
+                relay.poll_session()
+
+        self.assertIn('EXAM_STATION_TOKEN', logs.output[0])
+
+    def test_the_first_poll_speaks_even_when_it_finds_no_session(self):
+        from unittest.mock import Mock, patch
+
+        relay = self._relay()
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            'data': {'session_id': None, 'reason': 'no session running'},
+        }
+        with patch('requests.get', return_value=response):
+            with self.assertLogs('physio.relay', level='INFO') as logs:
+                relay.poll_session()
+
+        self.assertIn('no session running', logs.output[0])
+        self.assertIn('reachable', logs.output[0])
+
+    def test_finding_a_session_is_announced_and_retargets(self):
+        from unittest.mock import Mock, patch
+
+        relay = self._relay()
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            'data': {
+                'session_id': 'abc-123',
+                'project': 'Zero Trust',
+                'phase': 'viva_in_progress',
+                'device_bound': True,
+                'student_name': 'Pavith',
+            },
+        }
+        with patch('requests.get', return_value=response):
+            with self.assertLogs('physio.relay', level='INFO') as logs:
+                relay.poll_session()
+
+        self.assertEqual(relay.session_id, 'abc-123')
+        self.assertTrue(relay.device_bound)
+        self.assertIn('Zero Trust', logs.output[0])
+
+    def test_an_unassigned_band_says_what_to_do_about_it(self):
+        from unittest.mock import Mock, patch
+
+        relay = self._relay()
+        relay.session_id = 'abc-123'
+        relay.session_label = 'Zero Trust'
+        relay._pending = [{'bpm': 72, 'ibi_ms': [830], 'contact': True}]
+        response = Mock(status_code=409, text='no wearer')
+        with patch('requests.post', return_value=response):
+            with self.assertLogs('physio.relay', level='INFO') as logs:
+                relay.flush()
+
+        self.assertIn('choose the wearer', logs.output[0].lower())
+
+    def test_beats_are_discarded_when_no_session_owns_them(self):
+        relay = self._relay()
+        relay._pending = [{'bpm': 72}]
+
+        relay.flush()
+
+        # Replaying them into the next session would put one student's pulse
+        # on another's report.
+        self.assertEqual(relay._pending, [])
+        self.assertEqual(relay.posted, 0)

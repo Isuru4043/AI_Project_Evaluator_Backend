@@ -50,6 +50,9 @@ SESSION_POLL_SECONDS = 4.0
 RECONNECT_DELAY_S = 5.0
 SCAN_TIMEOUT_S = 15.0
 MAX_BATCH = 200
+# One unattended status line a minute, so an operator can tell a healthy
+# idle relay from one that quietly stopped delivering.
+HEARTBEAT_SECONDS = 60.0
 # Beats collected while no session is running are dropped rather than queued:
 # they belong to nobody, and replaying them into the next session would put
 # one student's pulse on another's report.
@@ -129,6 +132,16 @@ class Relay:
         self._pending: list[dict] = []
         self.posted = 0
 
+        # Diagnostics. Every way this relay can fail to deliver beats used to
+        # be silent at INFO: a wrong backend URL, an unreachable host and a
+        # 404 all logged at DEBUG or not at all, and the "no session" branch
+        # never ran on the first poll because the id had not changed from None.
+        # The operator was left with a running relay, a band showing a pulse
+        # on its own screen, and no way to tell which of those was happening.
+        self._polled_once = False
+        self._last_poll_problem: str | None = None
+        self._last_refusal: str | None = None
+
     # -- platform ---------------------------------------------------------
 
     @property
@@ -142,9 +155,10 @@ class Relay:
         """Ask the platform which session, if any, is running."""
         import requests
 
+        url = f'{self.api_base}/physio/station/active/'
         try:
             response = requests.get(
-                f'{self.api_base}/physio/station/active/',
+                url,
                 # The band's own name is how the platform knows which session
                 # claimed it. Without this the server can only guess, and with
                 # two vivas running at once it guesses wrong.
@@ -153,23 +167,43 @@ class Relay:
                 timeout=10,
             )
         except Exception as exc:
-            logger.debug('session poll failed (%s)', exc)
+            # Reported once per distinct fault, not once per poll, so a wrong
+            # backend address is visible without four lines a second.
+            self._report_poll_problem(
+                f'cannot reach the platform at {url} ({exc.__class__.__name__}: {exc})'
+            )
             return
 
         if response.status_code != 200:
             if response.status_code in (401, 403):
-                logger.warning(
-                    'station token rejected (%s) - check EXAM_STATION_TOKEN',
-                    response.status_code,
+                self._report_poll_problem(
+                    f'station token rejected ({response.status_code}) - '
+                    'check EXAM_STATION_TOKEN matches the backend'
+                )
+            else:
+                self._report_poll_problem(
+                    f'{url} answered {response.status_code}: {response.text[:120]}'
                 )
             return
 
+        self._clear_poll_problem()
         data = (response.json() or {}).get('data') or {}
         new_id = data.get('session_id')
         self.device_bound = bool(data.get('device_bound'))
 
         if new_id == self.session_id:
+            # The very first poll still has to speak, even when it finds
+            # nothing: "no session running" and "the relay cannot see the
+            # backend at all" look identical from the outside otherwise.
+            if not self._polled_once:
+                self._polled_once = True
+                if not new_id:
+                    logger.info(
+                        'reachable, but %s; holding the band link',
+                        data.get('reason') or 'no session running',
+                    )
             return
+        self._polled_once = True
 
         # Switching target: anything still queued belongs to the session that
         # just ended, so it is dropped rather than misfiled into the new one.
@@ -187,6 +221,18 @@ class Relay:
             self.session_label = ''
             reason = data.get('reason') or 'no session running'
             logger.info('%s; holding the band link', reason)
+
+    def _report_poll_problem(self, message: str) -> None:
+        """Log a delivery fault once, and again only when it changes."""
+        if message == self._last_poll_problem:
+            return
+        self._last_poll_problem = message
+        logger.warning('NOT feeding any session: %s', message)
+
+    def _clear_poll_problem(self) -> None:
+        if self._last_poll_problem is not None:
+            logger.info('platform reachable again')
+            self._last_poll_problem = None
 
     def add(self, sample: dict) -> None:
         sample['t'] = datetime.now(timezone.utc).isoformat()
@@ -218,12 +264,22 @@ class Relay:
             )
             if response.status_code == 409:
                 # No wearer chosen yet. Expected early in the demo phase, and
-                # it resolves itself once the kiosk panel binds the band.
-                logger.debug('samples refused: band not assigned yet')
+                # it resolves itself once the kiosk panel binds the band - but
+                # in a group viva nobody is chosen automatically, so silence
+                # here reads as a dead band rather than an unanswered question.
+                if self._last_refusal != 'unassigned':
+                    self._last_refusal = 'unassigned'
+                    logger.info(
+                        'beats are arriving but the band is not assigned to '
+                        'anyone in "%s" - choose the wearer on the kiosk panel',
+                        self.session_label or self.session_id,
+                    )
             elif response.status_code >= 400:
                 logger.warning('backend rejected batch (%s): %s',
                                response.status_code, response.text[:160])
             else:
+                if self._last_refusal is not None:
+                    self._last_refusal = None
                 self.posted += len(batch)
                 logger.info('posted %d beat sample(s) to %s',
                             len(batch), self.session_label)
@@ -292,8 +348,36 @@ class Relay:
                 logger.warning('band link error (%s); retrying', exc)
             await asyncio.sleep(RECONNECT_DELAY_S)
 
+    async def _heartbeat_loop(self):
+        """Say what the relay is doing, so silence never means "working".
+
+        Everything else here logs on change. That is right for a system being
+        watched, but this one runs unattended in the corner of an exam room:
+        without a periodic line, an operator staring at the log has no way to
+        distinguish a healthy idle relay from one that stopped delivering
+        beats twenty minutes ago.
+        """
+        while True:
+            await asyncio.sleep(HEARTBEAT_SECONDS)
+            if self.session_id:
+                logger.info(
+                    'status: feeding "%s", band %s, %d sample(s) posted so far',
+                    self.session_label,
+                    'assigned' if self.device_bound else 'NOT assigned to anyone',
+                    self.posted,
+                )
+            elif self._last_poll_problem:
+                logger.info('status: not delivering - %s', self._last_poll_problem)
+            else:
+                logger.info('status: connected to the platform, no session running')
+
     async def run(self):
-        await asyncio.gather(self._session_loop(), self._band_loop())
+        logger.info(
+            'relay ready; platform %s, band "%s"', self.api_base, self.device_name,
+        )
+        await asyncio.gather(
+            self._session_loop(), self._band_loop(), self._heartbeat_loop(),
+        )
 
 
 def main() -> None:

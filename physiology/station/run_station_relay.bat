@@ -11,7 +11,12 @@ REM install_station_relay.bat ONCE as Administrator.
 REM ===========================================================================
 
 REM --- The API root. NOT a session URL: the relay finds the session itself.
-set BACKEND=http://127.0.0.1:8000/api
+REM     This MUST point at the same backend the kiosk browser is talking to.
+REM     Getting it wrong is silent from the band's side: the OLED shows a
+REM     pulse, the relay stays connected, and nothing ever reaches the system.
+REM       kiosk on https://www.vivasense.tech -> https://api.vivasense.tech/api
+REM       Django running on THIS machine      -> http://127.0.0.1:8000/api
+set BACKEND=https://api.vivasense.tech/api
 
 REM --- Must match EXAM_STATION_TOKEN in the backend's environment.
 set STATION_TOKEN=2208720c-f09f-4fa7-8070-7663ea807d605e3d55e9-7658-4285-81ba-c12a6bacd46c
