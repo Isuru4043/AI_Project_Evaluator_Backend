@@ -43,6 +43,24 @@ def _extract_text_from_pptx(filepath: str) -> str:
         logger.error(f"Error extracting text from PPTX: {e}")
         return ""
 
+
+def _extract_text_from_docx(filepath: str) -> str:
+    try:
+        from docx import Document
+
+        document = Document(filepath)
+        text = [paragraph.text for paragraph in document.paragraphs]
+        for table in document.tables:
+            for row in table.rows:
+                text.append("\t".join(cell.text for cell in row.cells))
+        return "\n".join(text)
+    except ImportError:
+        logger.error("python-docx is not installed.")
+        return ""
+    except Exception as e:
+        logger.error(f"Error extracting text from DOCX: {e}")
+        return ""
+
 def index_module_material(material) -> bool:
     """
     Extracts text, creates chunks, and saves to storage.
@@ -88,6 +106,8 @@ def index_module_material(material) -> bool:
             text = _extract_text_from_pdf(temp_path)
         elif ext == '.pptx':
             text = _extract_text_from_pptx(temp_path)
+        elif ext == '.docx':
+            text = _extract_text_from_docx(temp_path)
         
         os.unlink(temp_path)
 

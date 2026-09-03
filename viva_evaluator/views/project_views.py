@@ -5,6 +5,7 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import IsAuthenticated
 from django.utils import timezone
 from urllib.request import urlopen
+import logging
 
 from core.models import ProjectSubmission
 from projects.permissions import IsExaminer
@@ -20,6 +21,12 @@ from viva_evaluator.views._helpers import (
     _difficulty_signal_from_score,
     _get_or_create_index_status,
 )
+
+
+logger = logging.getLogger(__name__)
+
+MODULE_MATERIAL_MAX_BYTES = 50 * 1024 * 1024
+MODULE_MATERIAL_EXTENSIONS = {'.pdf', '.pptx', '.docx'}
 
 
 def _assign_creator_as_lead(project, user):
@@ -202,30 +209,81 @@ class ModuleMaterialUploadView(APIView):
         if not file_obj:
             return Response({"error": "No file provided"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Validate extension
-        ext = os.path.splitext(file_obj.name)[1].lower()
-        if ext not in ['.pdf', '.pptx', '.docx']:
+        original_filename = os.path.basename(file_obj.name)
+        ext = os.path.splitext(original_filename)[1].lower()
+        if ext not in MODULE_MATERIAL_EXTENSIONS:
             return Response({"error": "Only PDF, PPTX, and DOCX files are supported"}, status=status.HTTP_400_BAD_REQUEST)
+        if file_obj.size > MODULE_MATERIAL_MAX_BYTES:
+            return Response(
+                {"error": "The file is larger than the 50 MB upload limit."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        # Save file
         filename = f"module_materials/{project_id}/{uuid.uuid4()}{ext}"
-        saved_path = default_storage.save(filename, file_obj)
-        file_url = default_storage.url(saved_path)
+        saved_path = None
+        try:
+            saved_path = default_storage.save(filename, file_obj)
+            file_url = default_storage.url(saved_path)
+        except Exception:
+            logger.exception(
+                "Failed to store module material project=%s file=%s",
+                project_id,
+                original_filename,
+            )
+            if saved_path:
+                try:
+                    default_storage.delete(saved_path)
+                except Exception:
+                    logger.exception(
+                        "Failed to clean up incomplete module material %s",
+                        saved_path,
+                    )
+            return Response(
+                {
+                    "error": "The module material could not be stored. Please try again.",
+                    "code": "module_material_storage_failed",
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
-        # Create record
-        material = ModuleMaterial.objects.create(
-            project=project,
-            file_url=file_url,
-            original_filename=file_obj.name,
-            processing_status=ModuleMaterial.ProcessingStatus.PENDING
-        )
+        try:
+            material = ModuleMaterial.objects.create(
+                project=project,
+                file_url=file_url,
+                original_filename=original_filename[:255],
+                processing_status=ModuleMaterial.ProcessingStatus.PENDING,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to create module material record project=%s file=%s",
+                project_id,
+                original_filename,
+            )
+            try:
+                default_storage.delete(saved_path)
+            except Exception:
+                logger.exception(
+                    "Failed to clean up orphaned module material %s",
+                    saved_path,
+                )
+            return Response(
+                {
+                    "error": "The upload was stored but could not be registered. Please try again.",
+                    "code": "module_material_record_failed",
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
         # Trigger background task
         try:
             async_task('viva_evaluator.tasks.process_module_material_task', material.id)
-        except Exception as e:
-            # If Q cluster isn't running or something fails synchronously
-            pass
+        except Exception:
+            # The upload is valid even when the worker is temporarily offline.
+            # It remains pending and can be picked up/retried by a worker.
+            logger.exception(
+                "Failed to enqueue module material indexing material=%s",
+                material.id,
+            )
 
         return Response(
             ModuleMaterialSerializer(material).data,
