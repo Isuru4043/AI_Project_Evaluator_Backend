@@ -11,11 +11,11 @@ from django.db.models import Q
 from django.utils import timezone
 
 
-DEFAULT_RUBRIC = r'C:\Users\shami\Desktop\Test\Zero_Trust_Project_Evaluation_Rubric.pdf'
-DEFAULT_REPORT = r'C:\Users\shami\Desktop\Test\zerotrust.pdf'
+DEFAULT_RUBRIC = r'C:\Users\shami\Desktop\Test\rubics.pdf'
+DEFAULT_REPORT = r'C:\Users\shami\Desktop\Test\vivasense_test_report.pdf' 
 DEFAULT_EXAMINER = 'examiner@university.edu' 
 DEFAULT_STUDENTS = (
- 'student@university.edu',
+#  'student@university.edu',
     'Pavith@gmail.com',  
     'isuru.akalanka8058@gmail.com',
 )
@@ -49,7 +49,7 @@ class Command(BaseCommand):
         parser.add_argument('--panel-pin', default='1234')
         parser.add_argument('--start-in-minutes', type=int, default=1)
         parser.add_argument('--duration-minutes', type=int, default=60)
-        parser.add_argument('--max-questions', type=int, default=6)
+        parser.add_argument('--max-questions', type=int, default=3)
         parser.add_argument('--viva-weight', type=int, default=100)
         parser.add_argument('--academic-year', default=str(timezone.now().year))
         parser.add_argument(
