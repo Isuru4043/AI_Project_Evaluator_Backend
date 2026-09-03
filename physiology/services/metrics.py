@@ -41,8 +41,22 @@ IBI_MAX_MS = 1500
 # also remove the genuine variability being measured.
 ARTIFACT_TOLERANCE = 0.25
 
-# Below this many clean beats the numbers are noise dressed as data.
+# Below this many clean beats the numbers are noise dressed as data. This
+# governs the rolling 30 s analysis windows, which at any plausible rate hold
+# far more beats than this.
 MIN_BEATS = 20
+
+# The calm baseline is deliberately short: it is dead time in front of an
+# examiner, and asking a student to sit still for the best part of a minute
+# before their viva costs more than the precision it buys. A 10 s window holds
+# roughly 8 beats at a slow resting rate and about 16 at a fast one, so the
+# usability floor has to match the window rather than the 30 s one.
+#
+# This is ultra-short HRV. RMSSD from that few intervals is coarser than a
+# textbook recording, and it is used only as each student's own reference
+# point for their own later windows - never compared between people, and
+# never scored. The comparison stays valid; its resolution is lower.
+MIN_BASELINE_BEATS = 8
 
 # How far above baseline the rate must sit, in the student's own SDs.
 HR_Z_THRESHOLD = 1.0

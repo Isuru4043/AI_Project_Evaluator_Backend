@@ -39,6 +39,16 @@ logger = logging.getLogger(__name__)
 _EXECUTOR = ThreadPoolExecutor(max_workers=2)
 
 
+# Shown to the student on upload and to whoever tries to start the viva.
+# It has to say what to do next, because unlike a transient failure this one
+# never resolves itself by waiting.
+NO_CONTENT_MESSAGE = (
+    'No readable content was found in the uploaded report. The viva cannot '
+    'start without it. Upload a report containing the project write-up '
+    '(a scanned or image-only document may also produce no text).'
+)
+
+
 def enqueue_report_indexing(submission_id, report_bytes: bytes,
                             code_submission_id=None) -> None:
     """
@@ -105,14 +115,35 @@ def _run_report_indexing(submission_id, report_bytes: bytes,
             chunks = result.get('chunks', [])
             num_chunks, _ = save_index_for_submission(submission, chunks)
 
-            index_status.status = SubmissionIndexStatus.IndexStatus.READY
-            index_status.processed_at = timezone.now()
-            index_status.error_message = None
-            index_status.save(update_fields=['status', 'processed_at', 'error_message'])
-            logger.info(
-                'report indexing done submission=%s chunks=%d images_captioned=%d',
-                submission_id, num_chunks, result.get('images_captioned', 0),
-            )
+            # A report that yields no chunks has nothing in it to examine on.
+            # Chunking already discards fragments below MIN_CHUNK_SIZE, so
+            # zero chunks means the file carried no readable content at all -
+            # an empty document, or a scan whose images produced no captions
+            # either. Marking it READY let a viva start anyway: the questioner
+            # would fall back to broad rubric-shaped questions with nothing of
+            # the student's own in them, and the marks that came out would look
+            # exactly like marks earned on real work.
+            if num_chunks == 0:
+                index_status.status = SubmissionIndexStatus.IndexStatus.FAILED
+                index_status.error_message = NO_CONTENT_MESSAGE
+                index_status.processed_at = timezone.now()
+                index_status.save(update_fields=[
+                    'status', 'error_message', 'processed_at',
+                ])
+                logger.warning(
+                    'report indexing found no content submission=%s', submission_id,
+                )
+            else:
+                index_status.status = SubmissionIndexStatus.IndexStatus.READY
+                index_status.processed_at = timezone.now()
+                index_status.error_message = None
+                index_status.save(
+                    update_fields=['status', 'processed_at', 'error_message'],
+                )
+                logger.info(
+                    'report indexing done submission=%s chunks=%d images_captioned=%d',
+                    submission_id, num_chunks, result.get('images_captioned', 0),
+                )
         except Exception as exc:
             logger.exception('report indexing FAILED submission=%s', submission_id)
             index_status.status = SubmissionIndexStatus.IndexStatus.FAILED
